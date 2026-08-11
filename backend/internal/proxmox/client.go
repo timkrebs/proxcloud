@@ -106,6 +106,14 @@ type Client interface {
 
 	// ACL returns all access-control entries (handlers filter per path).
 	ACL(ctx context.Context) ([]types.ACLEntry, error)
+
+	// CreateVM / CreateLXC submit guest creation with pre-assembled PVE
+	// params (built by internal/deploy) and return the creation task.
+	CreateVM(ctx context.Context, node string, params map[string]any) (UPID, error)
+	CreateLXC(ctx context.Context, node string, params map[string]any) (UPID, error)
+
+	// CloneGuest clones src into newVMID (full or linked).
+	CloneGuest(ctx context.Context, src GuestRef, newVMID int, name, pool string, full bool, storage string) (UPID, error)
 }
 
 // GuestRef identifies one guest for node-scoped API calls.

@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
@@ -30,6 +31,7 @@ type Deps struct {
 	Log      *slog.Logger
 	Registry *tasks.Registry
 	Broker   *events.Broker
+	Deploy   *deploy.Engine
 }
 
 // Mount attaches every core REST route. It matches httpserver.Deps.Protected,
@@ -70,6 +72,9 @@ func (d *Deps) Mount(r chi.Router) {
 
 	r.Get("/notifications", d.ListNotifications)
 	r.Post("/notifications/read", d.MarkNotificationsRead)
+
+	r.Post("/guests", d.CreateGuest)
+	r.Get("/deployments/{id}", d.GetDeployment)
 }
 
 // Health probe tuning: a short deadline so /api/health stays snappy even

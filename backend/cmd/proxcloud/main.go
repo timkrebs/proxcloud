@@ -16,6 +16,7 @@ import (
 
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
+	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
@@ -59,7 +60,8 @@ func main() {
 
 	broker := events.NewBroker()
 	registry := tasks.NewRegistry()
-	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker}
+	engine := deploy.NewEngine(pve, registry, broker, log)
+	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine}
 
 	// Background loops: node-metrics poller (idle without SSE subscribers)
 	// and the tracked-task watcher. Both stop on shutdown via bgCtx.

@@ -57,6 +57,94 @@ export interface ClusterUsage {
 }
 
 //////////
+// source: create.go
+
+/**
+ * CreateSource selects where the new guest comes from.
+ */
+export interface CreateSource {
+  mode: string; // "iso" | "vztmpl" | "clone"
+  isoVolId?: string;
+  vztmplVolId?: string;
+  cloneVmid?: number /* int */;
+  cloneNode?: string;
+  cloneMode?: string; // "full" | "linked"
+}
+/**
+ * IPConfig is the optional cloud-init / lxc network address config.
+ */
+export interface IPConfig {
+  mode: string; // "dhcp" | "static"
+  cidr?: string; // 192.168.1.50/24
+  gateway?: string; // 192.168.1.1
+}
+/**
+ * CloudInitRequest carries the cloud-init (qemu) / provisioning (lxc)
+ * account settings.
+ */
+export interface CloudInitRequest {
+  user?: string; // qemu ciuser
+  password?: string; // qemu cipassword / lxc root password
+  sshKeys?: string[];
+  nameserver?: string;
+  searchDomain?: string;
+}
+/**
+ * CreateGuestRequest is the wizard's submit payload.
+ */
+export interface CreateGuestRequest {
+  type: string; // "qemu" | "lxc"
+  name: string; // qemu: DNS name; lxc: hostname
+  node: string;
+  vmid: number /* int */;
+  pool?: string;
+  source: CreateSource;
+  cores: number /* int */;
+  memoryMb: number /* int64 */;
+  diskGb: number /* int */;
+  storage: string;
+  bridge: string;
+  vlanTag?: number /* int */;
+  firewall: boolean;
+  ipConfig?: IPConfig;
+  cloudInit?: CloudInitRequest;
+  tags?: string[];
+  startAfterCreate: boolean;
+}
+/**
+ * CreateGuestResponse acknowledges an accepted deployment.
+ */
+export interface CreateGuestResponse {
+  deploymentId: string;
+  vmid: number /* int */;
+}
+/**
+ * DeploymentStep is one row of the deployment progress table.
+ */
+export interface DeploymentStep {
+  key: string; // create | start
+  label: string; // "Create virtual machine web-02"
+  status: string; // pending | running | succeeded | failed
+  upid?: string;
+  message?: string; // verbatim PVE error on failure
+  startedAt?: string /* RFC3339 */;
+  endedAt?: string /* RFC3339 */;
+}
+/**
+ * Deployment is a wizard-initiated provisioning run.
+ */
+export interface Deployment {
+  id: string;
+  name: string;
+  type: string; // qemu | lxc
+  node: string;
+  vmid: number /* int */;
+  status: string; // running | succeeded | failed
+  createdAt: string /* RFC3339 */;
+  steps: DeploymentStep[];
+}
+
+//////////
 // source: errors.go
 
 /**

@@ -44,6 +44,10 @@ type MockClient struct {
 	OnFirewallRules      func(ctx context.Context, ref pmx.GuestRef) (*types.GuestFirewall, error)
 	OnSetFirewallEnabled func(ctx context.Context, ref pmx.GuestRef, on bool) error
 	OnACL                func(ctx context.Context) ([]types.ACLEntry, error)
+
+	OnCreateVM   func(ctx context.Context, node string, params map[string]any) (pmx.UPID, error)
+	OnCreateLXC  func(ctx context.Context, node string, params map[string]any) (pmx.UPID, error)
+	OnCloneGuest func(ctx context.Context, src pmx.GuestRef, newVMID int, name, pool string, full bool, storage string) (pmx.UPID, error)
 }
 
 func (m *MockClient) GuestStatus(ctx context.Context, ref pmx.GuestRef) (*pmx.GuestStatusInfo, error) {
@@ -246,4 +250,25 @@ func (m *MockClient) ACL(ctx context.Context) ([]types.ACLEntry, error) {
 		panic(unstubbed("ACL"))
 	}
 	return m.OnACL(ctx)
+}
+
+func (m *MockClient) CreateVM(ctx context.Context, node string, params map[string]any) (pmx.UPID, error) {
+	if m.OnCreateVM == nil {
+		panic(unstubbed("CreateVM"))
+	}
+	return m.OnCreateVM(ctx, node, params)
+}
+
+func (m *MockClient) CreateLXC(ctx context.Context, node string, params map[string]any) (pmx.UPID, error) {
+	if m.OnCreateLXC == nil {
+		panic(unstubbed("CreateLXC"))
+	}
+	return m.OnCreateLXC(ctx, node, params)
+}
+
+func (m *MockClient) CloneGuest(ctx context.Context, src pmx.GuestRef, newVMID int, name, pool string, full bool, storage string) (pmx.UPID, error) {
+	if m.OnCloneGuest == nil {
+		panic(unstubbed("CloneGuest"))
+	}
+	return m.OnCloneGuest(ctx, src, newVMID, name, pool, full, storage)
 }
