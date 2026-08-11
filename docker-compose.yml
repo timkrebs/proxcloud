@@ -1,0 +1,37 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      target: dev
+    command: air
+    volumes:
+      - ./backend:/app
+    env_file: .env
+    environment:
+      # Container always binds :8080; host port configurable (BACKEND_PORT).
+      - LISTEN_ADDR=:8080
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    command: npm run dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - BACKEND_ORIGIN=http://backend:8080
+      - NEXT_PUBLIC_BACKEND_WS_ORIGIN=ws://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
