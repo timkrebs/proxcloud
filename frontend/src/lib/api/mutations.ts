@@ -27,10 +27,10 @@ export function useGuestAction() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ target, action }: { target: GuestTarget; action: GuestAction }) =>
-      apiFetch<TaskRef>(`/api/guests/${target.node}/${target.type}/${target.vmid}/${action}`, {
-        method: "POST",
-        body: "{}",
-      }),
+      apiFetch<TaskRef>(
+        `/api/guests/${encodeURIComponent(target.node)}/${target.type}/${target.vmid}/${action}`,
+        { method: "POST", body: "{}" },
+      ),
     onSuccess: (ref, { target }) => {
       pushToast({
         kind: "info",
@@ -53,10 +53,12 @@ export function useGuestAction() {
 export function useDeleteGuest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ target, purge }: { target: GuestTarget; purge: boolean }) =>
+    // The typed name travels to the server, which re-verifies it against
+    // the live guest — the confirmation is not just a UI gate.
+    mutationFn: ({ target, purge, confirmName }: { target: GuestTarget; purge: boolean; confirmName: string }) =>
       apiFetch<TaskRef>(
-        `/api/guests/${target.node}/${target.type}/${target.vmid}${purge ? "?purge=1" : ""}`,
-        { method: "DELETE" },
+        `/api/guests/${encodeURIComponent(target.node)}/${target.type}/${target.vmid}${purge ? "?purge=1" : ""}`,
+        { method: "DELETE", body: JSON.stringify({ confirmName }) },
       ),
     onSuccess: (_ref, { target }) => {
       pushToast({

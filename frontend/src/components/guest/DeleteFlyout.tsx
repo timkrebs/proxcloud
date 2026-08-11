@@ -61,7 +61,7 @@ export function DeleteFlyout({
           disabled={!match || running || del.isPending}
           onClick={() =>
             del.mutate(
-              { target: { ...guest, name }, purge: true },
+              { target: { ...guest, name }, purge: true, confirmName: text },
               {
                 onSuccess: () => {
                   onClose();

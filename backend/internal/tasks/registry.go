@@ -5,6 +5,7 @@
 package tasks
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -13,7 +14,16 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 )
 
-const notificationCap = 200
+const (
+	notificationCap = 200
+	completionCap   = 500
+)
+
+// Outcome is a finished task's result, delivered to AwaitCompletion.
+type Outcome struct {
+	Succeeded  bool
+	ExitStatus string
+}
 
 // Tracked is one Proxcloud-initiated task in flight.
 type Tracked struct {
@@ -26,16 +36,23 @@ type Tracked struct {
 
 // Registry is safe for concurrent use.
 type Registry struct {
-	mu      sync.RWMutex
-	running map[proxmox.UPID]*Tracked
-	notifs  []types.Notification // newest first
-	nextID  int
-	now     func() time.Time
+	mu        sync.RWMutex
+	running   map[proxmox.UPID]*Tracked
+	completed map[proxmox.UPID]Outcome
+	waiters   map[proxmox.UPID][]chan Outcome
+	notifs    []types.Notification // newest first
+	nextID    int
+	now       func() time.Time
 }
 
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
-	return &Registry{running: make(map[proxmox.UPID]*Tracked), now: time.Now}
+	return &Registry{
+		running:   make(map[proxmox.UPID]*Tracked),
+		completed: make(map[proxmox.UPID]Outcome),
+		waiters:   make(map[proxmox.UPID][]chan Outcome),
+		now:       time.Now,
+	}
 }
 
 // Track registers a just-submitted task and creates its running
@@ -76,6 +93,19 @@ func (r *Registry) Complete(upid proxmox.UPID, succeeded bool, exitStatus string
 		return nil
 	}
 	delete(r.running, upid)
+
+	// Record the outcome for AwaitCompletion (the deploy engine waits here
+	// instead of running its own PVE poll — the watcher is the single
+	// poller) and wake any waiters.
+	outcome := Outcome{Succeeded: succeeded, ExitStatus: exitStatus}
+	if len(r.completed) >= completionCap {
+		r.completed = make(map[proxmox.UPID]Outcome) // bounded memory; waiters were already served
+	}
+	r.completed[upid] = outcome
+	for _, ch := range r.waiters[upid] {
+		ch <- outcome
+	}
+	delete(r.waiters, upid)
 
 	for i := range r.notifs {
 		if r.notifs[i].ID != tr.notifID {
@@ -154,6 +184,27 @@ func (r *Registry) MarkRead(ids []string) {
 		if _, ok := set[r.notifs[i].ID]; ok {
 			r.notifs[i].Read = true
 		}
+	}
+}
+
+// AwaitCompletion blocks until the tracked task finishes (delivered by
+// Complete) or ctx is done. The completion record is consumed.
+func (r *Registry) AwaitCompletion(ctx context.Context, upid proxmox.UPID) (Outcome, error) {
+	r.mu.Lock()
+	if o, ok := r.completed[upid]; ok {
+		delete(r.completed, upid)
+		r.mu.Unlock()
+		return o, nil
+	}
+	ch := make(chan Outcome, 1)
+	r.waiters[upid] = append(r.waiters[upid], ch)
+	r.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return Outcome{}, ctx.Err()
+	case o := <-ch:
+		return o, nil
 	}
 }
 

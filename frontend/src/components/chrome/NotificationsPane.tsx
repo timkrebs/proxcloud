@@ -1,12 +1,12 @@
 "use client";
 // Notifications pane — design-inventory §3.13: 400px flyout titled
-// "Notifications". Item cards with kind icon (spinner / ok / err), optional
-// progress bar (.4s width transition), 11px timestamp; inline empty state;
-// footer with a compact secondary "Dismiss all".
+// "Notifications". Item cards with kind icon (spinner / ok / err), 11px
+// timestamp; inline empty state; footer with a compact secondary "Dismiss
+// all". No progress bars: the backend reports task state, not a percent,
+// and a fabricated percentage would violate the no-fake-progress rule.
 import { Mi, Spinner } from "@/components/ui/icons";
 import { Button } from "@/components/ui/Button";
 import { Flyout } from "@/components/ui/Flyout";
-import { ProgressBar } from "@/components/ui/ProgressBar";
 
 export type NotificationKind = "prog" | "ok" | "err";
 
@@ -16,8 +16,6 @@ export interface NotificationItem {
   desc: string;
   time: string;
   kind: NotificationKind;
-  /** 0–100; rendered as a progress bar when present (§4.10). */
-  prog?: number;
 }
 
 export interface NotificationsPaneProps {
@@ -27,11 +25,10 @@ export interface NotificationsPaneProps {
 }
 
 function NotificationIcon({ kind }: { kind: NotificationKind }) {
-  // §3.13 icons: prog → spinner; ok → checkC #107C10; err → warn #D13438
-  // (hexes allowed only inside icon color props).
+  // §3.13 icons: prog → spinner; ok → checkC; err → warn (token colors).
   if (kind === "prog") return <Spinner size={16} />;
-  if (kind === "ok") return <Mi name="checkC" size={16} color="#107C10" />;
-  return <Mi name="warn" size={16} color="#D13438" />;
+  if (kind === "ok") return <Mi name="checkC" size={16} color="var(--color-ok)" />;
+  return <Mi name="warn" size={16} color="var(--color-err)" />;
 }
 
 export function NotificationsPane({ items, onDismissAll, onClose }: NotificationsPaneProps) {
@@ -55,7 +52,6 @@ export function NotificationsPane({ items, onDismissAll, onClose }: Notification
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] font-semibold">{n.title}</div>
                 <div className="mt-[3px] text-[12px] leading-[1.45] text-ink-2">{n.desc}</div>
-                {n.prog !== undefined ? <ProgressBar pct={n.prog} transition className="mt-2" /> : null}
                 <div className="mt-[6px] text-[11px] text-ink-3">{n.time}</div>
               </div>
             </div>

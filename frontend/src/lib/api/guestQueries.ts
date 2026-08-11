@@ -21,7 +21,7 @@ export interface GuestParams {
   vmid: number;
 }
 
-const base = (g: GuestParams) => `/api/guests/${g.node}/${g.type}/${g.vmid}`;
+const base = (g: GuestParams) => `/api/guests/${encodeURIComponent(g.node)}/${g.type}/${g.vmid}`;
 export const guestKey = (g: GuestParams) => ["guest", g.node, g.type, g.vmid] as const;
 
 function errDesc(err: unknown): string {

@@ -23,4 +23,5 @@ export const qk = {
   taskLog: (upid: string) => ["task", upid, "log"] as const,
   notifications: ["notifications"] as const,
   liveMetrics: ["liveMetrics"] as const,
+  pricing: ["pricing"] as const,
 };

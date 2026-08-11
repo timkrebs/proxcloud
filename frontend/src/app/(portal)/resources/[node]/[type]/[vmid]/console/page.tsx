@@ -16,14 +16,22 @@ import type { ConsoleSession } from "@/lib/api/generated/types";
 import { useGuest, type GuestParams } from "@/lib/api/guestQueries";
 
 function wsUrl(sessionId: string): string {
-  const origin =
+  const secure = typeof window !== "undefined" && window.location.protocol === "https:";
+  let origin =
     process.env.NEXT_PUBLIC_BACKEND_WS_ORIGIN ??
-    (typeof window !== "undefined" ? `ws://${window.location.hostname}:8080` : "");
-  return `${origin}/api/console/ws/${sessionId}`;
+    (typeof window !== "undefined"
+      ? `${secure ? "wss" : "ws"}://${window.location.hostname}:8080`
+      : "");
+  // Never downgrade: an HTTPS page must not carry the console (and its
+  // one-shot credential) over cleartext ws://.
+  if (secure && origin.startsWith("ws://")) {
+    origin = "wss://" + origin.slice("ws://".length);
+  }
+  return `${origin}/api/console/ws/${encodeURIComponent(sessionId)}`;
 }
 
 async function openSession(g: GuestParams, kind: "vnc" | "term"): Promise<ConsoleSession> {
-  return apiFetch<ConsoleSession>(`/api/guests/${g.node}/${g.type}/${g.vmid}/console`, {
+  return apiFetch<ConsoleSession>(`/api/guests/${encodeURIComponent(g.node)}/${g.type}/${g.vmid}/console`, {
     method: "POST",
     body: JSON.stringify({ kind }),
   });
@@ -42,7 +50,7 @@ function VncConsole({ g }: { g: GuestParams }) {
     setError(null);
     try {
       const sess = await openSession(g, "vnc");
-      const { default: RFB } = await import("@novnc/novnc/core/rfb.js");
+      const { default: RFB } = await import("@novnc/novnc");
       if (!el.current) return;
       const rfb = new RFB(el.current, wsUrl(sess.sessionId), {
         credentials: { username: "", password: sess.password ?? "", target: "" },

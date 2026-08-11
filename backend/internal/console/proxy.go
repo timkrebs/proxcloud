@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,10 +27,24 @@ type Proxy struct {
 	Auth     *TicketAuth
 	Sessions *Sessions
 	Log      *slog.Logger
-	// AllowedOrigins guards against cross-site websocket hijacking; empty
-	// entries are ignored. localhost origins are always allowed in dev.
-	AllowedOrigins []string
+	// FrontendOrigin, when set, is the only Origin accepted (and an Origin
+	// header becomes mandatory); otherwise localhost origins are allowed
+	// for dev.
+	FrontendOrigin string
+	// VerifyCookie, when set, must accept the request's portal session —
+	// binds the one-shot console id to a signed-in browser wherever the
+	// backend is cookie-reachable (the default single-host setup).
+	VerifyCookie func(r *http.Request) bool
+
+	mu     sync.Mutex
+	active int
 }
+
+// maxBridges caps concurrent console bridges (memory/FD protection).
+const maxBridges = 8
+
+// wsReadLimit bounds a single websocket frame from either side.
+const wsReadLimit = 1 << 20
 
 func (p *Proxy) upgrader() *websocket.Upgrader {
 	return &websocket.Upgrader{
@@ -38,23 +53,20 @@ func (p *Proxy) upgrader() *websocket.Upgrader {
 		Subprotocols:    []string{"binary"},
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
+			if p.FrontendOrigin != "" {
+				// Configured deployment: exact match required, no
+				// header means no console.
+				return strings.EqualFold(origin, p.FrontendOrigin)
+			}
 			if origin == "" {
-				return true // non-browser clients (tests)
+				return true // dev: non-browser clients (tests)
 			}
 			u, err := url.Parse(origin)
 			if err != nil {
 				return false
 			}
 			host := u.Hostname()
-			if host == "localhost" || host == "127.0.0.1" {
-				return true
-			}
-			for _, allowed := range p.AllowedOrigins {
-				if allowed != "" && strings.EqualFold(origin, allowed) {
-					return true
-				}
-			}
-			return false
+			return host == "localhost" || host == "127.0.0.1"
 		},
 	}
 }
@@ -67,11 +79,29 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(r.URL.Path, "/")
 		id = parts[len(parts)-1]
 	}
+	if p.VerifyCookie != nil && !p.VerifyCookie(r) {
+		http.Error(w, "console requires a signed-in session", http.StatusUnauthorized)
+		return
+	}
 	sess, ok := p.Sessions.Claim(id)
 	if !ok {
 		http.Error(w, "unknown or expired console session", http.StatusNotFound)
 		return
 	}
+
+	p.mu.Lock()
+	if p.active >= maxBridges {
+		p.mu.Unlock()
+		http.Error(w, "too many concurrent console sessions", http.StatusServiceUnavailable)
+		return
+	}
+	p.active++
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.active--
+		p.mu.Unlock()
+	}()
 
 	// Dial PVE first so an upstream failure yields a clean HTTP error.
 	ticket, _, err := p.Auth.Ticket(r.Context())
@@ -108,6 +138,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer upstream.Close()
+	upstream.SetReadLimit(wsReadLimit)
 
 	client, err := p.upgrader().Upgrade(w, r, nil)
 	if err != nil {
@@ -115,6 +146,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer client.Close()
+	client.SetReadLimit(wsReadLimit)
 
 	// termproxy expects "user:ticket\n" as the first client message; the
 	// backend performs it so the PVE ticket never reaches the browser.

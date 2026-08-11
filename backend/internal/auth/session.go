@@ -18,9 +18,11 @@ import (
 const (
 	// CookieName is the session cookie the browser holds.
 	CookieName = "proxcloud_session"
-	// sessionTTL is a sliding window: every authenticated request within
-	// the window keeps the cookie usable; login re-issues it.
-	sessionTTL = 7 * 24 * time.Hour
+	// sessionTTL slides: RequireSession re-issues the cookie once it is
+	// past half its lifetime, so active users stay signed in and a stolen
+	// cookie dies within a day of inactivity. Stateless design: logout
+	// clears only the browser copy (documented limitation).
+	sessionTTL = 24 * time.Hour
 )
 
 type sessionPayload struct {
@@ -76,25 +78,45 @@ func (s *Sessions) Verify(r *http.Request) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("no session cookie")
 	}
-	body, sig, ok := strings.Cut(c.Value, ".")
+	user, _, err := s.verifyValue(c.Value)
+	return user, err
+}
+
+func (s *Sessions) verifyValue(value string) (user string, exp int64, err error) {
+	body, sig, ok := strings.Cut(value, ".")
 	if !ok {
-		return "", fmt.Errorf("malformed session cookie")
+		return "", 0, fmt.Errorf("malformed session cookie")
 	}
 	if !hmac.Equal([]byte(s.sign(body)), []byte(sig)) {
-		return "", fmt.Errorf("invalid session signature")
+		return "", 0, fmt.Errorf("invalid session signature")
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
-		return "", fmt.Errorf("malformed session payload")
+		return "", 0, fmt.Errorf("malformed session payload")
 	}
 	var p sessionPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", fmt.Errorf("malformed session payload")
+		return "", 0, fmt.Errorf("malformed session payload")
 	}
 	if s.now().Unix() >= p.Exp {
-		return "", fmt.Errorf("session expired")
+		return "", 0, fmt.Errorf("session expired")
 	}
-	return p.User, nil
+	return p.User, p.Exp, nil
+}
+
+// VerifyRefresh is Verify plus a signal that the cookie is past half its
+// lifetime and should be re-issued.
+func (s *Sessions) VerifyRefresh(r *http.Request) (user string, refresh bool, err error) {
+	c, err := r.Cookie(CookieName)
+	if err != nil {
+		return "", false, fmt.Errorf("no session cookie")
+	}
+	user, exp, err := s.verifyValue(c.Value)
+	if err != nil {
+		return "", false, err
+	}
+	refresh = time.Until(time.Unix(exp, 0)) < sessionTTL/2
+	return user, refresh, nil
 }
 
 func (s *Sessions) sign(body string) string {

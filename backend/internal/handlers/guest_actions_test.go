@@ -106,14 +106,17 @@ func TestDeleteGuest(t *testing.T) {
 	tests := []struct {
 		name        string
 		guestStatus string
+		body        string
 		wantStatus  int
 		wantCode    string
 		wantPurge   bool
 		target      string
 	}{
-		{"running guest rejected", "running", 409, "conflict", false, "/api/guests/pve01/qemu/101"},
-		{"stopped guest deleted with purge", "stopped", 202, "", true, "/api/guests/pve01/qemu/101?purge=1"},
-		{"stopped guest deleted without purge", "stopped", 202, "", false, "/api/guests/pve01/lxc/200"},
+		{"running guest rejected", "running", `{"confirmName":"victim"}`, 409, "conflict", false, "/api/guests/pve01/qemu/101"},
+		{"stopped guest deleted with purge", "stopped", `{"confirmName":"victim"}`, 202, "", true, "/api/guests/pve01/qemu/101?purge=1"},
+		{"stopped guest deleted without purge", "stopped", `{"confirmName":"victim"}`, 202, "", false, "/api/guests/pve01/lxc/200"},
+		{"wrong confirm name rejected", "stopped", `{"confirmName":"other"}`, 400, "invalid_request", false, "/api/guests/pve01/qemu/101?purge=1"},
+		{"missing body rejected", "stopped", ``, 400, "invalid_request", false, "/api/guests/pve01/qemu/101?purge=1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,7 +131,7 @@ func TestDeleteGuest(t *testing.T) {
 					return "UPID:pve01:0001:0002:0003:qmdestroy:101:root@pam:", nil
 				},
 			}
-			rec, _ := do(t, mock, http.MethodDelete, tt.target)
+			rec, _ := doBody(t, mock, http.MethodDelete, tt.target, tt.body)
 
 			if tt.wantCode != "" {
 				wantErrorEnvelope(t, rec, tt.wantStatus, tt.wantCode)

@@ -91,8 +91,10 @@ func (d *Deps) taskSummary(t proxmox.TaskInfo) types.TaskSummary {
 	if t.EndTime == 0 {
 		s.Status = "running"
 	} else {
-		end := time.Unix(t.EndTime, 0).UTC()
-		s.EndedAt = &end
+		if t.EndTime > 0 {
+			end := time.Unix(t.EndTime, 0).UTC()
+			s.EndedAt = &end
+		}
 		s.ExitStatus = t.ExitStatus
 		if strings.EqualFold(t.ExitStatus, "OK") || strings.HasPrefix(strings.ToLower(t.ExitStatus), "warnings:") {
 			s.Status = "succeeded"
@@ -192,7 +194,13 @@ func (d *Deps) GetTaskLog(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	start, _ := strconv.Atoi(q.Get("start"))
+	if start < 0 {
+		start = 0
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit < 1 || limit > 500 {
+		limit = 200
+	}
 
 	lines, total, err := d.PVE.TaskLog(r.Context(), upid, start, limit)
 	if err != nil {

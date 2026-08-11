@@ -49,10 +49,11 @@ func main() {
 		os.Exit(1)
 	}
 	authHandler := &auth.Handler{
-		Sessions:     auth.NewSessions(cfg.SessionSecret, !cfg.Dev),
+		Sessions:     auth.NewSessions(cfg.SessionSecret, !cfg.InsecureCookies),
 		AdminUser:    cfg.AdminUser,
 		PasswordHash: passwordHash,
 		Log:          log,
+		Limiter:      auth.NewLoginLimiter(),
 	}
 
 	pve, err := proxmox.New(cfg)
@@ -86,7 +87,16 @@ func main() {
 		api.ConsoleAuth = consoleAuth
 		api.ConsoleSessions = sessions
 		api.ConsoleUser = cfg.ConsoleUser
-		consoleWS = &console.Proxy{Auth: consoleAuth, Sessions: sessions, Log: log}
+		consoleWS = &console.Proxy{
+			Auth:           consoleAuth,
+			Sessions:       sessions,
+			Log:            log,
+			FrontendOrigin: cfg.FrontendOrigin,
+			VerifyCookie: func(r *http.Request) bool {
+				_, err := authHandler.Sessions.Verify(r)
+				return err == nil
+			},
+		}
 		log.Info("console enabled", "user", cfg.ConsoleUser)
 	} else {
 		log.Info("console disabled — set PROXMOX_CONSOLE_USER/PASSWORD to enable")

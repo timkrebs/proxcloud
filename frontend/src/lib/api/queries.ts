@@ -92,7 +92,7 @@ export function useTasks(filters: { running?: boolean; vmid?: number } = {}) {
 
 export function usePricing() {
   return useQuery({
-    queryKey: ["pricing"],
+    queryKey: qk.pricing,
     queryFn: () => apiFetch<Pricing>("/api/pricing"),
     staleTime: Infinity,
   });

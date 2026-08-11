@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -36,7 +37,11 @@ func guestRef(r *http.Request) (proxmox.GuestRef, *types.APIError) {
 	if err != nil || vmid < 1 {
 		return proxmox.GuestRef{}, &types.APIError{Code: "not_found", Message: "invalid VMID", Status: http.StatusNotFound}
 	}
-	return proxmox.GuestRef{Node: chi.URLParam(r, "node"), Type: typ, VMID: vmid}, nil
+	node := chi.URLParam(r, "node")
+	if !ValidPVEID(node) {
+		return proxmox.GuestRef{}, &types.APIError{Code: "not_found", Message: "invalid node name", Status: http.StatusNotFound}
+	}
+	return proxmox.GuestRef{Node: node, Type: typ, VMID: vmid}, nil
 }
 
 // GuestAction serves POST /api/guests/{node}/{type}/{vmid}/{action}.
@@ -71,19 +76,39 @@ func (d *Deps) GuestAction(w http.ResponseWriter, r *http.Request) {
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
 }
 
-// DeleteGuest serves DELETE /api/guests/{node}/{type}/{vmid}?purge=1.
-// A running guest is rejected with 409 — the UI's typed-name confirmation
-// only appears for stopped guests, and the API enforces the same rule.
+// DeleteGuest serves DELETE /api/guests/{node}/{type}/{vmid}?purge=1 with
+// a JSON body {"confirmName": "<guest name>"}. The typed-name confirmation
+// is enforced HERE, not just in the flyout: a CSRF slip, stolen cookie, or
+// mis-scripted client cannot wipe a guest without naming it.
 func (d *Deps) DeleteGuest(w http.ResponseWriter, r *http.Request) {
 	ref, apiErr := guestRef(r)
 	if apiErr != nil {
 		httpserver.WriteError(w, apiErr)
 		return
 	}
+	var body struct {
+		ConfirmName string `json:"confirmName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ConfirmName == "" {
+		httpserver.WriteError(w, &types.APIError{
+			Code:    "invalid_request",
+			Message: "Deletion requires a JSON body with confirmName matching the guest's name.",
+			Status:  http.StatusBadRequest,
+		})
+		return
+	}
 
 	st, err := d.PVE.GuestStatus(r.Context(), ref)
 	if err != nil {
 		httpserver.WriteError(w, err)
+		return
+	}
+	if body.ConfirmName != st.Name {
+		httpserver.WriteError(w, &types.APIError{
+			Code:    "invalid_request",
+			Message: "Confirmation name does not match the guest's name.",
+			Status:  http.StatusBadRequest,
+		})
 		return
 	}
 	if st.Status == "running" {

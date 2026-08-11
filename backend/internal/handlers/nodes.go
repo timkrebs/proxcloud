@@ -90,6 +90,10 @@ func offlineNodeRow(name string) types.NodeSummary {
 // GetNode serves GET /api/nodes/{node}: live detail for one node.
 func (d *Deps) GetNode(w http.ResponseWriter, r *http.Request) {
 	node := chi.URLParam(r, "node")
+	if !ValidPVEID(node) {
+		httpserver.WriteError(w, &types.APIError{Code: "not_found", Message: "invalid node name", Status: http.StatusNotFound})
+		return
+	}
 	st, err := d.PVE.NodeStatus(r.Context(), node)
 	if err != nil {
 		httpserver.WriteError(w, err)
@@ -121,6 +125,10 @@ func (d *Deps) GetNode(w http.ResponseWriter, r *http.Request) {
 // samples instead of fabricating zeros.
 func (d *Deps) GetNodeMetrics(w http.ResponseWriter, r *http.Request) {
 	node := chi.URLParam(r, "node")
+	if !ValidPVEID(node) {
+		httpserver.WriteError(w, &types.APIError{Code: "not_found", Message: "invalid node name", Status: http.StatusNotFound})
+		return
+	}
 	timeframe := r.URL.Query().Get("timeframe")
 	if timeframe == "" {
 		timeframe = "hour"
@@ -135,7 +143,12 @@ func (d *Deps) GetNodeMetrics(w http.ResponseWriter, r *http.Request) {
 
 // GetNodeBridges serves GET /api/nodes/{node}/bridges.
 func (d *Deps) GetNodeBridges(w http.ResponseWriter, r *http.Request) {
-	bridges, err := d.PVE.NodeBridges(r.Context(), chi.URLParam(r, "node"))
+	node := chi.URLParam(r, "node")
+	if !ValidPVEID(node) {
+		httpserver.WriteError(w, &types.APIError{Code: "not_found", Message: "invalid node name", Status: http.StatusNotFound})
+		return
+	}
+	bridges, err := d.PVE.NodeBridges(r.Context(), node)
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return
@@ -148,7 +161,12 @@ func (d *Deps) GetNodeBridges(w http.ResponseWriter, r *http.Request) {
 
 // GetNodeStorages serves GET /api/nodes/{node}/storages?content=...
 func (d *Deps) GetNodeStorages(w http.ResponseWriter, r *http.Request) {
-	storages, err := d.PVE.NodeStorages(r.Context(), chi.URLParam(r, "node"), r.URL.Query().Get("content"))
+	node := chi.URLParam(r, "node")
+	if !ValidPVEID(node) {
+		httpserver.WriteError(w, &types.APIError{Code: "not_found", Message: "invalid node name", Status: http.StatusNotFound})
+		return
+	}
+	storages, err := d.PVE.NodeStorages(r.Context(), node, r.URL.Query().Get("content"))
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return
@@ -162,8 +180,14 @@ func (d *Deps) GetNodeStorages(w http.ResponseWriter, r *http.Request) {
 // GetStorageContent serves
 // GET /api/nodes/{node}/storages/{storage}/content?content=iso|vztmpl.
 func (d *Deps) GetStorageContent(w http.ResponseWriter, r *http.Request) {
+	node := chi.URLParam(r, "node")
+	storage := chi.URLParam(r, "storage")
+	if !ValidPVEID(node) || !ValidPVEID(storage) {
+		httpserver.WriteError(w, &types.APIError{Code: "not_found", Message: "invalid node or storage name", Status: http.StatusNotFound})
+		return
+	}
 	items, err := d.PVE.StorageContent(r.Context(),
-		chi.URLParam(r, "node"), chi.URLParam(r, "storage"), r.URL.Query().Get("content"))
+		node, storage, r.URL.Query().Get("content"))
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return

@@ -144,3 +144,23 @@ make gen-types  # regenerate frontend/src/lib/api/generated/types.ts from Go
 - Deployment progress is in-memory: after a backend restart the progress
   page 404s with a pointer to the activity log — task truth stays in Proxmox.
 - ADRs: `docs/adr/`.
+
+## Security notes
+
+- Session cookies are `Secure` + `HttpOnly` + `SameSite=Lax` by default
+  (browsers accept Secure cookies on `http://localhost`); a 24 h sliding
+  window re-issues them on activity. `PROXCLOUD_INSECURE_COOKIES=true` is a
+  dev-only opt-out and refuses to start when `PROXCLOUD_ENV=production`.
+- Login is rate-limited (5/min per IP) with bounded concurrent bcrypt work.
+- Deleting a guest requires the typed name in the request body — the server
+  re-verifies it against the live guest, so the confirmation is not just UI.
+- State-changing requests reject mismatched `Origin`/`Referer` headers; set
+  `FRONTEND_ORIGIN` for any non-localhost deployment (it also becomes the
+  only origin the console websocket accepts).
+- The console websocket additionally requires a signed-in portal session
+  wherever the backend is cookie-reachable, and one-shot ids are redacted
+  from access logs.
+- Deploy for real use behind TLS (reverse proxy or tunnel). `npm audit`
+  currently reports transitive advisories in Next 15.5's pinned postcss/
+  sharp; neither is reachable from user input here — tracked for the next
+  Next.js bump.

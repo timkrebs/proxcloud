@@ -1,6 +1,8 @@
 "use client";
 // The seven wizard tab bodies — design §3.3 frame with real Proxmox data
 // sources in every dropdown.
+import { useEffect } from "react";
+
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
 import { FormRow, SectionHeading } from "@/components/wizard/fields";
 import { Input } from "@/components/ui/Input";
@@ -31,13 +33,18 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
   const nextId = useNextId();
   const kindLabel = s.kind === "qemu" ? "virtual machine" : "container";
 
-  // Auto-fill node (single-node cluster) and next free VMID once.
-  if (s.node === "" && (nodes.data ?? []).length > 0) {
-    s.set({ node: nodes.data![0].node });
-  }
-  if (s.vmid === "" && nextId.data) {
-    s.set({ vmid: String(nextId.data.vmid) });
-  }
+  // Auto-fill node (single-node cluster) and next free VMID once the data
+  // arrives — in an effect, never during render.
+  const set = s.set;
+  useEffect(() => {
+    const st = useWizardStore.getState();
+    if (st.node === "" && (nodes.data ?? []).length > 0) {
+      set({ node: nodes.data![0].node });
+    }
+    if (st.vmid === "" && nextId.data) {
+      set({ vmid: String(nextId.data.vmid) });
+    }
+  }, [nodes.data, nextId.data, set]);
 
   return (
     <div>

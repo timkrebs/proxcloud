@@ -1,0 +1,9 @@
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+node_modules
+.next
+backend/tmp
+backend/bin

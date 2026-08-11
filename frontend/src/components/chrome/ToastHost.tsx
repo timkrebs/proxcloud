@@ -15,9 +15,9 @@ const ACCENT_VAR: Record<ToastKind, string> = {
 
 // Icon hexes are allowed inside icon color props (SVG stroke).
 const ICON: Record<ToastKind, { name: MiName; color: string }> = {
-  ok: { name: "checkC", color: "#107C10" },
-  info: { name: "info", color: "#0078D4" },
-  err: { name: "warn", color: "#D13438" },
+  ok: { name: "checkC", color: "var(--color-ok)" },
+  info: { name: "info", color: "var(--color-accent)" },
+  err: { name: "warn", color: "var(--color-err)" },
 };
 
 export function ToastHost() {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +16,8 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
 
-const taskPollInterval = 2 * time.Second
+// stepTimeout bounds one deployment step (large full clones can be slow).
+const stepTimeout = 30 * time.Minute
 
 // Engine executes deployments: create/clone (+ optional start) with live
 // per-step progress. Deployments are kept in memory — the guest itself and
@@ -147,30 +148,26 @@ func (e *Engine) run(id string, req *types.CreateGuestRequest) {
 	e.finish(id, "succeeded")
 }
 
-// awaitTask polls one task to completion; returns false when it failed.
+// awaitTask waits for the tracked task to finish. The tasks.Watcher is
+// the single PVE poller — its Complete() call delivers the outcome here,
+// so the deployment page, the notification bell, and this engine all see
+// the same result without double-polling Proxmox.
 func (e *Engine) awaitTask(id, step string, upid proxmox.UPID) bool {
-	for {
-		time.Sleep(taskPollInterval)
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		info, err := e.PVE.TaskStatus(sctx, upid)
-		cancel()
-		if err != nil {
-			e.Log.Warn("deployment task poll", "upid", upid, "err", err)
-			continue // transient; keep polling
-		}
-		if info.EndTime == 0 {
-			continue
-		}
-		ok := strings.EqualFold(info.ExitStatus, "OK") ||
-			strings.HasPrefix(strings.ToLower(info.ExitStatus), "warnings:")
-		if ok {
-			e.updateStep(id, step, "succeeded", string(upid), "")
-			return true
-		}
-		e.updateStep(id, step, "failed", string(upid), info.ExitStatus)
+	ctx, cancel := context.WithTimeout(context.Background(), stepTimeout)
+	defer cancel()
+	outcome, err := e.Registry.AwaitCompletion(ctx, upid)
+	if err != nil {
+		e.updateStep(id, step, "failed", string(upid), "timed out waiting for the Proxmox task")
 		e.finish(id, "failed")
 		return false
 	}
+	if outcome.Succeeded {
+		e.updateStep(id, step, "succeeded", string(upid), "")
+		return true
+	}
+	e.updateStep(id, step, "failed", string(upid), outcome.ExitStatus)
+	e.finish(id, "failed")
+	return false
 }
 
 func (e *Engine) stepLabel(id, key string) string {
@@ -186,7 +183,8 @@ func (e *Engine) stepLabel(id, key string) string {
 
 func (e *Engine) failStep(id, key string, err error) {
 	msg := err.Error()
-	if apiErr, ok := err.(*types.APIError); ok {
+	var apiErr *types.APIError
+	if errors.As(err, &apiErr) {
 		msg = apiErr.Message
 		if apiErr.PVEMessage != "" {
 			msg = apiErr.PVEMessage

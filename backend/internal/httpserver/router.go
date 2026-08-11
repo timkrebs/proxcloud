@@ -5,6 +5,7 @@ package httpserver
 import (
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -49,6 +50,7 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
+	r.Use(originCheck(d.Cfg))
 	r.Use(timeoutExcept(15*time.Second, "/api/events", "/api/console/ws/"))
 
 	r.Route("/api", func(r chi.Router) {
@@ -84,6 +86,47 @@ func New(d Deps) http.Handler {
 	return r
 }
 
+// originCheck rejects state-changing requests whose Origin (or, absent
+// that, Referer) does not match the frontend. Browsers always attach
+// Origin to cross-origin fetch/form POSTs, so this blocks CSRF even if a
+// SameSite regression slips in; header-less non-browser clients (curl)
+// pass through — they already need the session cookie.
+func originCheck(cfg *config.Config) func(http.Handler) http.Handler {
+	allowed := func(value string) bool {
+		u, err := url.Parse(value)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		origin := u.Scheme + "://" + u.Host
+		if cfg != nil && cfg.FrontendOrigin != "" {
+			return strings.EqualFold(origin, cfg.FrontendOrigin)
+		}
+		host := u.Hostname()
+		return host == "localhost" || host == "127.0.0.1"
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+			check := r.Header.Get("Origin")
+			if check == "" {
+				check = r.Header.Get("Referer")
+			}
+			if check != "" && !allowed(check) {
+				WriteError(w, &types.APIError{
+					Code:    "forbidden",
+					Message: "Cross-origin request rejected.",
+					Status:  http.StatusForbidden,
+				})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // timeoutExcept applies the standard request timeout to every route except
 // the exempt paths (streaming endpoints that must outlive the deadline).
 func timeoutExcept(d time.Duration, exempt ...string) func(http.Handler) http.Handler {
@@ -109,9 +152,13 @@ func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
+			path := r.URL.Path
+			if strings.HasPrefix(path, "/api/console/ws/") {
+				path = "/api/console/ws/[redacted]" // the id is a one-shot credential
+			}
 			log.Info("http",
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", path,
 				"status", ww.Status(),
 				"bytes", ww.BytesWritten(),
 				"dur_ms", time.Since(start).Milliseconds(),

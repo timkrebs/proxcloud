@@ -166,7 +166,9 @@ func (g *GoPVE) TaskStatus(ctx context.Context, upid UPID) (*TaskInfo, error) {
 		info.EndTime = 0
 		info.ExitStatus = ""
 	} else if info.EndTime == 0 {
-		info.EndTime = info.StartTime
+		// Finished but PVE omitted the timestamp: -1 means "finished, time
+		// unknown" — never a fabricated timestamp (EndTime>0 ⇔ real time).
+		info.EndTime = -1
 	}
 	return &info, nil
 }

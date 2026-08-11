@@ -19,7 +19,20 @@ var (
 	tagRe  = regexp.MustCompile(`^[a-z0-9_][a-z0-9_.-]*$`)
 	cidrRe = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$`)
 	ipRe   = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}$`)
+
+	// pveIDRe guards identifiers spliced into PVE URLs and composite
+	// config values (node, storage, bridge, pool): no commas, equals,
+	// slashes, or dot segments can sneak extra options into a parameter.
+	pveIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// volIDRe matches "storage:path/to/volume" content volume ids.
+	volIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	// hostnameRe for nameserver/searchdomain values.
+	hostnameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.:-]{0,253}$`)
 )
+
+func validPVEID(s string) bool {
+	return s != "." && s != ".." && pveIDRe.MatchString(s)
+}
 
 // Validate checks the request before anything touches Proxmox; the wizard
 // mirrors these rules client-side.
@@ -32,8 +45,8 @@ func Validate(req *types.CreateGuestRequest) error {
 	if !nameRe.MatchString(req.Name) {
 		return fail("name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens (max 40)")
 	}
-	if req.Node == "" {
-		return fail("node is required")
+	if !validPVEID(req.Node) {
+		return fail("node must be a valid PVE node name")
 	}
 	if req.VMID < 100 || req.VMID > 999999999 {
 		return fail("vmid must be between 100 and 999999999")
@@ -53,12 +66,18 @@ func Validate(req *types.CreateGuestRequest) error {
 		if req.Source.VztmplVolID == "" {
 			return fail("template volume is required")
 		}
+		if !volIDRe.MatchString(req.Source.VztmplVolID) {
+			return fail("template volume id has an invalid format")
+		}
 	case "iso":
 		if req.Type != "qemu" {
 			return fail("iso source is only valid for qemu")
 		}
 		if req.Source.ISOVolID == "" {
 			return fail("ISO volume is required")
+		}
+		if !volIDRe.MatchString(req.Source.ISOVolID) {
+			return fail("ISO volume id has an invalid format")
 		}
 	case "clone":
 		if req.Type != "qemu" {
@@ -78,12 +97,17 @@ func Validate(req *types.CreateGuestRequest) error {
 		if req.DiskGB < 1 {
 			return fail("disk size must be at least 1 GiB")
 		}
-		if req.Storage == "" {
-			return fail("storage is required")
+		if !validPVEID(req.Storage) {
+			return fail("storage must be a valid PVE storage name")
 		}
+		if !validPVEID(req.Bridge) {
+			return fail("bridge must be a valid interface name")
+		}
+	} else if req.Storage != "" && !validPVEID(req.Storage) {
+		return fail("storage must be a valid PVE storage name")
 	}
-	if req.Bridge == "" && req.Source.Mode != "clone" {
-		return fail("bridge is required")
+	if req.Pool != "" && !validPVEID(req.Pool) {
+		return fail("pool must be a valid PVE pool name")
 	}
 	if req.VLANTag < 0 || req.VLANTag > 4094 {
 		return fail("vlan tag must be between 1 and 4094")
@@ -99,6 +123,14 @@ func Validate(req *types.CreateGuestRequest) error {
 	for _, t := range req.Tags {
 		if !tagRe.MatchString(t) {
 			return fail("invalid tag %q — lowercase letters, digits, . - _ only", t)
+		}
+	}
+	if ci := req.CloudInit; ci != nil {
+		if ci.Nameserver != "" && !hostnameRe.MatchString(ci.Nameserver) {
+			return fail("nameserver has an invalid format")
+		}
+		if ci.SearchDomain != "" && !hostnameRe.MatchString(ci.SearchDomain) {
+			return fail("search domain has an invalid format")
 		}
 	}
 	return nil

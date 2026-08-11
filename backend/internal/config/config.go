@@ -37,6 +37,14 @@ type Config struct {
 	PricingRAMGBMonth  float64
 	PricingDiskGBMonth float64
 
+	// FrontendOrigin, when set, is enforced as the only allowed Origin on
+	// state-changing requests and the console websocket.
+	FrontendOrigin string
+
+	// InsecureCookies drops the cookie Secure attribute — explicit dev-only
+	// opt-out (modern browsers accept Secure cookies on http://localhost).
+	InsecureCookies bool
+
 	ListenAddr string
 	Dev        bool
 }
@@ -55,6 +63,8 @@ func Load() (*Config, error) {
 		AdminPasswordHash:  os.Getenv("ADMIN_PASSWORD_HASH"),
 		AdminPassword:      os.Getenv("ADMIN_PASSWORD"),
 		PricingCurrency:    os.Getenv("PRICING_CURRENCY"),
+		FrontendOrigin:     strings.TrimRight(os.Getenv("FRONTEND_ORIGIN"), "/"),
+		InsecureCookies:    os.Getenv("PROXCLOUD_INSECURE_COOKIES") == "true",
 		ListenAddr:         envOr("LISTEN_ADDR", ":8080"),
 		Dev:                os.Getenv("PROXCLOUD_ENV") != "production",
 	}
@@ -81,6 +91,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.AdminPasswordHash == "" && cfg.AdminPassword == "" {
 		problems = append(problems, "ADMIN_PASSWORD_HASH (bcrypt) or ADMIN_PASSWORD is required")
+	}
+	if cfg.InsecureCookies && !cfg.Dev {
+		problems = append(problems, "PROXCLOUD_INSECURE_COOKIES must not be set in production")
 	}
 	if (cfg.ConsoleUser == "") != (cfg.ConsolePassword == "") {
 		problems = append(problems, "PROXMOX_CONSOLE_USER and PROXMOX_CONSOLE_PASSWORD must be set together")
