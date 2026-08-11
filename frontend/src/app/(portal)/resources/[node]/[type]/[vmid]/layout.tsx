@@ -4,7 +4,7 @@
 // Delete flyout (§3.14) and resource-JSON flyout (§3.15) mount here.
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
 import { DeleteFlyout } from "@/components/guest/DeleteFlyout";
@@ -27,6 +27,7 @@ const MENU: { title?: string; items: MenuItem[] }[] = [
   {
     items: [
       { label: "Overview", icon: "grid", seg: "" },
+      { label: "Console", icon: "console", seg: "console" },
       { label: "Activity log", icon: "clock", seg: "activity" },
       { label: "Access control (IAM)", icon: "person", seg: "access" },
       { label: "Tags", icon: "tag", seg: "tags" },
@@ -50,6 +51,7 @@ const MENU: { title?: string; items: MenuItem[] }[] = [
 export default function GuestBladeLayout({ children }: { children: React.ReactNode }) {
   const g = useGuestParams();
   const pathname = usePathname();
+  const router = useRouter();
   const guest = useGuest(g);
   const action = useGuestAction();
   const [flyout, setFlyout] = useState<null | "delete" | "json">(null);
@@ -73,7 +75,7 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
 
   const commands = useMemo(
     () => [
-      { label: "Connect", icon: <Mi name="console" size={14} />, enabled: false, title: "Console arrives with the console milestone", onClick: () => {}, sep: false },
+      { label: "Connect", icon: <Mi name="console" size={14} />, enabled: bar.connect, onClick: () => router.push(`${basePath}/console`), sep: false },
       { label: "Start", icon: <Fi name="play" size={13} color="currentColor" />, enabled: bar.start, onClick: () => run("start"), sep: true },
       { label: "Restart", icon: <Mi name="restart" size={14} />, enabled: bar.restart, onClick: () => run("reboot"), sep: false },
       { label: "Stop", icon: <Fi name="stop" size={13} color="currentColor" />, enabled: bar.stop, onClick: () => run("stop"), sep: false },
@@ -81,7 +83,7 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
       { label: "Refresh", icon: <Mi name="restart" size={14} />, enabled: true, onClick: () => guest.refetch(), sep: true },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bar.start, bar.restart, bar.stop, bar.delete, name],
+    [bar.connect, bar.start, bar.restart, bar.stop, bar.delete, name],
   );
 
   const menuGroups = MENU.map((grp) => ({
@@ -117,7 +119,7 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
               <button
                 type="button"
                 disabled={!c.enabled}
-                title={"title" in c && c.title ? c.title : c.label}
+                title={c.label}
                 onClick={c.onClick}
                 className={`flex h-9 items-center gap-[6px] border-none bg-transparent px-[10px] text-[13px] ${
                   c.enabled ? "cursor-pointer text-ink hover:bg-hover" : "cursor-default text-ink-3"

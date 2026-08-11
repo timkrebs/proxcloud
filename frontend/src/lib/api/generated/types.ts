@@ -57,6 +57,20 @@ export interface ClusterUsage {
 }
 
 //////////
+// source: console.go
+
+/**
+ * ConsoleSession is the answer to POST .../console: a one-shot session id
+ * for the backend websocket bridge, plus the one-time VNC password (vnc
+ * only) noVNC uses for the RFB handshake.
+ */
+export interface ConsoleSession {
+  sessionId: string;
+  kind: string; // vnc | term
+  password?: string;
+}
+
+//////////
 // source: create.go
 
 /**

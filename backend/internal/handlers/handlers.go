@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
@@ -32,6 +33,11 @@ type Deps struct {
 	Registry *tasks.Registry
 	Broker   *events.Broker
 	Deploy   *deploy.Engine
+
+	// Console — nil when PROXMOX_CONSOLE_USER/PASSWORD are unset.
+	ConsoleAuth     *console.TicketAuth
+	ConsoleSessions *console.Sessions
+	ConsoleUser     string
 }
 
 // Mount attaches every core REST route. It matches httpserver.Deps.Protected,
@@ -73,6 +79,7 @@ func (d *Deps) Mount(r chi.Router) {
 	r.Get("/notifications", d.ListNotifications)
 	r.Post("/notifications/read", d.MarkNotificationsRead)
 
+	r.Post("/guests/{node}/{type}/{vmid}/console", d.OpenConsole)
 	r.Post("/guests", d.CreateGuest)
 	r.Get("/deployments/{id}", d.GetDeployment)
 }

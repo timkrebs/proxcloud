@@ -16,6 +16,7 @@ import (
 
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
+	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
@@ -63,6 +64,19 @@ func main() {
 	engine := deploy.NewEngine(pve, registry, broker, log)
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine}
 
+	// Console: optional credential path (PVE websockets reject API tokens).
+	var consoleWS http.Handler
+	if consoleAuth := console.NewTicketAuth(cfg); consoleAuth != nil {
+		sessions := console.NewSessions()
+		api.ConsoleAuth = consoleAuth
+		api.ConsoleSessions = sessions
+		api.ConsoleUser = cfg.ConsoleUser
+		consoleWS = &console.Proxy{Auth: consoleAuth, Sessions: sessions, Log: log}
+		log.Info("console enabled", "user", cfg.ConsoleUser)
+	} else {
+		log.Info("console disabled — set PROXMOX_CONSOLE_USER/PASSWORD to enable")
+	}
+
 	// Background loops: node-metrics poller (idle without SSE subscribers)
 	// and the tracked-task watcher. Both stop on shutdown via bgCtx.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
@@ -78,6 +92,7 @@ func main() {
 			Auth:      authHandler,
 			Health:    api.Health(),
 			Events:    events.Handler(broker, log),
+			ConsoleWS: consoleWS,
 			Protected: api.Mount,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,

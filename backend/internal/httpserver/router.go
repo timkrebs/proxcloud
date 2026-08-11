@@ -5,6 +5,7 @@ package httpserver
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -31,6 +32,12 @@ type Deps struct {
 	// the 15s deadline.
 	Events http.HandlerFunc
 
+	// ConsoleWS, when set, serves GET /api/console/ws/{sessionId}. It is
+	// authenticated by the one-shot unguessable session id (single use,
+	// 25s TTL) instead of the cookie: the browser connects to the backend
+	// origin directly because Next rewrites cannot proxy websockets.
+	ConsoleWS http.Handler
+
 	// Protected mounts additional authenticated routes; set per milestone.
 	Protected func(r chi.Router)
 }
@@ -42,7 +49,7 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
-	r.Use(timeoutExcept(15*time.Second, "/api/events"))
+	r.Use(timeoutExcept(15*time.Second, "/api/events", "/api/console/ws/"))
 
 	r.Route("/api", func(r chi.Router) {
 		health := d.Health
@@ -56,6 +63,10 @@ func New(d Deps) http.Handler {
 		r.Post("/auth/login", d.Auth.Login)
 		r.Post("/auth/logout", d.Auth.Logout)
 		r.Get("/auth/me", d.Auth.Me)
+
+		if d.ConsoleWS != nil {
+			r.Get("/console/ws/{sessionId}", d.ConsoleWS.ServeHTTP)
+		}
 
 		if d.Protected != nil || d.Events != nil {
 			r.Group(func(r chi.Router) {
@@ -81,7 +92,7 @@ func timeoutExcept(d time.Duration, exempt ...string) func(http.Handler) http.Ha
 		timed := timeout(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			for _, p := range exempt {
-				if r.URL.Path == p {
+				if r.URL.Path == p || (strings.HasSuffix(p, "/") && strings.HasPrefix(r.URL.Path, p)) {
 					next.ServeHTTP(w, r)
 					return
 				}
