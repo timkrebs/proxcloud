@@ -3,7 +3,6 @@
 // Every number comes from the API; loading renders pulse skeletons matching
 // the final layout, failures render the real error (incl. verbatim PVE text).
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 
 import { Card } from "@/components/ui/Card";
 import { ProgressBar } from "@/components/ui/ProgressBar";
