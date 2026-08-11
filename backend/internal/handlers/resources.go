@@ -54,7 +54,16 @@ func (d *Deps) ListResources(w http.ResponseWriter, r *http.Request) {
 			!strings.Contains(strconv.Itoa(row.VMID), search) {
 			continue
 		}
-		out = append(out, guestSummary(row))
+		g := guestSummary(row)
+		// Overlay the transitional status while a Proxcloud-initiated task
+		// (start/stop/delete/...) is still running against this guest.
+		if d.Registry != nil {
+			if transitional, upid, ok := d.Registry.ActiveFor(g.VMID); ok {
+				g.Status = transitional
+				g.PendingTaskUPID = upid
+			}
+		}
+		out = append(out, g)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].VMID != out[j].VMID {

@@ -25,6 +25,54 @@ type MockClient struct {
 	OnNodeBridges      func(ctx context.Context, node string) ([]types.Bridge, error)
 	OnNodeStorages     func(ctx context.Context, node, content string) ([]types.NodeStorage, error)
 	OnStorageContent   func(ctx context.Context, node, storage, content string) ([]types.StorageContentItem, error)
+	OnGuestStatus      func(ctx context.Context, ref pmx.GuestRef) (*pmx.GuestStatusInfo, error)
+	OnGuestAction      func(ctx context.Context, ref pmx.GuestRef, action string) (pmx.UPID, error)
+	OnDeleteGuest      func(ctx context.Context, ref pmx.GuestRef, purge bool) (pmx.UPID, error)
+	OnClusterTasks     func(ctx context.Context) ([]pmx.TaskInfo, error)
+	OnTaskStatus       func(ctx context.Context, upid pmx.UPID) (*pmx.TaskInfo, error)
+	OnTaskLog          func(ctx context.Context, upid pmx.UPID, start, limit int) ([]types.TaskLogLine, int, error)
+}
+
+func (m *MockClient) GuestStatus(ctx context.Context, ref pmx.GuestRef) (*pmx.GuestStatusInfo, error) {
+	if m.OnGuestStatus == nil {
+		panic(unstubbed("GuestStatus"))
+	}
+	return m.OnGuestStatus(ctx, ref)
+}
+
+func (m *MockClient) GuestAction(ctx context.Context, ref pmx.GuestRef, action string) (pmx.UPID, error) {
+	if m.OnGuestAction == nil {
+		panic(unstubbed("GuestAction"))
+	}
+	return m.OnGuestAction(ctx, ref, action)
+}
+
+func (m *MockClient) DeleteGuest(ctx context.Context, ref pmx.GuestRef, purge bool) (pmx.UPID, error) {
+	if m.OnDeleteGuest == nil {
+		panic(unstubbed("DeleteGuest"))
+	}
+	return m.OnDeleteGuest(ctx, ref, purge)
+}
+
+func (m *MockClient) ClusterTasks(ctx context.Context) ([]pmx.TaskInfo, error) {
+	if m.OnClusterTasks == nil {
+		panic(unstubbed("ClusterTasks"))
+	}
+	return m.OnClusterTasks(ctx)
+}
+
+func (m *MockClient) TaskStatus(ctx context.Context, upid pmx.UPID) (*pmx.TaskInfo, error) {
+	if m.OnTaskStatus == nil {
+		panic(unstubbed("TaskStatus"))
+	}
+	return m.OnTaskStatus(ctx, upid)
+}
+
+func (m *MockClient) TaskLog(ctx context.Context, upid pmx.UPID, start, limit int) ([]types.TaskLogLine, int, error) {
+	if m.OnTaskLog == nil {
+		panic(unstubbed("TaskLog"))
+	}
+	return m.OnTaskLog(ctx, upid, start, limit)
 }
 
 var _ pmx.Client = (*MockClient)(nil)

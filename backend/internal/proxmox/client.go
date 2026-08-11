@@ -53,6 +53,28 @@ type Client interface {
 	// StorageContent lists volumes on one storage, optionally filtered by
 	// content type (e.g. "iso", "vztmpl"; "" = all).
 	StorageContent(ctx context.Context, node, storage, content string) ([]types.StorageContentItem, error)
+
+	// GuestStatus returns live status for one guest from
+	// /nodes/{node}/{type}/{vmid}/status/current.
+	GuestStatus(ctx context.Context, ref GuestRef) (*GuestStatusInfo, error)
+
+	// GuestAction submits a lifecycle action (start | stop | shutdown |
+	// reboot | reset) via /status/{action} and returns the task UPID.
+	GuestAction(ctx context.Context, ref GuestRef, action string) (UPID, error)
+
+	// DeleteGuest deletes a guest; purge also removes it from backup jobs
+	// and destroys unreferenced disks.
+	DeleteGuest(ctx context.Context, ref GuestRef, purge bool) (UPID, error)
+
+	// ClusterTasks returns the recent task list from /cluster/tasks.
+	ClusterTasks(ctx context.Context) ([]TaskInfo, error)
+
+	// TaskStatus returns one task's live status; the node is parsed from
+	// the UPID.
+	TaskStatus(ctx context.Context, upid UPID) (*TaskInfo, error)
+
+	// TaskLog returns a page of a task's log plus the total line count.
+	TaskLog(ctx context.Context, upid UPID, start, limit int) ([]types.TaskLogLine, int, error)
 }
 
 // GuestRef identifies one guest for node-scoped API calls.
@@ -114,6 +136,39 @@ type RawResource struct {
 	Content    string // comma-separated content types (storage rows)
 	Shared     bool
 	HAState    string
+}
+
+// GuestStatusInfo is the digested /nodes/{n}/{type}/{vmid}/status/current.
+// Sizes are raw bytes, CPUPct is 0-100, IO fields are lifetime counters.
+type GuestStatusInfo struct {
+	Status    string // PVE's own vocabulary, lowercase (running | stopped | ...)
+	Name      string
+	UptimeSec int64
+	CPUPct    float64
+	Cores     int
+	MemUsed   int64
+	MemMax    int64
+	DiskRead  int64
+	DiskWrite int64
+	NetIn     int64
+	NetOut    int64
+	// Agent reports whether the QEMU guest agent is enabled in the config
+	// (qemu only; always false for lxc).
+	Agent bool
+}
+
+// TaskInfo is one Proxmox task, from /cluster/tasks or a task status call.
+// EndTime 0 means the task is still running. ExitStatus is PVE's verbatim
+// value ("OK" or an error message), empty while running.
+type TaskInfo struct {
+	UPID       UPID
+	Node       string
+	Type       string // qmstart, vzcreate, ...
+	ID         string // task target id — the VMID for guest tasks
+	User       string
+	StartTime  int64 // unix seconds
+	EndTime    int64 // unix seconds, 0 while running
+	ExitStatus string
 }
 
 // NodeStatusInfo is the digested /nodes/{node}/status. Sizes are raw bytes;

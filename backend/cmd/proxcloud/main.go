@@ -16,9 +16,11 @@ import (
 
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
+	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
 
 func main() {
@@ -54,7 +56,17 @@ func main() {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
 	}
-	api := &handlers.Deps{PVE: pve, Log: log}
+
+	broker := events.NewBroker()
+	registry := tasks.NewRegistry()
+	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker}
+
+	// Background loops: node-metrics poller (idle without SSE subscribers)
+	// and the tracked-task watcher. Both stop on shutdown via bgCtx.
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	go (&events.MetricsPoller{PVE: pve, Broker: broker, Log: log}).Run(bgCtx)
+	go (&tasks.Watcher{PVE: pve, Registry: registry, Broker: broker, Log: log}).Run(bgCtx)
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
@@ -63,6 +75,7 @@ func main() {
 			Log:       log,
 			Auth:      authHandler,
 			Health:    api.Health(),
+			Events:    events.Handler(broker, log),
 			Protected: api.Mount,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,

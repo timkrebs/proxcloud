@@ -21,4 +21,8 @@ type GuestSummary struct {
 	Pool      string   `json:"pool"`
 	Tags      []string `json:"tags"`
 	Template  bool     `json:"template"`
+
+	// PendingTaskUPID is set while a Proxcloud-initiated task is running
+	// against this guest; Status then carries the transitional value.
+	PendingTaskUPID string `json:"pendingTaskUpid,omitempty"`
 }

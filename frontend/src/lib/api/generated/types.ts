@@ -82,6 +82,40 @@ export interface APIError {
 }
 
 //////////
+// source: events.go
+
+/**
+ * NodeMetric is one node's live sample inside a MetricsEvent. Zeroes with
+ * Online=false mean "could not fetch", never a fabricated measurement.
+ */
+export interface NodeMetric {
+  node: string;
+  online: boolean;
+  cpuPct: number /* float64 */;
+  memUsed: number /* int64 */;
+  memTotal: number /* int64 */;
+  uptimeSec: number /* int64 */;
+}
+/**
+ * MetricsEvent is the SSE "metrics" payload, emitted every poll tick.
+ */
+export interface MetricsEvent {
+  ts: string /* RFC3339 */;
+  nodes: NodeMetric[];
+}
+/**
+ * TaskEvent is the SSE "task" payload, emitted when a tracked task starts
+ * or finishes.
+ */
+export interface TaskEvent {
+  upid: string;
+  action: string;
+  status: string; // running | succeeded | failed
+  exitStatus?: string;
+  resource?: TaskResource;
+}
+
+//////////
 // source: health.go
 
 /**
@@ -175,6 +209,30 @@ export interface NodeDetail {
 }
 
 //////////
+// source: notifications.go
+
+/**
+ * Notification is one entry of the bell pane: the durable representation of
+ * a task Proxcloud started. Kind mirrors the design vocabulary.
+ */
+export interface Notification {
+  id: string;
+  kind: string; // prog | ok | err
+  title: string;
+  detail: string;
+  upid?: string;
+  status: string; // running | succeeded | failed
+  createdAt: string /* RFC3339 */;
+  read: boolean;
+}
+/**
+ * MarkReadRequest is the POST /api/notifications/read body.
+ */
+export interface MarkReadRequest {
+  ids: string[];
+}
+
+//////////
 // source: pools.go
 
 /**
@@ -213,6 +271,11 @@ export interface GuestSummary {
   pool: string;
   tags: string[];
   template: boolean;
+  /**
+   * PendingTaskUPID is set while a Proxcloud-initiated task is running
+   * against this guest; Status then carries the transitional value.
+   */
+  pendingTaskUpid?: string;
 }
 
 //////////
@@ -256,4 +319,55 @@ export interface StorageContentItem {
   format: string;
   sizeBytes: number /* int64 */;
   notes?: string;
+}
+
+//////////
+// source: tasks.go
+
+/**
+ * TaskRef is the 202 response of every async mutation: the real Proxmox
+ * task UPID plus the friendly action label the UI shows immediately.
+ */
+export interface TaskRef {
+  upid: string;
+  action: string;
+}
+/**
+ * TaskResource points a task at the guest it operates on, when known.
+ */
+export interface TaskResource {
+  type: string; // qemu | lxc
+  vmid: number /* int */;
+  node: string;
+  name?: string;
+}
+/**
+ * TaskSummary is one row of the activity log: a Proxmox task with
+ * normalized status (running | succeeded | failed) and a human action label.
+ */
+export interface TaskSummary {
+  upid: string;
+  node: string;
+  type: string; // raw PVE task type, e.g. qmstart
+  action: string; // friendly label, e.g. "Start virtual machine"
+  user: string;
+  resource?: TaskResource;
+  status: string; // running | succeeded | failed
+  exitStatus?: string;
+  startedAt: string /* RFC3339 */;
+  endedAt?: string /* RFC3339 */;
+}
+/**
+ * TaskLogLine is one line of a task's log.
+ */
+export interface TaskLogLine {
+  n: number /* int */;
+  t: string;
+}
+/**
+ * TaskLog is a paginated slice of a task's log.
+ */
+export interface TaskLog {
+  total: number /* int */;
+  lines: TaskLogLine[];
 }

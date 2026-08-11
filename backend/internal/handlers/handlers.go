@@ -16,14 +16,20 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
 
 // Deps carries what every handler needs. Mount attaches all routes.
+// Registry and Broker are nil-safe: without them, lifecycle actions still
+// work but produce no transitional overlay, notifications, or events.
 type Deps struct {
-	PVE proxmox.Client
-	Log *slog.Logger
+	PVE      proxmox.Client
+	Log      *slog.Logger
+	Registry *tasks.Registry
+	Broker   *events.Broker
 }
 
 // Mount attaches every core REST route. It matches httpserver.Deps.Protected,
@@ -42,6 +48,16 @@ func (d *Deps) Mount(r chi.Router) {
 	r.Get("/resources", d.ListResources)
 	r.Get("/pools", d.ListPools)
 	r.Get("/storage", d.ListStorage)
+
+	r.Post("/guests/{node}/{type}/{vmid}/{action}", d.GuestAction)
+	r.Delete("/guests/{node}/{type}/{vmid}", d.DeleteGuest)
+
+	r.Get("/tasks", d.ListTasks)
+	r.Get("/tasks/{upid}", d.GetTask)
+	r.Get("/tasks/{upid}/log", d.GetTaskLog)
+
+	r.Get("/notifications", d.ListNotifications)
+	r.Post("/notifications/read", d.MarkNotificationsRead)
 }
 
 // Health probe tuning: a short deadline so /api/health stays snappy even

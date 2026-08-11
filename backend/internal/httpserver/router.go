@@ -26,6 +26,11 @@ type Deps struct {
 	// /api/health route (e.g. to add Proxmox reachability).
 	Health http.HandlerFunc
 
+	// Events, when set, serves GET /api/events (SSE). It is authenticated
+	// but exempt from the request-timeout middleware — a stream must outlive
+	// the 15s deadline.
+	Events http.HandlerFunc
+
 	// Protected mounts additional authenticated routes; set per milestone.
 	Protected func(r chi.Router)
 }
@@ -37,7 +42,7 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(15 * time.Second))
+	r.Use(timeoutExcept(15*time.Second, "/api/events"))
 
 	r.Route("/api", func(r chi.Router) {
 		health := d.Health
@@ -52,15 +57,38 @@ func New(d Deps) http.Handler {
 		r.Post("/auth/logout", d.Auth.Logout)
 		r.Get("/auth/me", d.Auth.Me)
 
-		if d.Protected != nil {
+		if d.Protected != nil || d.Events != nil {
 			r.Group(func(r chi.Router) {
 				r.Use(d.Auth.RequireSession)
-				d.Protected(r)
+				if d.Events != nil {
+					r.Get("/events", d.Events)
+				}
+				if d.Protected != nil {
+					d.Protected(r)
+				}
 			})
 		}
 	})
 
 	return r
+}
+
+// timeoutExcept applies the standard request timeout to every route except
+// the exempt paths (streaming endpoints that must outlive the deadline).
+func timeoutExcept(d time.Duration, exempt ...string) func(http.Handler) http.Handler {
+	timeout := middleware.Timeout(d)
+	return func(next http.Handler) http.Handler {
+		timed := timeout(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for _, p := range exempt {
+				if r.URL.Path == p {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
 }
 
 // accessLog emits one structured line per request.
