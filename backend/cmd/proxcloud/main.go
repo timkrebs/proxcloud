@@ -14,6 +14,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 )
@@ -34,9 +35,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	passwordHash, err := auth.ResolveHash(cfg.AdminPasswordHash, cfg.AdminPassword)
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
+	authHandler := &auth.Handler{
+		Sessions:     auth.NewSessions(cfg.SessionSecret, !cfg.Dev),
+		AdminUser:    cfg.AdminUser,
+		PasswordHash: passwordHash,
+		Log:          log,
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpserver.New(httpserver.Deps{Cfg: cfg, Log: log}),
+		Handler:           httpserver.New(httpserver.Deps{Cfg: cfg, Log: log, Auth: authHandler}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

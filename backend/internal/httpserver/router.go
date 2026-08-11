@@ -11,14 +11,19 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 )
 
 // Deps carries everything the router mounts. Fields are added per feature
 // milestone; nil features simply aren't mounted.
 type Deps struct {
-	Cfg *config.Config
-	Log *slog.Logger
+	Cfg  *config.Config
+	Log  *slog.Logger
+	Auth *auth.Handler
+
+	// Protected mounts additional authenticated routes; set per milestone.
+	Protected func(r chi.Router)
 }
 
 // New builds the chi router with the standard middleware stack.
@@ -34,6 +39,17 @@ func New(d Deps) http.Handler {
 		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 			WriteJSON(w, http.StatusOK, types.Health{Status: "ok"})
 		})
+
+		r.Post("/auth/login", d.Auth.Login)
+		r.Post("/auth/logout", d.Auth.Logout)
+		r.Get("/auth/me", d.Auth.Me)
+
+		if d.Protected != nil {
+			r.Group(func(r chi.Router) {
+				r.Use(d.Auth.RequireSession)
+				d.Protected(r)
+			})
+		}
 	})
 
 	return r
