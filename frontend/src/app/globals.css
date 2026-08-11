@@ -1,26 +1,142 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/*
+ * Proxcloud design tokens — extracted from the Claude Design project
+ * (Proxcloud.dc.html). Single source of truth for color/typography/radius/
+ * shadow; components must use these, never raw hex values.
+ * See docs/design/design-inventory.md for the full inventory.
+ */
+@theme {
+  /* Surfaces */
+  --color-canvas: #faf9f8;
+  --color-card: #ffffff;
+  --color-hover: #f3f2f1;
+  --color-selected: #eff6fc;
+  --color-nav-active: #deecf9;
+  --color-chart-fill: #deecf9;
+  --color-topbar: #1b1a19;
+  --color-topbar-hover: #3b3a39;
+  --color-topbar-search-hover: #484644;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  /* Text */
+  --color-ink: #323130;
+  --color-ink-2: #605e5c;
+  --color-ink-3: #a19f9d;
+  --color-topbar-muted: #c8c6c4;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  /* Borders */
+  --color-line: #edebe9;
+  --color-line-row: #f3f2f1;
+  --color-line-input: #8a8886;
+  --color-line-soft: #c8c6c4;
+
+  /* Accent (communication blue) */
+  --color-accent: #0078d4;
+  --color-accent-hover: #106ebe;
+  --color-accent-active: #005a9e;
+
+  /* Status */
+  --color-ok: #107c10;
+  --color-ok-bg: #dff6dd;
+  --color-err: #d13438;
+  --color-err-bg: #fde7e9;
+  --color-err-text: #a4262c;
+  --color-warn: #ffb900;
+
+  /* Brand facets */
+  --color-brand-cyan: #50e6ff;
+  --color-brand-dark: #005ba1;
+  --color-brand-pale: #c3f1ff;
+
+  /* Typography */
+  --font-sans: "Segoe UI", system-ui, -apple-system, "Inter", sans-serif;
+  --font-mono: "Cascadia Code", Consolas, monospace;
+
+  /* Radius — 2px is the identity-defining Fluent radius */
+  --radius-fluent: 2px;
+  --radius-pill: 13px;
+
+  /* Shadows (Fluent depth) */
+  --shadow-card: 0 1.6px 3.6px rgba(0, 0, 0, 0.132), 0 0.3px 0.9px rgba(0, 0, 0, 0.108);
+  --shadow-card-hover: 0 3.2px 7.2px rgba(0, 0, 0, 0.132), 0 0.6px 1.8px rgba(0, 0, 0, 0.108);
+  --shadow-auth: 0 2px 6px rgba(0, 0, 0, 0.13);
+  --shadow-pane: -6px 0 18px rgba(0, 0, 0, 0.18);
+  --shadow-toast: 0 6px 16px rgba(0, 0, 0, 0.18);
+  --shadow-palette: 0 12px 40px rgba(0, 0, 0, 0.3);
+
+  /* Motion */
+  --animate-pcspin: pcspin 1s linear infinite;
+  --animate-pcslide: pcslide 0.18s ease;
+  --animate-pctoast: pctoast 0.2s ease;
+
+  @keyframes pcspin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes pcslide {
+    from {
+      transform: translateX(60px);
+      opacity: 0.4;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+  @keyframes pctoast {
+    from {
+      opacity: 0;
+      transform: translateY(-6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 }
 
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  font-size: 14px;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--color-accent-active);
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-ink-3);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line-soft);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
