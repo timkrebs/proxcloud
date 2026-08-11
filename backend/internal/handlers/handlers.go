@@ -49,6 +49,18 @@ func (d *Deps) Mount(r chi.Router) {
 	r.Get("/pools", d.ListPools)
 	r.Get("/storage", d.ListStorage)
 
+	r.Get("/guests/{node}/{type}/{vmid}", d.GetGuest)
+	r.Patch("/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)
+	r.Get("/guests/{node}/{type}/{vmid}/metrics", d.GetGuestMetrics)
+	r.Get("/guests/{node}/{type}/{vmid}/interfaces", d.GetGuestInterfaces)
+	r.Post("/guests/{node}/{type}/{vmid}/resize", d.ResizeGuestDisk)
+	r.Get("/guests/{node}/{type}/{vmid}/snapshots", d.ListSnapshots)
+	r.Post("/guests/{node}/{type}/{vmid}/snapshots", d.CreateSnapshot)
+	r.Post("/guests/{node}/{type}/{vmid}/snapshots/{name}/rollback", d.RollbackSnapshot)
+	r.Delete("/guests/{node}/{type}/{vmid}/snapshots/{name}", d.DeleteSnapshot)
+	r.Get("/guests/{node}/{type}/{vmid}/firewall", d.GetGuestFirewall)
+	r.Put("/guests/{node}/{type}/{vmid}/firewall/options", d.SetGuestFirewall)
+	r.Get("/guests/{node}/{type}/{vmid}/acl", d.GetGuestACL)
 	r.Post("/guests/{node}/{type}/{vmid}/{action}", d.GuestAction)
 	r.Delete("/guests/{node}/{type}/{vmid}", d.DeleteGuest)
 

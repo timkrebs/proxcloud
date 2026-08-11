@@ -31,6 +31,19 @@ type MockClient struct {
 	OnClusterTasks     func(ctx context.Context) ([]pmx.TaskInfo, error)
 	OnTaskStatus       func(ctx context.Context, upid pmx.UPID) (*pmx.TaskInfo, error)
 	OnTaskLog          func(ctx context.Context, upid pmx.UPID, start, limit int) ([]types.TaskLogLine, int, error)
+
+	OnGuestConfig        func(ctx context.Context, ref pmx.GuestRef) (map[string]any, error)
+	OnSetGuestConfig     func(ctx context.Context, ref pmx.GuestRef, changes map[string]any) (pmx.UPID, error)
+	OnGuestRRD           func(ctx context.Context, ref pmx.GuestRef, timeframe string) (map[string][]types.MetricPoint, error)
+	OnAgentInterfaces    func(ctx context.Context, ref pmx.GuestRef) ([]types.GuestNIC, error)
+	OnResizeDisk         func(ctx context.Context, ref pmx.GuestRef, disk, size string) (pmx.UPID, error)
+	OnSnapshots          func(ctx context.Context, ref pmx.GuestRef) ([]types.Snapshot, error)
+	OnCreateSnapshot     func(ctx context.Context, ref pmx.GuestRef, name, desc string, vmstate bool) (pmx.UPID, error)
+	OnRollbackSnapshot   func(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error)
+	OnDeleteSnapshot     func(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error)
+	OnFirewallRules      func(ctx context.Context, ref pmx.GuestRef) (*types.GuestFirewall, error)
+	OnSetFirewallEnabled func(ctx context.Context, ref pmx.GuestRef, on bool) error
+	OnACL                func(ctx context.Context) ([]types.ACLEntry, error)
 }
 
 func (m *MockClient) GuestStatus(ctx context.Context, ref pmx.GuestRef) (*pmx.GuestStatusInfo, error) {
@@ -149,4 +162,88 @@ func (m *MockClient) StorageContent(ctx context.Context, node, storage, content 
 
 func unstubbed(method string) string {
 	return fmt.Sprintf("proxmoxtest: MockClient.%s called but On%s is not set", method, method)
+}
+
+func (m *MockClient) GuestConfig(ctx context.Context, ref pmx.GuestRef) (map[string]any, error) {
+	if m.OnGuestConfig == nil {
+		panic(unstubbed("GuestConfig"))
+	}
+	return m.OnGuestConfig(ctx, ref)
+}
+
+func (m *MockClient) SetGuestConfig(ctx context.Context, ref pmx.GuestRef, changes map[string]any) (pmx.UPID, error) {
+	if m.OnSetGuestConfig == nil {
+		panic(unstubbed("SetGuestConfig"))
+	}
+	return m.OnSetGuestConfig(ctx, ref, changes)
+}
+
+func (m *MockClient) GuestRRD(ctx context.Context, ref pmx.GuestRef, timeframe string) (map[string][]types.MetricPoint, error) {
+	if m.OnGuestRRD == nil {
+		panic(unstubbed("GuestRRD"))
+	}
+	return m.OnGuestRRD(ctx, ref, timeframe)
+}
+
+func (m *MockClient) AgentInterfaces(ctx context.Context, ref pmx.GuestRef) ([]types.GuestNIC, error) {
+	if m.OnAgentInterfaces == nil {
+		panic(unstubbed("AgentInterfaces"))
+	}
+	return m.OnAgentInterfaces(ctx, ref)
+}
+
+func (m *MockClient) ResizeDisk(ctx context.Context, ref pmx.GuestRef, disk, size string) (pmx.UPID, error) {
+	if m.OnResizeDisk == nil {
+		panic(unstubbed("ResizeDisk"))
+	}
+	return m.OnResizeDisk(ctx, ref, disk, size)
+}
+
+func (m *MockClient) Snapshots(ctx context.Context, ref pmx.GuestRef) ([]types.Snapshot, error) {
+	if m.OnSnapshots == nil {
+		panic(unstubbed("Snapshots"))
+	}
+	return m.OnSnapshots(ctx, ref)
+}
+
+func (m *MockClient) CreateSnapshot(ctx context.Context, ref pmx.GuestRef, name, desc string, vmstate bool) (pmx.UPID, error) {
+	if m.OnCreateSnapshot == nil {
+		panic(unstubbed("CreateSnapshot"))
+	}
+	return m.OnCreateSnapshot(ctx, ref, name, desc, vmstate)
+}
+
+func (m *MockClient) RollbackSnapshot(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error) {
+	if m.OnRollbackSnapshot == nil {
+		panic(unstubbed("RollbackSnapshot"))
+	}
+	return m.OnRollbackSnapshot(ctx, ref, name)
+}
+
+func (m *MockClient) DeleteSnapshot(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error) {
+	if m.OnDeleteSnapshot == nil {
+		panic(unstubbed("DeleteSnapshot"))
+	}
+	return m.OnDeleteSnapshot(ctx, ref, name)
+}
+
+func (m *MockClient) FirewallRules(ctx context.Context, ref pmx.GuestRef) (*types.GuestFirewall, error) {
+	if m.OnFirewallRules == nil {
+		panic(unstubbed("FirewallRules"))
+	}
+	return m.OnFirewallRules(ctx, ref)
+}
+
+func (m *MockClient) SetFirewallEnabled(ctx context.Context, ref pmx.GuestRef, on bool) error {
+	if m.OnSetFirewallEnabled == nil {
+		panic(unstubbed("SetFirewallEnabled"))
+	}
+	return m.OnSetFirewallEnabled(ctx, ref, on)
+}
+
+func (m *MockClient) ACL(ctx context.Context) ([]types.ACLEntry, error) {
+	if m.OnACL == nil {
+		panic(unstubbed("ACL"))
+	}
+	return m.OnACL(ctx)
 }

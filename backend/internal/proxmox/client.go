@@ -75,6 +75,37 @@ type Client interface {
 
 	// TaskLog returns a page of a task's log plus the total line count.
 	TaskLog(ctx context.Context, upid UPID, start, limit int) ([]types.TaskLogLine, int, error)
+
+	// GuestConfig returns the guest's raw config map (current values).
+	GuestConfig(ctx context.Context, ref GuestRef) (map[string]any, error)
+
+	// SetGuestConfig applies config changes. qemu is async (returns a
+	// UPID); lxc is synchronous (returns "").
+	SetGuestConfig(ctx context.Context, ref GuestRef, changes map[string]any) (UPID, error)
+
+	// GuestRRD returns historical guest series (cpu percent 0-100, mem
+	// bytes, netin/netout/diskread/diskwrite rates).
+	GuestRRD(ctx context.Context, ref GuestRef, timeframe string) (map[string][]types.MetricPoint, error)
+
+	// AgentInterfaces returns live guest IPs; ErrAgentUnavailable when the
+	// QEMU guest agent is not running.
+	AgentInterfaces(ctx context.Context, ref GuestRef) ([]types.GuestNIC, error)
+
+	// ResizeDisk grows a disk to an absolute size ("64G", PVE syntax).
+	ResizeDisk(ctx context.Context, ref GuestRef, disk, size string) (UPID, error)
+
+	// Snapshot lifecycle.
+	Snapshots(ctx context.Context, ref GuestRef) ([]types.Snapshot, error)
+	CreateSnapshot(ctx context.Context, ref GuestRef, name, desc string, vmstate bool) (UPID, error)
+	RollbackSnapshot(ctx context.Context, ref GuestRef, name string) (UPID, error)
+	DeleteSnapshot(ctx context.Context, ref GuestRef, name string) (UPID, error)
+
+	// Guest firewall (read + enable toggle in v1).
+	FirewallRules(ctx context.Context, ref GuestRef) (*types.GuestFirewall, error)
+	SetFirewallEnabled(ctx context.Context, ref GuestRef, on bool) error
+
+	// ACL returns all access-control entries (handlers filter per path).
+	ACL(ctx context.Context) ([]types.ACLEntry, error)
 }
 
 // GuestRef identifies one guest for node-scoped API calls.

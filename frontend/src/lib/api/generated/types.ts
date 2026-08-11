@@ -116,6 +116,137 @@ export interface TaskEvent {
 }
 
 //////////
+// source: guests.go
+
+/**
+ * NICConfig is one parsed netN config entry of a guest.
+ */
+export interface NICConfig {
+  key: string; // net0, net1, ...
+  model: string;
+  mac: string;
+  bridge: string;
+  vlanTag?: number /* int */;
+  firewall: boolean;
+  ipConfig?: string; // lxc: ip=dhcp / CIDR from the same entry
+}
+/**
+ * DiskConfig is one parsed disk entry (scsiN/virtioN/sataN/ideN/rootfs/mpN).
+ */
+export interface DiskConfig {
+  key: string;
+  storage: string;
+  volume: string;
+  format?: string;
+  sizeBytes: number /* int64 */;
+  cdrom: boolean;
+}
+/**
+ * GuestDetail is the full detail-page document for one guest.
+ */
+export interface GuestDetail {
+  GuestSummary: GuestSummary;
+  description?: string;
+  agent: boolean; // qemu: agent enabled in config
+  onBoot: boolean;
+  osType?: string;
+  machine?: string; // qemu machine type
+  bootDisk?: string;
+  nics: NICConfig[];
+  disks: DiskConfig[];
+  diskRead: number /* int64 */; // lifetime bytes
+  diskWrite: number /* int64 */; // lifetime bytes
+  netIn: number /* int64 */; // lifetime bytes
+  netOut: number /* int64 */; // lifetime bytes
+}
+/**
+ * UpdateConfigRequest is the PATCH /config body; nil fields are unchanged.
+ */
+export interface UpdateConfigRequest {
+  cores?: number /* int */;
+  memoryMb?: number /* int64 */;
+  description?: string;
+  tags?: string[];
+  onBoot?: boolean;
+}
+/**
+ * ResizeRequest grows a disk to an absolute size.
+ */
+export interface ResizeRequest {
+  disk: string; // e.g. scsi0, rootfs
+  sizeGib: number /* int */;
+}
+/**
+ * Snapshot is one guest snapshot.
+ */
+export interface Snapshot {
+  name: string;
+  description?: string;
+  parent?: string;
+  snapTime: string /* RFC3339 */;
+  vmState: boolean;
+  current: boolean; // the "you are here" marker
+}
+/**
+ * CreateSnapshotRequest is the POST /snapshots body.
+ */
+export interface CreateSnapshotRequest {
+  name: string;
+  description?: string;
+  vmState: boolean;
+}
+/**
+ * GuestNIC is one live interface reported by the guest (agent for qemu,
+ * the interfaces endpoint for lxc).
+ */
+export interface GuestNIC {
+  name: string;
+  mac?: string;
+  ipv4: string[];
+  ipv6: string[];
+}
+/**
+ * GuestNICList wraps live interfaces; AgentUnavailable=true is the honest
+ * "no QEMU guest agent" state (install hint in the UI, never blank).
+ */
+export interface GuestNICList {
+  agentUnavailable: boolean;
+  nics: GuestNIC[];
+}
+/**
+ * FirewallRule is one guest firewall rule.
+ */
+export interface FirewallRule {
+  pos: number /* int */;
+  enable: boolean;
+  type: string; // in | out | group
+  action: string;
+  source?: string;
+  dest?: string;
+  proto?: string;
+  dport?: string;
+  sport?: string;
+  comment?: string;
+}
+/**
+ * GuestFirewall is the firewall blade document.
+ */
+export interface GuestFirewall {
+  enabled: boolean;
+  rules: FirewallRule[];
+}
+/**
+ * ACLEntry is one row of the access-control blade (read-only in v1).
+ */
+export interface ACLEntry {
+  path: string;
+  ugid: string;
+  type: string; // user | group | token
+  role: string;
+  propagate: boolean;
+}
+
+//////////
 // source: health.go
 
 /**
