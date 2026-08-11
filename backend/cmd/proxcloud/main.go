@@ -92,9 +92,17 @@ func main() {
 			Sessions:       sessions,
 			Log:            log,
 			FrontendOrigin: cfg.FrontendOrigin,
+			// Advisory: a portal cookie, if the browser attaches one, must be
+			// valid — but it is not required. The dev console runs over ws://
+			// while the session cookie is Secure, so browsers legitimately omit
+			// it; the one-shot session id (single-use, 25s, minted only from an
+			// authenticated POST /console) is the real per-connection credential.
 			VerifyCookie: func(r *http.Request) bool {
+				if _, err := r.Cookie(auth.CookieName); err != nil {
+					return true // no portal cookie on this transport — rely on the one-shot id
+				}
 				_, err := authHandler.Sessions.Verify(r)
-				return err == nil
+				return err == nil // a presented cookie must be genuine (rejects forged/stale)
 			},
 		}
 		log.Info("console enabled", "user", cfg.ConsoleUser)

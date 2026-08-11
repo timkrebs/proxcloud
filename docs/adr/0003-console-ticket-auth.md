@@ -19,11 +19,17 @@ browser.
   password) or termproxy ticket and stores a **one-shot session**:
   128-bit random id, single use, 25 s TTL.
 - `GET /api/console/ws/{sessionId}` upgrades the browser connection and
-  pipes frames to PVE's `vncwebsocket`, dialed with the `PVEAuthCookie`.
-  The route bypasses cookie auth (the session id is the credential —
-  Next rewrites cannot proxy websockets, so the browser hits the backend
-  origin directly) and the request timeout; origin checks + 60 s idle
-  deadlines guard the bridge.
+  pipes frames to PVE's `vncwebsocket`, dialed with the `PVEAuthCookie`
+  over a forced-HTTP/1.1 TLS config (the shared transport advertises h2,
+  which PVE answers with an h2 frame instead of a 101). The **one-shot
+  session id is the credential**: Next rewrites cannot proxy websockets,
+  so the browser hits the backend origin directly, and in dev that origin
+  is `ws://` while the portal session cookie is `Secure` — the browser
+  legitimately omits it. The portal cookie is therefore checked only
+  *advisorily* (a presented cookie must be genuine; an absent one is fine),
+  and the session record carries the issuing user for audit. The route is
+  exempt from the request timeout; origin checks, a concurrent-bridge cap,
+  1 MiB read limits, and 60 s idle deadlines guard it.
 - termproxy's `user:ticket\n` handshake is written by the backend so the
   ticket never reaches the client; noVNC authenticates RFB with the
   one-time password only.
