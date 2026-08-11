@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -117,8 +118,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		base, url.PathEscape(sess.Node), sess.GuestType, sess.VMID,
 		url.QueryEscape(sess.Proxy.Port), url.QueryEscape(sess.Proxy.Ticket))
 
+	// The shared HTTP transport advertises HTTP/2 in its TLS ALPN; reusing
+	// that config makes PVE answer the websocket upgrade with an h2 frame.
+	// Clone it and force HTTP/1.1 for the websocket handshake.
+	var tlsCfg *tls.Config
+	if base := p.Auth.Transport().TLSClientConfig; base != nil {
+		tlsCfg = base.Clone()
+	} else {
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tlsCfg.NextProtos = []string{"http/1.1"}
+
 	dialer := &websocket.Dialer{
-		TLSClientConfig:  p.Auth.Transport().TLSClientConfig,
+		TLSClientConfig:  tlsCfg,
 		HandshakeTimeout: dialTimeout,
 		Subprotocols:     []string{"binary"},
 	}
