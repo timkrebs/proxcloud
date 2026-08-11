@@ -5,7 +5,13 @@ dev:
 	@$(MAKE) -j2 backend frontend
 
 backend:
-	cd backend && air
+	@if command -v air >/dev/null 2>&1; then \
+		cd backend && air; \
+	else \
+		echo ">> air not installed — running without hot reload"; \
+		echo ">> (optional: go install github.com/air-verse/air@latest)"; \
+		cd backend && go run ./cmd/proxcloud; \
+	fi
 
 frontend:
 	cd frontend && npm run dev
