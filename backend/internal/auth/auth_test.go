@@ -28,7 +28,10 @@ func testHandler(t *testing.T) *Handler {
 
 type testWriter struct{ t *testing.T }
 
-func (w testWriter) Write(p []byte) (int, error) { w.t.Log(strings.TrimSpace(string(p))); return len(p), nil }
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimSpace(string(p)))
+	return len(p), nil
+}
 
 func TestLogin(t *testing.T) {
 	tests := []struct {

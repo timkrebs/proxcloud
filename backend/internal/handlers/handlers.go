@@ -1,0 +1,103 @@
+// Package handlers implements the authenticated REST API. Every handler
+// depends only on the proxmox.Client interface — no raw HTTP, no library
+// types — so table-driven tests run against proxmoxtest.MockClient. Every
+// number in a response comes from Proxmox; missing data is an explicit
+// error or zero-with-Online=false, never a fabricated value.
+package handlers
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+)
+
+// Deps carries what every handler needs. Mount attaches all routes.
+type Deps struct {
+	PVE proxmox.Client
+	Log *slog.Logger
+}
+
+// Mount attaches every core REST route. It matches httpserver.Deps.Protected,
+// so the caller decides the auth boundary; paths are relative to /api.
+func (d *Deps) Mount(r chi.Router) {
+	r.Get("/cluster", d.GetCluster)
+	r.Get("/cluster/nextid", d.GetNextID)
+
+	r.Get("/nodes", d.ListNodes)
+	r.Get("/nodes/{node}", d.GetNode)
+	r.Get("/nodes/{node}/metrics", d.GetNodeMetrics)
+	r.Get("/nodes/{node}/bridges", d.GetNodeBridges)
+	r.Get("/nodes/{node}/storages", d.GetNodeStorages)
+	r.Get("/nodes/{node}/storages/{storage}/content", d.GetStorageContent)
+
+	r.Get("/resources", d.ListResources)
+	r.Get("/pools", d.ListPools)
+	r.Get("/storage", d.ListStorage)
+}
+
+// Health probe tuning: a short deadline so /api/health stays snappy even
+// when Proxmox is down, and a cache so the endpoint (often polled by
+// compose/uptime checks) does not hammer PVE.
+const (
+	healthProbeTimeout = 3 * time.Second
+	healthCacheTTL     = 30 * time.Second
+)
+
+// Health returns the public /api/health handler: the API's own liveness plus
+// Proxmox reachability probed via /version and cached for healthCacheTTL.
+func (d *Deps) Health() http.HandlerFunc {
+	var (
+		mu       sync.Mutex
+		cached   string
+		cachedAt time.Time
+	)
+	return func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if cached == "" || time.Since(cachedAt) >= healthCacheTTL {
+			ctx, cancel := context.WithTimeout(r.Context(), healthProbeTimeout)
+			_, err := d.PVE.Version(ctx)
+			cancel()
+			if err != nil {
+				cached = "unreachable"
+			} else {
+				cached = "ok"
+			}
+			cachedAt = time.Now()
+		}
+		pveStatus := cached
+		mu.Unlock()
+
+		// Status stays "ok": the API itself answered; Proxmox reachability
+		// is reported separately so the UI can show a precise banner.
+		httpserver.WriteJSON(w, http.StatusOK, types.Health{Status: "ok", Proxmox: pveStatus})
+	}
+}
+
+func (d *Deps) logger() *slog.Logger {
+	if d.Log != nil {
+		return d.Log
+	}
+	return slog.Default()
+}
+
+// splitPVEList splits PVE's joined lists (tags "a;b", content "iso,backup")
+// into a clean, never-nil slice. PVE canonically joins tags with semicolons
+// but commas appear in the wild; both are accepted.
+func splitPVEList(s string) []string {
+	out := []string{}
+	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ';' || r == ',' }) {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}

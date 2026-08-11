@@ -16,7 +16,9 @@ import (
 
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
+	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 )
 
 func main() {
@@ -47,9 +49,22 @@ func main() {
 		Log:          log,
 	}
 
+	pve, err := proxmox.New(cfg)
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
+	api := &handlers.Deps{PVE: pve, Log: log}
+
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           httpserver.New(httpserver.Deps{Cfg: cfg, Log: log, Auth: authHandler}),
+		Addr: cfg.ListenAddr,
+		Handler: httpserver.New(httpserver.Deps{
+			Cfg:       cfg,
+			Log:       log,
+			Auth:      authHandler,
+			Health:    api.Health(),
+			Protected: api.Mount,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

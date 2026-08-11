@@ -1,0 +1,104 @@
+// Package proxmoxtest provides a struct-of-funcs mock of proxmox.Client for
+// table-driven handler tests: set only the On<Name> fields a case needs.
+package proxmoxtest
+
+import (
+	"context"
+	"fmt"
+
+	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	pmx "github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+)
+
+// MockClient implements proxmox.Client by delegating every method to the
+// corresponding On<Name> func field. A method whose field is nil panics with
+// the method name — chi/httptest recover the panic into a clear test failure
+// pointing at the unstubbed call instead of a silent zero value.
+type MockClient struct {
+	OnVersion          func(ctx context.Context) (string, error)
+	OnClusterStatus    func(ctx context.Context) (*pmx.ClusterInfo, error)
+	OnClusterResources func(ctx context.Context) ([]pmx.RawResource, error)
+	OnNextID           func(ctx context.Context) (int, error)
+	OnPools            func(ctx context.Context) ([]types.Pool, error)
+	OnNodeStatus       func(ctx context.Context, node string) (*pmx.NodeStatusInfo, error)
+	OnNodeRRD          func(ctx context.Context, node, timeframe string) (map[string][]types.MetricPoint, error)
+	OnNodeBridges      func(ctx context.Context, node string) ([]types.Bridge, error)
+	OnNodeStorages     func(ctx context.Context, node, content string) ([]types.NodeStorage, error)
+	OnStorageContent   func(ctx context.Context, node, storage, content string) ([]types.StorageContentItem, error)
+}
+
+var _ pmx.Client = (*MockClient)(nil)
+
+func (m *MockClient) Version(ctx context.Context) (string, error) {
+	if m.OnVersion == nil {
+		panic(unstubbed("Version"))
+	}
+	return m.OnVersion(ctx)
+}
+
+func (m *MockClient) ClusterStatus(ctx context.Context) (*pmx.ClusterInfo, error) {
+	if m.OnClusterStatus == nil {
+		panic(unstubbed("ClusterStatus"))
+	}
+	return m.OnClusterStatus(ctx)
+}
+
+func (m *MockClient) ClusterResources(ctx context.Context) ([]pmx.RawResource, error) {
+	if m.OnClusterResources == nil {
+		panic(unstubbed("ClusterResources"))
+	}
+	return m.OnClusterResources(ctx)
+}
+
+func (m *MockClient) NextID(ctx context.Context) (int, error) {
+	if m.OnNextID == nil {
+		panic(unstubbed("NextID"))
+	}
+	return m.OnNextID(ctx)
+}
+
+func (m *MockClient) Pools(ctx context.Context) ([]types.Pool, error) {
+	if m.OnPools == nil {
+		panic(unstubbed("Pools"))
+	}
+	return m.OnPools(ctx)
+}
+
+func (m *MockClient) NodeStatus(ctx context.Context, node string) (*pmx.NodeStatusInfo, error) {
+	if m.OnNodeStatus == nil {
+		panic(unstubbed("NodeStatus"))
+	}
+	return m.OnNodeStatus(ctx, node)
+}
+
+func (m *MockClient) NodeRRD(ctx context.Context, node, timeframe string) (map[string][]types.MetricPoint, error) {
+	if m.OnNodeRRD == nil {
+		panic(unstubbed("NodeRRD"))
+	}
+	return m.OnNodeRRD(ctx, node, timeframe)
+}
+
+func (m *MockClient) NodeBridges(ctx context.Context, node string) ([]types.Bridge, error) {
+	if m.OnNodeBridges == nil {
+		panic(unstubbed("NodeBridges"))
+	}
+	return m.OnNodeBridges(ctx, node)
+}
+
+func (m *MockClient) NodeStorages(ctx context.Context, node, content string) ([]types.NodeStorage, error) {
+	if m.OnNodeStorages == nil {
+		panic(unstubbed("NodeStorages"))
+	}
+	return m.OnNodeStorages(ctx, node, content)
+}
+
+func (m *MockClient) StorageContent(ctx context.Context, node, storage, content string) ([]types.StorageContentItem, error) {
+	if m.OnStorageContent == nil {
+		panic(unstubbed("StorageContent"))
+	}
+	return m.OnStorageContent(ctx, node, storage, content)
+}
+
+func unstubbed(method string) string {
+	return fmt.Sprintf("proxmoxtest: MockClient.%s called but On%s is not set", method, method)
+}

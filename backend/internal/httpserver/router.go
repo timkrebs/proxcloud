@@ -22,6 +22,10 @@ type Deps struct {
 	Log  *slog.Logger
 	Auth *auth.Handler
 
+	// Health, when set, replaces the bare liveness handler for the public
+	// /api/health route (e.g. to add Proxmox reachability).
+	Health http.HandlerFunc
+
 	// Protected mounts additional authenticated routes; set per milestone.
 	Protected func(r chi.Router)
 }
@@ -36,9 +40,13 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.Timeout(15 * time.Second))
 
 	r.Route("/api", func(r chi.Router) {
-		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-			WriteJSON(w, http.StatusOK, types.Health{Status: "ok"})
-		})
+		health := d.Health
+		if health == nil {
+			health = func(w http.ResponseWriter, _ *http.Request) {
+				WriteJSON(w, http.StatusOK, types.Health{Status: "ok"})
+			}
+		}
+		r.Get("/health", health)
 
 		r.Post("/auth/login", d.Auth.Login)
 		r.Post("/auth/logout", d.Auth.Logout)
