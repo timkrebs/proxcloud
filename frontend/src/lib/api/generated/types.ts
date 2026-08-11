@@ -496,6 +496,21 @@ export interface Pool {
 }
 
 //////////
+// source: pricing.go
+
+/**
+ * Pricing is the flat-rate config the UI uses to compute honest estimates.
+ * Enabled=false hides all cost UI.
+ */
+export interface Pricing {
+  enabled: boolean;
+  currency: string;
+  vcpuMonth: number /* float64 */;
+  ramGbMonth: number /* float64 */;
+  diskGbMonth: number /* float64 */;
+}
+
+//////////
 // source: resources.go
 
 /**

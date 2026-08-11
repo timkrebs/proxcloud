@@ -14,6 +14,8 @@ import (
 
 	"github.com/joho/godotenv"
 
+	apitypes "github.com/timkrebs9/proxcloud/backend/api/types"
+
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 	"github.com/timkrebs9/proxcloud/backend/internal/console"
@@ -63,6 +65,19 @@ func main() {
 	registry := tasks.NewRegistry()
 	engine := deploy.NewEngine(pve, registry, broker, log)
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine}
+	if cfg.PricingEnabled() {
+		currency := cfg.PricingCurrency
+		if currency == "" {
+			currency = "EUR"
+		}
+		api.Pricing = &apitypes.Pricing{
+			Enabled:     true,
+			Currency:    currency,
+			VCPUMonth:   cfg.PricingVCPUMonth,
+			RAMGBMonth:  cfg.PricingRAMGBMonth,
+			DiskGBMonth: cfg.PricingDiskGBMonth,
+		}
+	}
 
 	// Console: optional credential path (PVE websockets reject API tokens).
 	var consoleWS http.Handler

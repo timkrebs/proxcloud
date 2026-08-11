@@ -11,8 +11,8 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi, Svc, type SvcName } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
 import type { GuestSummary } from "@/lib/api/generated/types";
-import { useCluster, useHealth, useNodeMetrics, useNodes, useResources } from "@/lib/api/queries";
-import { formatBytesPair, formatPct, formatUptime, relativeTime } from "@/lib/format";
+import { useCluster, useHealth, useNodeMetrics, useNodes, usePricing, useResources } from "@/lib/api/queries";
+import { formatBytesPair, formatMoney, formatPct, formatUptime, relativeTime } from "@/lib/format";
 import { listRecent } from "@/lib/stores/recent";
 
 // ── shared bits ──────────────────────────────────────────────────────────────
@@ -301,6 +301,43 @@ export function ServiceHealthCard() {
             label="Proxmox API"
           />
         </div>
+      )}
+    </Card>
+  );
+}
+
+// ── §3.1 cost card (flat-rate estimate; hidden when pricing is unset) ────────
+
+export function CostCard() {
+  const pricing = usePricing();
+  const resources = useResources();
+  if (!pricing.data?.enabled) return null;
+
+  const p = pricing.data;
+  const guests = (resources.data ?? []).filter((g) => !g.template);
+  const total = guests.reduce(
+    (sum, g) =>
+      sum +
+      g.cores * p.vcpuMonth +
+      (g.memMax / 2 ** 30) * p.ramGbMonth +
+      (g.diskMax / 2 ** 30) * p.diskGbMonth,
+    0,
+  );
+
+  return (
+    <Card className="p-4">
+      <h3 className="mb-2 text-[14px] font-semibold">Cost this month</h3>
+      {resources.isPending ? (
+        <Skeleton className="h-10" />
+      ) : resources.isError ? (
+        <CardError err={resources.error} />
+      ) : (
+        <>
+          <div className="text-[26px] font-semibold tabular-nums">{formatMoney(total, p.currency)}</div>
+          <p className="mt-1 text-[12px] text-ink-2">
+            Estimate · flat price model · {guests.length} guest{guests.length === 1 ? "" : "s"}
+          </p>
+        </>
       )}
     </Card>
   );

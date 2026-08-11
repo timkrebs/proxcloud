@@ -38,6 +38,9 @@ type Deps struct {
 	ConsoleAuth     *console.TicketAuth
 	ConsoleSessions *console.Sessions
 	ConsoleUser     string
+
+	// Pricing — nil or Enabled=false hides all cost UI.
+	Pricing *types.Pricing
 }
 
 // Mount attaches every core REST route. It matches httpserver.Deps.Protected,
@@ -82,6 +85,8 @@ func (d *Deps) Mount(r chi.Router) {
 	r.Post("/guests/{node}/{type}/{vmid}/console", d.OpenConsole)
 	r.Post("/guests", d.CreateGuest)
 	r.Get("/deployments/{id}", d.GetDeployment)
+
+	r.Get("/pricing", d.GetPricing)
 }
 
 // Health probe tuning: a short deadline so /api/health stays snappy even

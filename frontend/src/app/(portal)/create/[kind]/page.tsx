@@ -21,8 +21,9 @@ import { Card } from "@/components/ui/Card";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { ApiError, apiFetch } from "@/lib/api/client";
 import type { CreateGuestResponse } from "@/lib/api/generated/types";
-import { useResources } from "@/lib/api/queries";
+import { usePricing, useResources } from "@/lib/api/queries";
 import { pushToast } from "@/lib/stores/toastStore";
+import { CostRows } from "@/components/wizard/CostRows";
 import {
   TAB_NAMES,
   toCreateRequest,
@@ -36,6 +37,7 @@ export default function WizardPage() {
   const router = useRouter();
   const s = useWizardStore();
   const resources = useResources();
+  const pricing = usePricing();
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
@@ -127,7 +129,9 @@ export default function WizardPage() {
 
         {/* sticky summary card §3.3 (pricing lands later; summary is real) */}
         <Card className="sticky top-5 w-[300px] flex-none p-4">
-          <h3 className="mb-3 text-[14px] font-semibold">Resource summary</h3>
+          <h3 className="mb-3 text-[14px] font-semibold">
+            {pricing.data?.enabled ? "Estimated cost" : "Resource summary"}
+          </h3>
           {[
             ["Type", kind === "qemu" ? "Virtual machine" : "LXC container"],
             ["Compute", `${s.cores || "—"} vCPU · ${s.memoryMb || "—"} MiB`],
@@ -139,6 +143,14 @@ export default function WizardPage() {
               <span className="tabular-nums">{v}</span>
             </div>
           ))}
+          {pricing.data?.enabled ? (
+            <CostRows
+              pricing={pricing.data}
+              cores={Number(s.cores) || 0}
+              memoryMb={Number(s.memoryMb) || 0}
+              diskGb={s.sourceMode === "clone" ? 0 : Number(s.diskGb) || 0}
+            />
+          ) : null}
           <div className="my-3 h-px bg-line" />
           <div className="flex items-center gap-[6px] text-[12px] text-ink-2">
             <StatusDot status={errs.length === 0 ? "running" : "failed"} />

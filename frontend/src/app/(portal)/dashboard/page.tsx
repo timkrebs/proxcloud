@@ -1,6 +1,7 @@
 "use client";
 // Dashboard — design-inventory §3.1, real Proxmox data only.
 import {
+  CostCard,
   GuestsCard,
   NodesCard,
   RecentResourcesCard,
@@ -46,6 +47,7 @@ export default function DashboardPage() {
         </div>
         <div className="flex flex-col gap-4">
           <UsageCard />
+          <CostCard />
           <GuestsCard />
           <ServiceHealthCard />
         </div>

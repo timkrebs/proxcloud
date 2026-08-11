@@ -7,6 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api/client";
 import type {
   ClusterSummary,
+  Pricing,
   GuestSummary,
   Health,
   Me,
@@ -86,6 +87,14 @@ export function useTasks(filters: { running?: boolean; vmid?: number } = {}) {
     queryKey: qk.tasks(filters),
     queryFn: () => apiFetch<TaskSummary[]>(`/api/tasks${s ? `?${s}` : ""}`),
     refetchInterval: 10_000,
+  });
+}
+
+export function usePricing() {
+  return useQuery({
+    queryKey: ["pricing"],
+    queryFn: () => apiFetch<Pricing>("/api/pricing"),
+    staleTime: Infinity,
   });
 }
 
