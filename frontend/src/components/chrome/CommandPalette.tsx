@@ -133,7 +133,7 @@ export default function CommandPalette({
             <button
               key={r.id}
               type="button"
-              onClick={() => go(`/${r.kind}/${r.id}`)}
+              onClick={() => go(`/resources/${r.node}/${r.id}`)}
               className="flex w-full cursor-pointer items-center gap-[10px] border-none bg-transparent px-[14px] py-[9px] text-left hover:bg-hover"
             >
               <Svc name={r.kind} size={16} />
