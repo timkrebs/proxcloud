@@ -142,10 +142,27 @@ export interface DiskConfig {
   cdrom: boolean;
 }
 /**
- * GuestDetail is the full detail-page document for one guest.
+ * GuestDetail is the full detail-page document for one guest. Flattened
+ * (no embedding) because tygo renders embedded structs as named fields,
+ * which would diverge from Go's inline JSON marshaling.
  */
 export interface GuestDetail {
-  GuestSummary: GuestSummary;
+  id: string;
+  type: string;
+  vmid: number /* int */;
+  name: string;
+  node: string;
+  status: string;
+  uptimeSec: number /* int64 */;
+  cpuPct: number /* float64 */;
+  cores: number /* int */;
+  memUsed: number /* int64 */;
+  memMax: number /* int64 */;
+  diskMax: number /* int64 */;
+  pool: string;
+  tags: string[];
+  template: boolean;
+  pendingTaskUpid?: string;
   description?: string;
   agent: boolean; // qemu: agent enabled in config
   onBoot: boolean;

@@ -23,9 +23,27 @@ type DiskConfig struct {
 	CDROM     bool   `json:"cdrom"`
 }
 
-// GuestDetail is the full detail-page document for one guest.
+// GuestDetail is the full detail-page document for one guest. Flattened
+// (no embedding) because tygo renders embedded structs as named fields,
+// which would diverge from Go's inline JSON marshaling.
 type GuestDetail struct {
-	GuestSummary
+	ID              string   `json:"id"`
+	Type            string   `json:"type"`
+	VMID            int      `json:"vmid"`
+	Name            string   `json:"name"`
+	Node            string   `json:"node"`
+	Status          string   `json:"status"`
+	UptimeSec       int64    `json:"uptimeSec"`
+	CPUPct          float64  `json:"cpuPct"`
+	Cores           int      `json:"cores"`
+	MemUsed         int64    `json:"memUsed"`
+	MemMax          int64    `json:"memMax"`
+	DiskMax         int64    `json:"diskMax"`
+	Pool            string   `json:"pool"`
+	Tags            []string `json:"tags"`
+	Template        bool     `json:"template"`
+	PendingTaskUPID string   `json:"pendingTaskUpid,omitempty"`
+
 	Description string       `json:"description,omitempty"`
 	Agent       bool         `json:"agent"` // qemu: agent enabled in config
 	OnBoot      bool         `json:"onBoot"`

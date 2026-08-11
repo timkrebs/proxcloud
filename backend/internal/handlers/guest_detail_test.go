@@ -46,7 +46,7 @@ func TestGetGuestDetailParsesConfig(t *testing.T) {
 	g := decodeBody[types.GuestDetail](t, rec)
 
 	if g.Name != "web-01" || g.Status != "running" || !g.Agent || !g.OnBoot {
-		t.Errorf("basics wrong: %+v", g.GuestSummary)
+		t.Errorf("basics wrong: name=%q status=%q agent=%v onboot=%v", g.Name, g.Status, g.Agent, g.OnBoot)
 	}
 	if len(g.Tags) != 2 || g.Tags[0] != "env-prod" {
 		t.Errorf("tags = %v", g.Tags)
