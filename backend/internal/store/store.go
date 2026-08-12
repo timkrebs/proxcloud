@@ -51,6 +51,10 @@ type Store interface {
 	ProjectStore
 	OwnershipStore
 	QuotaStore
+	InvitationStore
+	TOTPStore
+	RecoveryCodeStore
+	LoginChallengeStore
 }
 
 // UserStore is the users aggregate.
@@ -218,6 +222,99 @@ type MembershipStore interface {
 	// project-id -> highest-role map for every project of that tenant the user
 	// holds a project-scope membership in. Backs ResolveTenant/ResolveScope.
 	GetEffectiveRoles(ctx context.Context, userID, tenantID string) (tenantRole string, projectRoles map[string]string, err error)
+}
+
+// InvitationStore is the invitations aggregate (ADR-0013 §1): single-use,
+// expiring membership invites whose token is stored only as a hash and whose
+// granted scope+role live in the row (tamper-proof). All lookups are by hash,
+// mirroring GetSessionByTokenHash; accept is a guarded single-statement update.
+type InvitationStore interface {
+	// CreateInvitation deletes any still-pending invite for the same (email,
+	// scope_type, scope_id) first — so re-inviting supersedes the prior link —
+	// then inserts the new row. Both statements MUST run in the caller's WithTx
+	// so the supersede+insert is atomic. A token_hash collision → ErrConflict.
+	CreateInvitation(ctx context.Context, p CreateInvitationParams) (*Invitation, error)
+	// GetInvitationByTokenHash returns the invite for a token hash, or ErrNotFound.
+	// Expiry/acceptance are the caller's to check (kept generic so validate/accept
+	// return the same enumeration-safe 404).
+	GetInvitationByTokenHash(ctx context.Context, tokenHash string) (*Invitation, error)
+	// GetInvitationByID returns the invite with the given id, or ErrNotFound. It
+	// backs the Owner revoke's O(1) authorization (load-by-id → confirm the invite
+	// belongs to the caller's tenant) instead of scanning the whole pending list.
+	GetInvitationByID(ctx context.Context, id string) (*Invitation, error)
+	// ListPendingInvitationsByScopes returns every not-yet-accepted invite at any
+	// of scopeIDs of the given scopeType, in one query — the Owner's pending list.
+	// An empty scopeIDs slice is a cheap empty result, not a query.
+	ListPendingInvitationsByScopes(ctx context.Context, scopeType string, scopeIDs []string) ([]Invitation, error)
+	// MarkInvitationAccepted stamps accepted_at guarded by WHERE accepted_at IS
+	// NULL and returns whether this call won the race (false ⇒ already accepted or
+	// gone). Single-use is atomic in the one UPDATE.
+	MarkInvitationAccepted(ctx context.Context, id string) (bool, error)
+	// DeleteInvitation removes an invite (Owner revoke). ErrNotFound if gone.
+	DeleteInvitation(ctx context.Context, id string) error
+}
+
+// TOTPStore is the per-user TOTP secret aggregate (ADR-0013 §2). The secret is
+// AES-256-GCM ciphertext at rest (secrets.Cipher.Seal); it is decrypted only
+// in-process to validate a code. A secret is stored unconfirmed (confirmed_at
+// NULL) at enroll and confirmed once a correct code proves possession.
+type TOTPStore interface {
+	// UpsertTOTPSecret inserts or replaces the user's encrypted secret. ON
+	// CONFLICT (user_id) it overwrites the ciphertext AND resets confirmed_at to
+	// NULL, so re-enrolling always starts unconfirmed.
+	UpsertTOTPSecret(ctx context.Context, userID string, secretEncrypted []byte) error
+	// GetTOTPSecret returns the user's secret row, or ErrNotFound.
+	GetTOTPSecret(ctx context.Context, userID string) (*TOTPSecret, error)
+	// ConfirmTOTPSecret stamps confirmed_at guarded by WHERE confirmed_at IS NULL.
+	// ErrNotFound if there is no unconfirmed row to confirm (missing or already
+	// confirmed — a raced double-confirm loses cleanly).
+	ConfirmTOTPSecret(ctx context.Context, userID string) error
+	// DeleteTOTPSecret removes the user's secret (TOTP disable). Idempotent: no
+	// error when there is nothing to delete.
+	DeleteTOTPSecret(ctx context.Context, userID string) error
+}
+
+// RecoveryCodeStore is the per-user recovery-codes aggregate (ADR-0013 §4).
+// Codes are stored as unsalted SHA-256 (high-entropy, single-use) and consumed
+// by hash — the O(1) consume-by-hash that keeps the login path cheap.
+type RecoveryCodeStore interface {
+	// ReplaceRecoveryCodes deletes all of the user's existing codes and inserts
+	// the new set. Both statements MUST run in the caller's WithTx so a regenerate
+	// is atomic (no window with zero or mixed codes).
+	ReplaceRecoveryCodes(ctx context.Context, userID string, codeHashes []string) error
+	// ConsumeRecoveryCode stamps used_at on the matching unused code and reports
+	// whether one was consumed (false ⇒ unknown or already-used code). Single-use
+	// is atomic in the one guarded UPDATE.
+	ConsumeRecoveryCode(ctx context.Context, userID, codeHash string) (bool, error)
+	// CountUnusedRecoveryCodes returns how many of the user's codes remain unused
+	// (drives Me.recoveryCodesRemaining).
+	CountUnusedRecoveryCodes(ctx context.Context, userID string) (int, error)
+	// DeleteRecoveryCodes removes all of the user's codes (TOTP disable).
+	// Idempotent.
+	DeleteRecoveryCodes(ctx context.Context, userID string) error
+}
+
+// LoginChallengeStore is the interim second-factor challenge aggregate
+// (ADR-0013 §3, migration 000004). A challenge is a stored, hashed, single-use,
+// expiring token carried in the proxcloud_totp cookie; it grants nothing but the
+// right to finish step two for its bound user_id. The failure counter gives a
+// DB-backed (multi-instance-safe) per-account lockout.
+type LoginChallengeStore interface {
+	// CreateLoginChallenge inserts a challenge row (token stored hashed) and
+	// returns it. A token_hash collision → ErrConflict.
+	CreateLoginChallenge(ctx context.Context, p CreateLoginChallengeParams) (*LoginChallenge, error)
+	// GetLoginChallengeByTokenHash returns the challenge for a token hash, or
+	// ErrNotFound. Expiry/consumption are the caller's to check.
+	GetLoginChallengeByTokenHash(ctx context.Context, tokenHash string) (*LoginChallenge, error)
+	// ConsumeLoginChallenge stamps consumed_at guarded by WHERE consumed_at IS
+	// NULL (the success path) and reports whether this call won (false ⇒ already
+	// consumed or gone). Single-use is atomic in the one UPDATE.
+	ConsumeLoginChallenge(ctx context.Context, id string) (bool, error)
+	// RecordChallengeFailure increments attempts and, when attempts reach
+	// maxAttempts, self-consumes the challenge (forcing password re-entry). It
+	// returns whether the challenge is now locked (consumed). A challenge that was
+	// already consumed reports locked=true. Atomic in the one guarded UPDATE.
+	RecordChallengeFailure(ctx context.Context, id string, maxAttempts int) (locked bool, err error)
 }
 
 // CreateUserParams are the inputs to CreateUser; generated columns (id,
@@ -465,6 +562,52 @@ type Invitation struct {
 	AcceptedAt *time.Time
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+}
+
+// CreateInvitationParams are the inputs to CreateInvitation. TokenHash is the
+// SHA-256 of the raw token the caller mailed (the raw token is never stored).
+// InvitedBy is nil for system-issued invites. Scope/role are bound in the row.
+type CreateInvitationParams struct {
+	TokenHash string
+	Email     string
+	ScopeType string // "tenant" | "project"
+	ScopeID   string
+	Role      string // "owner" | "contributor" | "reader"
+	InvitedBy *string
+	ExpiresAt time.Time
+}
+
+// TOTPSecret is a user's TOTP shared secret, encrypted at rest. ConfirmedAt is
+// nil until a correct code proves possession (enroll → confirm).
+type TOTPSecret struct {
+	UserID          string
+	SecretEncrypted []byte // AES-256-GCM ciphertext (secrets.Cipher.Seal)
+	ConfirmedAt     *time.Time
+}
+
+// LoginChallenge is an interim second-factor challenge (ADR-0013 §3). The raw
+// token lives only in the proxcloud_totp cookie; the row stores its hash. It is
+// single-use (ConsumedAt) and expiring (ExpiresAt); Attempts drives the
+// per-account lockout.
+type LoginChallenge struct {
+	ID         string
+	UserID     string
+	Attempts   int
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	ConsumedAt *time.Time
+	IP         *string
+	UserAgent  *string
+}
+
+// CreateLoginChallengeParams are the inputs to CreateLoginChallenge. TokenHash
+// is the SHA-256 of the raw challenge token carried in the cookie.
+type CreateLoginChallengeParams struct {
+	UserID    string
+	TokenHash string
+	ExpiresAt time.Time
+	IP        *string
+	UserAgent *string
 }
 
 // AuditEntry is one append-only audit record.

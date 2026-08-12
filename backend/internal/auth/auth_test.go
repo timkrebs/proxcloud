@@ -142,7 +142,7 @@ func TestLogin(t *testing.T) {
 		wantCookie bool
 		wantCode   string
 	}{
-		{"valid", `{"email":"user@b.com","password":"correct-horse-battery"}`, http.StatusNoContent, true, ""},
+		{"valid", `{"email":"user@b.com","password":"correct-horse-battery"}`, http.StatusOK, true, ""},
 		{"wrong password", `{"email":"user@b.com","password":"wrong"}`, http.StatusUnauthorized, false, "unauthenticated"},
 		{"unknown email", `{"email":"nobody@b.com","password":"correct-horse-battery"}`, http.StatusUnauthorized, false, "unauthenticated"},
 		{"malformed json", `{not json`, http.StatusBadRequest, false, "invalid_request"},
@@ -205,8 +205,8 @@ func TestLoginRehashesBcryptToArgon2id(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.Login(rec, jsonReq(http.MethodPost, "/api/auth/login", `{"email":"legacy@b.com","password":"legacy-password-123"}`))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("login status = %d, want 204 (%s)", rec.Code, rec.Body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200 (%s)", rec.Code, rec.Body)
 	}
 	got, _ := fs.GetUserByID(context.Background(), u.ID)
 	if got.PasswordAlgo == nil || *got.PasswordAlgo != AlgoArgon2id {

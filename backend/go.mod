@@ -13,10 +13,12 @@ require (
 	github.com/gzuidhof/tygo v0.2.21
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/luthermonson/go-proxmox v0.8.1
+	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.54.0
 )
 
 require (
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/buger/goterm v1.0.4 // indirect
 	github.com/diskfs/go-diskfs v1.9.3 // indirect
 	github.com/djherbis/times v1.6.0 // indirect

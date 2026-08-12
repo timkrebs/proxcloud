@@ -2,17 +2,25 @@
 // Settings — self-service account area (Phase 2 local auth). Real account
 // details, change-password, and active-session management; the only remaining
 // placeholder is the genuinely unbuilt portal-preferences note.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
+import { RecoveryCodes } from "@/components/security/RecoveryCodes";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { Flyout } from "@/components/ui/Flyout";
 import { Input } from "@/components/ui/Input";
-import { Mi } from "@/components/ui/icons";
+import { Mi, Spinner } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
 import { useChangePassword, useRevokeSession, useSessions } from "@/lib/api/authMutations";
+import {
+  useDisableTotp,
+  useEnrollTotp,
+  useRegenerateRecoveryCodes,
+  useVerifyEnrollTotp,
+} from "@/lib/api/security";
 import type { SessionInfo } from "@/lib/api/generated/types";
 import { useMe } from "@/lib/api/queries";
 import { isValidPassword, PASSWORD_RULE } from "@/lib/auth/validation";
@@ -213,6 +221,377 @@ function ChangePasswordSection() {
   );
 }
 
+// ── Two-step verification (TOTP) ─────────────────────────────────────────────
+
+function securityError(err: unknown, wrongPasswordHint = false): string {
+  if (err instanceof ApiError) {
+    if (err.status === 401) return wrongPasswordHint ? "That password is incorrect." : "That code is not valid.";
+    if (err.status === 409) return "This action is no longer available — refresh and try again.";
+    if (err.status === 429) return "Too many attempts — wait a minute and try again.";
+    return err.detail;
+  }
+  return "Unable to reach the server. Try again.";
+}
+
+/**
+ * Enroll flyout: kicks off enrollment on mount (QR + manual key), collects a
+ * 6-digit confirmation code, then reveals the one-time recovery codes behind an
+ * explicit "I've saved these" gate before closing.
+ */
+function TotpEnrollFlyout({ onClose }: { onClose: () => void }) {
+  const enroll = useEnrollTotp();
+  const verify = useVerifyEnrollTotp();
+  const started = useRef(false);
+  const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [copiedKey, setCopiedKey] = useState(false);
+
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    enroll.mutate();
+    // enroll is stable enough; the ref guards against React's dev double-invoke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Terminal state: codes revealed once, dismissal gated by RecoveryCodes.
+  if (verify.data) {
+    return (
+      <Flyout title="Save your recovery codes" onClose={() => {}}>
+        <RecoveryCodes
+          codes={verify.data.recoveryCodes}
+          doneLabel="Done"
+          onDone={() => {
+            pushToast({
+              kind: "ok",
+              title: "Two-step verification is on",
+              desc: "You'll enter a code from your app at sign-in.",
+            });
+            onClose();
+          }}
+        />
+      </Flyout>
+    );
+  }
+
+  function submitCode() {
+    if (code.length !== 6) {
+      setError("Enter the 6-digit code from your app.");
+      return;
+    }
+    setError("");
+    verify.mutate({ code }, { onError: (err) => setError(securityError(err)) });
+  }
+
+  return (
+    <Flyout title="Set up two-step verification" onClose={onClose}>
+      {enroll.isPending ? (
+        <div className="flex items-center gap-2 text-[13px] text-ink-2">
+          <Spinner size={16} />
+          Preparing your authenticator secret…
+        </div>
+      ) : enroll.isError ? (
+        <div>
+          <CardError err={enroll.error} />
+          <div className="mt-3">
+            <Button
+              variant="secondaryCompact"
+              onClick={() => {
+                started.current = true;
+                enroll.reset();
+                enroll.mutate();
+              }}
+            >
+              Retry
+            </Button>
+          </div>
+        </div>
+      ) : enroll.data ? (
+        <div>
+          <ol className="mb-4 list-decimal space-y-1 pl-5 text-[13px] leading-[1.5] text-ink-2">
+            <li>Scan the QR code with an authenticator app (Google Authenticator, 1Password, …).</li>
+            <li>Enter the 6-digit code it shows to confirm.</li>
+          </ol>
+
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={enroll.data.qrPngDataUri}
+            alt="Two-step verification QR code"
+            width={180}
+            height={180}
+            className="mb-3 rounded-fluent border border-line"
+          />
+
+          <div className="mb-4">
+            <div className="mb-[6px] text-[12px] text-ink-2">Or enter this key manually</div>
+            <div className="flex items-center gap-2">
+              <code className="rounded-fluent border border-line bg-canvas px-2 py-1 font-mono text-[13px] break-all text-ink">
+                {enroll.data.manualKey}
+              </code>
+              <Button
+                variant="secondaryCompact"
+                onClick={async () => {
+                  try {
+                    if (typeof navigator !== "undefined" && navigator.clipboard) {
+                      await navigator.clipboard.writeText(enroll.data!.manualKey);
+                      setCopiedKey(true);
+                    }
+                  } catch {
+                    // best-effort — the key is visible and selectable
+                  }
+                }}
+              >
+                {copiedKey ? "Copied" : "Copy"}
+              </Button>
+            </div>
+          </div>
+
+          <label htmlFor="totp-confirm" className="mb-[6px] block text-[13px] text-ink">
+            6-digit code
+          </label>
+          <Input
+            id="totp-confirm"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            placeholder="123456"
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value.replace(/\D/g, ""));
+              setError("");
+            }}
+            className="w-[160px] tracking-[0.3em] tabular-nums"
+            autoFocus
+          />
+          {error ? <p className="mt-2 text-[12px] text-err-text">{error}</p> : null}
+
+          <div className="mt-5 flex gap-2">
+            <Button variant="primary" disabled={code.length !== 6 || verify.isPending} onClick={submitCode}>
+              {verify.isPending ? "Verifying…" : "Confirm"}
+            </Button>
+            <Button variant="secondary" onClick={onClose}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </Flyout>
+  );
+}
+
+/** Turn-off flyout: re-prompt the password, then disable TOTP. */
+function DisableTotpFlyout({ onClose }: { onClose: () => void }) {
+  const disable = useDisableTotp();
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!password) {
+      setError("Enter your password to confirm.");
+      return;
+    }
+    setError("");
+    disable.mutate(
+      { password },
+      {
+        onSuccess: () => {
+          pushToast({
+            kind: "ok",
+            title: "Two-step verification turned off",
+            desc: "Your recovery codes were deleted.",
+          });
+          onClose();
+        },
+        onError: (err) => setError(securityError(err, true)),
+      },
+    );
+  }
+
+  return (
+    <Flyout title="Turn off two-step verification" onClose={onClose}>
+      <div className="mb-4 flex gap-[10px] rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5]">
+        <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>Turning this off deletes your recovery codes and lets anyone with your password sign in.</span>
+      </div>
+      <form onSubmit={submit}>
+        <label htmlFor="disable-totp-password" className="mb-[6px] block text-[13px] text-ink">
+          Confirm your password
+        </label>
+        <Input
+          id="disable-totp-password"
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => {
+            setPassword(e.target.value);
+            setError("");
+          }}
+          className="w-full"
+          autoFocus
+        />
+        {error ? <p className="mt-2 text-[12px] text-err-text">{error}</p> : null}
+        <div className="mt-5 flex gap-2">
+          <Button variant="danger" disabled={!password || disable.isPending}>
+            {disable.isPending ? "Turning off…" : "Turn off"}
+          </Button>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </Flyout>
+  );
+}
+
+/** Regenerate flyout: re-prompt the password, then reveal the fresh codes once. */
+function RegenerateCodesFlyout({ onClose }: { onClose: () => void }) {
+  const regen = useRegenerateRecoveryCodes();
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  if (regen.data) {
+    return (
+      <Flyout title="New recovery codes" onClose={() => {}}>
+        <RecoveryCodes
+          codes={regen.data.recoveryCodes}
+          doneLabel="Done"
+          onDone={() => {
+            pushToast({ kind: "ok", title: "Recovery codes regenerated", desc: "Older codes no longer work." });
+            onClose();
+          }}
+        />
+      </Flyout>
+    );
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!password) {
+      setError("Enter your password to confirm.");
+      return;
+    }
+    setError("");
+    regen.mutate({ password }, { onError: (err) => setError(securityError(err, true)) });
+  }
+
+  return (
+    <Flyout title="Regenerate recovery codes" onClose={onClose}>
+      <p className="mb-4 text-[13px] leading-[1.5] text-ink-2">
+        This replaces your existing recovery codes with ten new ones. Any codes you saved before will
+        stop working.
+      </p>
+      <form onSubmit={submit}>
+        <label htmlFor="regen-password" className="mb-[6px] block text-[13px] text-ink">
+          Confirm your password
+        </label>
+        <Input
+          id="regen-password"
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => {
+            setPassword(e.target.value);
+            setError("");
+          }}
+          className="w-full"
+          autoFocus
+        />
+        {error ? <p className="mt-2 text-[12px] text-err-text">{error}</p> : null}
+        <div className="mt-5 flex gap-2">
+          <Button variant="primary" disabled={!password || regen.isPending}>
+            {regen.isPending ? "Generating…" : "Regenerate codes"}
+          </Button>
+          <Button variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+        </div>
+      </form>
+    </Flyout>
+  );
+}
+
+type TwoStepDialog = "enroll" | "disable" | "regenerate" | null;
+
+function TwoStepSection() {
+  const me = useMe();
+  const [dialog, setDialog] = useState<TwoStepDialog>(null);
+
+  if (me.isPending) {
+    return (
+      <Section title="Two-step verification">
+        <Skeleton className="h-5 w-72" />
+      </Section>
+    );
+  }
+  if (me.isError) {
+    return (
+      <Section title="Two-step verification">
+        <CardError err={me.error} />
+        <div className="mt-3">
+          <Button variant="secondaryCompact" onClick={() => me.refetch()}>
+            Retry
+          </Button>
+        </div>
+      </Section>
+    );
+  }
+
+  const enabled = me.data.totpEnabled;
+  const remaining = me.data.recoveryCodesRemaining;
+
+  return (
+    <Section
+      title="Two-step verification"
+      caption="Protect your account with a time-based one-time code from an authenticator app."
+    >
+      {enabled ? (
+        <>
+          <FieldRow label="Status">
+            <span className="inline-flex items-center gap-[6px] rounded-fluent border border-ok bg-ok-bg px-[10px] py-1 text-[12px] font-semibold text-ok">
+              <Mi name="checkC" size={14} color="var(--color-ok)" />
+              On
+            </span>
+          </FieldRow>
+          <FieldRow label="Recovery codes">
+            <div className="flex h-8 items-center gap-2 text-[14px] text-ink tabular-nums">
+              {remaining} remaining
+              {remaining <= 3 ? (
+                <span className="text-[12px] text-err-text">Running low — regenerate soon.</span>
+              ) : null}
+            </div>
+          </FieldRow>
+          <div className="mt-2 flex gap-2">
+            <Button variant="secondaryCompact" onClick={() => setDialog("regenerate")}>
+              Regenerate recovery codes
+            </Button>
+            <Button variant="secondaryCompact" onClick={() => setDialog("disable")}>
+              Turn off two-step
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <FieldRow label="Status">
+            <span className="inline-flex items-center rounded-fluent border border-line-input bg-card px-[10px] py-1 text-[12px] text-ink-2">
+              Off
+            </span>
+          </FieldRow>
+          <div className="mt-2">
+            <Button variant="primaryCompact" onClick={() => setDialog("enroll")}>
+              Set up
+            </Button>
+          </div>
+        </>
+      )}
+
+      {dialog === "enroll" ? <TotpEnrollFlyout onClose={() => setDialog(null)} /> : null}
+      {dialog === "disable" ? <DisableTotpFlyout onClose={() => setDialog(null)} /> : null}
+      {dialog === "regenerate" ? <RegenerateCodesFlyout onClose={() => setDialog(null)} /> : null}
+    </Section>
+  );
+}
+
 function SessionRow({ session }: { session: SessionInfo }) {
   const revoke = useRevokeSession();
   return (
@@ -319,6 +698,7 @@ export default function SettingsPage() {
 
       <AccountSection />
       <ChangePasswordSection />
+      <TwoStepSection />
       <SessionsSection />
 
       <Section title="Portal preferences">

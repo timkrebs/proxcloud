@@ -21,6 +21,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/mail"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
@@ -51,6 +52,16 @@ type Deps struct {
 
 	// Pricing — nil or Enabled=false hides all cost UI.
 	Pricing *types.Pricing
+
+	// Invitation delivery (ADR-0013 §2). Mailer sends the accept-link email
+	// (SMTP or dev log); nil-safe — CreateInvitation still persists the invite
+	// but logs that no mail was sent. FrontendOrigin is the accept-link base
+	// (FRONTEND_ORIGIN); when empty the link is unusable and CreateInvitation
+	// logs a WARN but does not fail. InvitationTTL bounds how long a minted
+	// invite stays valid (defaults to 72h if unset).
+	Mailer         mail.Mailer
+	FrontendOrigin string
+	InvitationTTL  time.Duration
 }
 
 // MountAccount attaches the tenant-agnostic, per-user account routes (paths
@@ -111,6 +122,7 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Get(p+"/projects/{projectId}", d.GetProject)
 	r.Get(p+"/projects/{projectId}/quota", d.GetProjectQuota)
 	r.Get(p+"/members", d.ListMembers)
+	r.Get(p+"/invitations", d.ListInvitations)
 	r.Get(p+"/resources", d.ListTenantResources)
 
 	r.Get(p+"/catalog/nextid", d.GetNextID)
@@ -132,6 +144,9 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Get(p+"/tasks/{upid}/log", d.GetTenantTaskLog)
 
 	// --- mutating surface (Contributor/Owner) — gated by AuditOnMutation ---
+	r.Post(p+"/invitations", d.CreateInvitation)
+	r.Delete(p+"/invitations/{invitationId}", d.RevokeInvitation)
+
 	r.Post(p+"/projects", d.CreateProject)
 	r.Patch(p+"/projects/{projectId}", d.RenameProject)
 	r.Delete(p+"/projects/{projectId}", d.DeleteProject)

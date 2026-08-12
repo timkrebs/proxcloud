@@ -7,16 +7,25 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/auditz"
+	"github.com/timkrebs9/proxcloud/backend/internal/mail"
+	"github.com/timkrebs9/proxcloud/backend/internal/secrets"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 )
 
 // minPasswordLen is the enforced floor for user-chosen passwords (bootstrap and
 // change-password). Aligns with ADR-0006's move to real user credentials.
 const minPasswordLen = 12
+
+// defaultLoginChallengeTTL is the fallback interim-challenge lifetime when
+// Handler.LoginChallengeTTL is unset (tests and defensive; main.go always injects
+// cfg.LoginChallengeTTL, default 5m). Mirrors handlers' defaultInvitationTTL.
+const defaultLoginChallengeTTL = 5 * time.Minute
 
 // Handler serves /api/auth/*.
 type Handler struct {
@@ -25,6 +34,26 @@ type Handler struct {
 	Hasher   *PasswordHasher
 	Log      *slog.Logger
 	Limiter  *LoginLimiter // nil disables rate limiting (tests)
+
+	// Phase 5 (ADR-0013) dependencies, injected in main.go. They are wired now so
+	// the invitation/TOTP/login-2FA handlers landing in later chunks can use them;
+	// this chunk does not read them. All are safe to leave nil in existing tests.
+	Secrets           *secrets.Cipher  // AES-256-GCM for the TOTP secret at rest
+	Mailer            mail.Mailer      // invite accept-link delivery (SMTP or dev log)
+	Auditz            *auditz.Recorder // account-level security-mutation audit (Begin/Finalize)
+	InvitationTTL     time.Duration    // how long a minted invite stays valid
+	LoginChallengeTTL time.Duration    // interim TOTP challenge lifetime
+	TOTPIssuer        string           // otpauth issuer label (config.TOTPIssuer); default "Proxcloud"
+}
+
+// recorder returns the account-level audit recorder, defaulting to a fresh one
+// over the handler's store when none was injected (tests). It mirrors the
+// fail-closed intent→finalize contract used by admin/quota mutations.
+func (h *Handler) recorder() *auditz.Recorder {
+	if h.Auditz != nil {
+		return h.Auditz
+	}
+	return &auditz.Recorder{Store: h.Store, Log: h.logger()}
 }
 
 func unauthenticated() *types.APIError {
@@ -43,6 +72,14 @@ type identityCtxKey struct{}
 func IdentityFrom(ctx context.Context) (*Identity, bool) {
 	id, ok := ctx.Value(identityCtxKey{}).(*Identity)
 	return id, ok
+}
+
+// ContextWithIdentity returns ctx carrying id as the authenticated principal.
+// Authenticate sets this in production; it is exported so tests can drive a
+// handler with a synthesized principal (e.g. to exercise the privilege-escalation
+// cap that the Enforce middleware would otherwise gate before the handler runs).
+func ContextWithIdentity(ctx context.Context, id *Identity) context.Context {
+	return context.WithValue(ctx, identityCtxKey{}, id)
 }
 
 // Authenticate rejects requests without a valid session and injects the
@@ -186,9 +223,48 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Session rotation (ADR-0006): if this browser already carried a valid
-	// session for the SAME user, retire it once the new one is issued so a
-	// re-login does not leave the previous token live.
+	// Second factor gate (ADR-0013 §3): the password is correct, but if TOTP is
+	// enabled we issue NO session. Instead we mint a stored, hashed, single-use,
+	// expiring challenge carried in a SEPARATE proxcloud_totp cookie; it grants
+	// nothing but the right to complete POST /api/auth/login/totp for this user.
+	if user.TOTPEnabled {
+		token, terr := mintChallengeToken()
+		if terr != nil {
+			h.logger().Error("login: mint challenge token", "err", terr)
+			writeErr(w, internalErr())
+			return
+		}
+		// Guard the zero value (unset in tests / defensive) so a challenge is never
+		// minted already-expired. Mirrors handlers' defaultInvitationTTL fallback.
+		challengeTTL := h.LoginChallengeTTL
+		if challengeTTL <= 0 {
+			challengeTTL = defaultLoginChallengeTTL
+		}
+		ipp, uap := requestMeta(r)
+		if _, cerr := h.Store.CreateLoginChallenge(ctx, store.CreateLoginChallengeParams{
+			UserID:    user.ID,
+			TokenHash: hashToken(token),
+			ExpiresAt: time.Now().Add(challengeTTL),
+			IP:        ipp,
+			UserAgent: uap,
+		}); cerr != nil {
+			h.logger().Error("login: create challenge", "err", cerr)
+			writeErr(w, internalErr())
+			return
+		}
+		if h.Limiter != nil {
+			h.Limiter.Reset(ip) // password was correct; free the window for step two
+		}
+		http.SetCookie(w, h.Sessions.IssueChallengeCookie(token, challengeTTL))
+		h.logger().Info("login: second factor required", "user_id", user.ID)
+		writeJSON(w, http.StatusOK, types.LoginResponse{TotpRequired: true})
+		return
+	}
+
+	// TOTP disabled → issue the real session now. Session rotation (ADR-0006): if
+	// this browser already carried a valid session for the SAME user, retire it
+	// once the new one is issued so a re-login does not leave the previous token
+	// live. This rotate path exists ONLY here, on the real session issue.
 	oldSessionID := ""
 	if prev, verr := h.Sessions.Verify(ctx, r); verr == nil && prev.UserID == user.ID {
 		oldSessionID = prev.SessionID
@@ -210,7 +286,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.logger().Info("login ok", "user_id", user.ID)
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, types.LoginResponse{TotpRequired: false})
 }
 
 // Logout handles POST /api/auth/logout. Revokes the caller's current session
@@ -250,14 +326,26 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		tenants = append(tenants, types.TenantMembership{ID: tw.ID, Name: tw.Name, Slug: tw.Slug, Role: tw.Role})
 	}
 
+	// Unused recovery-code count (never the codes themselves) for the Settings
+	// "N codes left" line. Best-effort: a lookup failure just reports 0.
+	remaining := 0
+	if user.TOTPEnabled {
+		if n, cerr := h.Store.CountUnusedRecoveryCodes(r.Context(), user.ID); cerr == nil {
+			remaining = n
+		} else {
+			h.logger().Warn("me: count recovery codes", "err", cerr)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, types.Me{
-		ID:              user.ID,
-		Email:           user.Email,
-		DisplayName:     user.DisplayName,
-		IsPlatformAdmin: user.IsPlatformAdmin,
-		TOTPEnabled:     user.TOTPEnabled,
-		ActiveTenantId:  id.ActiveTenantID,
-		Tenants:         tenants,
+		ID:                     user.ID,
+		Email:                  user.Email,
+		DisplayName:            user.DisplayName,
+		IsPlatformAdmin:        user.IsPlatformAdmin,
+		TOTPEnabled:            user.TOTPEnabled,
+		ActiveTenantId:         id.ActiveTenantID,
+		RecoveryCodesRemaining: remaining,
+		Tenants:                tenants,
 	})
 }
 
@@ -352,8 +440,26 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, internalErr())
 		return
 	}
+
+	// Fail-closed audit intent BEFORE the update (ADR-0013 §6 / decision F4 —
+	// password.change was unaudited since Phase 2). An intent-insert failure
+	// refuses the change, so no password is ever rotated unlogged.
+	pending, aerr := h.recorder().Begin(ctx, auditz.Intent{
+		Action:      "password.change",
+		ActorUserID: user.ID,
+		TenantID:    id.ActiveTenantID,
+		TargetType:  "user",
+		TargetID:    user.ID,
+		IP:          ipPtr(r),
+	})
+	if aerr != nil {
+		h.logger().Error("audit intent for password.change failed — change refused", "err", aerr)
+		writeErr(w, internalErr())
+		return
+	}
 	if err := h.Store.UpdatePasswordHash(ctx, user.ID, nh, AlgoArgon2id); err != nil {
 		h.logger().Error("password update", "err", err)
+		pending.Finalize(ctx, "error", map[string]any{"status": http.StatusInternalServerError})
 		writeErr(w, internalErr())
 		return
 	}
@@ -363,6 +469,7 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	if h.Limiter != nil {
 		h.Limiter.Reset(ip)
 	}
+	pending.Finalize(ctx, "success", map[string]any{"status": http.StatusNoContent})
 	h.logger().Info("password changed", "user_id", user.ID)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -36,6 +36,7 @@ type harness struct {
 	engine   *deploy.Engine
 	registry *tasks.Registry
 	sessions *auth.Sessions
+	mailer   *captureMailer
 }
 
 func newHarness(t *testing.T, mock *proxmoxtest.MockClient) *harness {
@@ -55,7 +56,9 @@ func newHarnessLog(t *testing.T, mock *proxmoxtest.MockClient, log *slog.Logger)
 	engine := deploy.NewEngine(mock, reg, broker, log)
 	engine.Finalize = func(ctx context.Context, id, upid string) error { return fake.FinalizeOwnership(ctx, id, upid) }
 	engine.Release = func(ctx context.Context, id string) error { return fake.ReleaseOwnership(ctx, id) }
-	api := &handlers.Deps{PVE: mock, Log: log, Store: fake, Authz: mw, Deploy: engine, Registry: reg, Broker: broker}
+	mailer := &captureMailer{}
+	api := &handlers.Deps{PVE: mock, Log: log, Store: fake, Authz: mw, Deploy: engine, Registry: reg, Broker: broker,
+		Mailer: mailer, FrontendOrigin: "https://portal.test", InvitationTTL: 72 * time.Hour}
 	h := httpserver.New(httpserver.Deps{
 		Cfg:     &config.Config{},
 		Log:     log,
@@ -65,7 +68,7 @@ func newHarnessLog(t *testing.T, mock *proxmoxtest.MockClient, log *slog.Logger)
 		Admin:   api.MountAdmin,
 		Tenant:  api.MountTenant,
 	})
-	return &harness{h: h, fake: fake, mock: mock, engine: engine, registry: reg, sessions: sessions}
+	return &harness{h: h, fake: fake, mock: mock, engine: engine, registry: reg, sessions: sessions, mailer: mailer}
 }
 
 // cookie issues a live session for userID and returns its cookie.

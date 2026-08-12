@@ -13,7 +13,7 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Mi, Svc } from "@/components/ui/icons";
 import { useMe } from "@/lib/api/queries";
-import { useUiStore } from "@/lib/stores/uiStore";
+import { useActiveTenantId, useUiStore } from "@/lib/stores/uiStore";
 
 interface NavItem {
   label: string;
@@ -23,6 +23,8 @@ interface NavItem {
   match: (pathname: string, type: string | null) => boolean;
   /** Hidden for non-platform-admins (cluster-wide infrastructure). */
   adminOnly?: boolean;
+  /** Hidden unless the caller is an Owner of the active tenant (or admin). */
+  ownerOnly?: boolean;
 }
 
 type Row =
@@ -40,8 +42,8 @@ const item = (
   href: string,
   icon: ReactNode,
   match: NavItem["match"],
-  adminOnly = false,
-): Row => ({ kind: "item", item: { label, href, icon, match, adminOnly } });
+  extra: { adminOnly?: boolean; ownerOnly?: boolean } = {},
+): Row => ({ kind: "item", item: { label, href, icon, match, ...extra } });
 
 const ROWS: Row[] = [
   item(
@@ -69,6 +71,13 @@ const ROWS: Row[] = [
     <Mi name="grid" size={16} color="var(--color-accent)" strokeWidth={1.4} />,
     (p) => prefix("/projects")(p),
   ),
+  item(
+    "Members",
+    "/members",
+    <Mi name="person" size={16} color="var(--color-accent)" strokeWidth={1.4} />,
+    (p) => prefix("/members")(p),
+    { ownerOnly: true },
+  ),
   { kind: "divider" },
   { kind: "label", text: "Favorites" },
   item(
@@ -83,8 +92,8 @@ const ROWS: Row[] = [
     <Svc name="lxc" size={17} />,
     (p, t) => p === "/resources" && t === "lxc",
   ),
-  item("Nodes", "/nodes", <Svc name="node" size={17} />, (p) => prefix("/nodes")(p), true),
-  item("Storage", "/storage", <Svc name="vol" size={17} />, (p) => prefix("/storage")(p), true),
+  item("Nodes", "/nodes", <Svc name="node" size={17} />, (p) => prefix("/nodes")(p), { adminOnly: true }),
+  item("Storage", "/storage", <Svc name="vol" size={17} />, (p) => prefix("/storage")(p), { adminOnly: true }),
   { kind: "divider" },
   item(
     "Activity log",
@@ -105,11 +114,13 @@ function Rows({
   pathname,
   type,
   isAdmin,
+  isOwner,
 }: {
   collapsed: boolean;
   pathname: string;
   type: string | null;
   isAdmin: boolean;
+  isOwner: boolean;
 }) {
   return (
     <>
@@ -125,8 +136,9 @@ function Rows({
             </div>
           );
         }
-        const { label, href, icon, match, adminOnly } = row.item;
+        const { label, href, icon, match, adminOnly, ownerOnly } = row.item;
         if (adminOnly && !isAdmin) return null;
+        if (ownerOnly && !isOwner) return null;
         const active = match(pathname, type);
         return (
           <Link
@@ -150,20 +162,24 @@ function Rows({
 // useSearchParams requires a Suspense boundary during prerendering, so the
 // param-aware list lives behind one; the fallback renders the same rows
 // without a type filter (only /resources?type= items lose their highlight).
-function RowsWithParams({ collapsed, isAdmin }: { collapsed: boolean; isAdmin: boolean }) {
+function RowsWithParams({ collapsed, isAdmin, isOwner }: { collapsed: boolean; isAdmin: boolean; isOwner: boolean }) {
   const pathname = usePathname();
   const type = useSearchParams().get("type");
-  return <Rows collapsed={collapsed} pathname={pathname} type={type} isAdmin={isAdmin} />;
+  return <Rows collapsed={collapsed} pathname={pathname} type={type} isAdmin={isAdmin} isOwner={isOwner} />;
 }
 
-function RowsFallback({ collapsed, isAdmin }: { collapsed: boolean; isAdmin: boolean }) {
+function RowsFallback({ collapsed, isAdmin, isOwner }: { collapsed: boolean; isAdmin: boolean; isOwner: boolean }) {
   const pathname = usePathname();
-  return <Rows collapsed={collapsed} pathname={pathname} type={null} isAdmin={isAdmin} />;
+  return <Rows collapsed={collapsed} pathname={pathname} type={null} isAdmin={isAdmin} isOwner={isOwner} />;
 }
 
 export default function SideNav() {
   const collapsed = useUiStore((s) => s.navCollapsed);
-  const isAdmin = !!useMe().data?.isPlatformAdmin;
+  const me = useMe();
+  const activeTenantId = useActiveTenantId();
+  const isAdmin = !!me.data?.isPlatformAdmin;
+  const tenantRole = me.data?.tenants.find((t) => t.id === activeTenantId)?.role;
+  const isOwner = isAdmin || tenantRole === "owner";
   return (
     <nav
       aria-label="Primary"
@@ -171,8 +187,8 @@ export default function SideNav() {
         collapsed ? "w-12" : "w-[220px]"
       }`}
     >
-      <Suspense fallback={<RowsFallback collapsed={collapsed} isAdmin={isAdmin} />}>
-        <RowsWithParams collapsed={collapsed} isAdmin={isAdmin} />
+      <Suspense fallback={<RowsFallback collapsed={collapsed} isAdmin={isAdmin} isOwner={isOwner} />}>
+        <RowsWithParams collapsed={collapsed} isAdmin={isAdmin} isOwner={isOwner} />
       </Suspense>
     </nav>
   );

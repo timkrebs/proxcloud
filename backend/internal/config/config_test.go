@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // baseEnv is a minimal set of env vars that make Load() succeed, so each test
@@ -103,6 +104,80 @@ func TestSessionTTLParsing(t *testing.T) {
 	t.Setenv("SESSION_IDLE_TTL", "not-a-duration")
 	_, err := Load()
 	assertProblem(t, err, "SESSION_IDLE_TTL")
+}
+
+// TestPhase5Defaults asserts the invitation/TOTP/SMTP settings default correctly
+// when unset (the app must boot unchanged without any new env vars).
+func TestPhase5Defaults(t *testing.T) {
+	baseEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() = %v, want nil", err)
+	}
+	if cfg.InvitationTTL != 72*time.Hour {
+		t.Errorf("InvitationTTL = %v, want 72h", cfg.InvitationTTL)
+	}
+	if cfg.LoginChallengeTTL != 5*time.Minute {
+		t.Errorf("LoginChallengeTTL = %v, want 5m", cfg.LoginChallengeTTL)
+	}
+	if cfg.TOTPIssuer != "Proxcloud" {
+		t.Errorf("TOTPIssuer = %q, want Proxcloud", cfg.TOTPIssuer)
+	}
+	if cfg.SMTPPort != "587" {
+		t.Errorf("SMTPPort = %q, want 587", cfg.SMTPPort)
+	}
+	if !cfg.SMTPStartTLS {
+		t.Error("SMTPStartTLS defaulted to false, want true")
+	}
+	if cfg.SMTPEnabled() {
+		t.Error("SMTPEnabled() true with no SMTP_HOST")
+	}
+}
+
+func TestSMTPValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		from string
+		want string // "" = must succeed
+	}{
+		{"no smtp configured", "", "", ""},
+		{"host without from", "smtp.example.com", "", "SMTP_FROM"},
+		{"host with from", "smtp.example.com", "noreply@example.com", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			baseEnv(t)
+			t.Setenv("SMTP_HOST", tt.host)
+			t.Setenv("SMTP_FROM", tt.from)
+			cfg, err := Load()
+			assertProblem(t, err, tt.want)
+			if tt.want == "" && tt.host != "" {
+				if !cfg.SMTPEnabled() {
+					t.Error("SMTPEnabled() false with SMTP_HOST set")
+				}
+			}
+		})
+	}
+}
+
+func TestSMTPStartTLSOptOut(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("SMTP_STARTTLS", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() = %v, want nil", err)
+	}
+	if cfg.SMTPStartTLS {
+		t.Error("SMTP_STARTTLS=false did not disable StartTLS")
+	}
+}
+
+func TestPhase5TTLParsing(t *testing.T) {
+	baseEnv(t)
+	t.Setenv("LOGIN_CHALLENGE_TTL", "not-a-duration")
+	_, err := Load()
+	assertProblem(t, err, "LOGIN_CHALLENGE_TTL")
 }
 
 // assertProblem checks that err is nil when want=="" or contains want otherwise.

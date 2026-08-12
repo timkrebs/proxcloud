@@ -78,11 +78,18 @@ func New(d Deps) http.Handler {
 		}
 		r.Get("/health", health)
 
-		// Public auth surface: first-run status/bootstrap and login. Everything
-		// else self-identifies via the session and lives in the group below.
+		// Public auth surface: first-run status/bootstrap, login, and the invite
+		// accept flow (the opaque token is the credential — the caller may be signed
+		// out or not yet exist). Everything else self-identifies via the session and
+		// lives in the group below.
 		r.Get("/auth/bootstrap-status", d.Auth.BootstrapStatus)
 		r.Post("/auth/bootstrap", d.Auth.Bootstrap)
 		r.Post("/auth/login", d.Auth.Login)
+		// Second-factor login: the interim proxcloud_totp challenge cookie is the
+		// credential (the caller is not yet signed in), so this is public.
+		r.Post("/auth/login/totp", d.Auth.LoginTOTP)
+		r.Get("/auth/invitations/{token}", d.Auth.ValidateInvite)
+		r.Post("/auth/invitations/{token}/accept", d.Auth.AcceptInvite)
 
 		if d.ConsoleWS != nil {
 			r.Get("/console/ws/{sessionId}", d.ConsoleWS.ServeHTTP)
@@ -103,6 +110,12 @@ func New(d Deps) http.Handler {
 			r.Post("/auth/password", d.Auth.ChangePassword)
 			r.Get("/auth/sessions", d.Auth.ListSessions)
 			r.Delete("/auth/sessions/{id}", d.Auth.DeleteSession)
+
+			// --- account-level TOTP + recovery management (ADR-0013 §3) ---
+			r.Post("/auth/totp/enroll", d.Auth.EnrollTOTP)
+			r.Post("/auth/totp/verify", d.Auth.VerifyEnrollTOTP)
+			r.Post("/auth/totp/disable", d.Auth.DisableTOTP)
+			r.Post("/auth/totp/recovery-codes", d.Auth.RegenerateRecoveryCodes)
 
 			if d.Events != nil {
 				r.Get("/events", d.Events)
@@ -211,13 +224,9 @@ func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
-			path := r.URL.Path
-			if strings.HasPrefix(path, "/api/console/ws/") {
-				path = "/api/console/ws/[redacted]" // the id is a one-shot credential
-			}
 			log.Info("http",
 				"method", r.Method,
-				"path", path,
+				"path", redactPath(r.URL.Path),
 				"status", ww.Status(),
 				"bytes", ww.BytesWritten(),
 				"dur_ms", time.Since(start).Milliseconds(),
@@ -225,4 +234,36 @@ func accessLog(log *slog.Logger) func(http.Handler) http.Handler {
 			)
 		})
 	}
+}
+
+// inviteRoutePrefix is the public invite surface whose next path segment is the
+// single-use invite token (a credential).
+const inviteRoutePrefix = "/api/auth/invitations/"
+
+// redactPath strips single-use credentials that ride in the URL path out of the
+// access log. Two surfaces carry a secret as a path segment:
+//   - the console one-shot session id (/api/console/ws/{sessionId}), and
+//   - the invite token on the public invite routes
+//     (/api/auth/invitations/{token} and .../{token}/accept).
+//
+// The invite token is a real credential (accepting it proves mailbox control and
+// mints a session), so per ADR-0013 §5.1 it must never reach structured/access
+// logs. We redact only the token segment, preserving any trailing subpath (e.g.
+// /accept) so the logged route stays meaningful.
+func redactPath(path string) string {
+	if strings.HasPrefix(path, "/api/console/ws/") {
+		return "/api/console/ws/[redacted]" // the id is a one-shot credential
+	}
+	if strings.HasPrefix(path, inviteRoutePrefix) {
+		rest := path[len(inviteRoutePrefix):]
+		if rest == "" {
+			return path // /api/auth/invitations/ with no token — nothing to redact
+		}
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			// "<token>/accept" (or deeper) — redact the token, keep the tail.
+			return inviteRoutePrefix + "[redacted]" + rest[i:]
+		}
+		return inviteRoutePrefix + "[redacted]" // "<token>" — the validate route
+	}
+	return path
 }

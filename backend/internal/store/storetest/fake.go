@@ -32,6 +32,27 @@ type Fake struct {
 	ownership   map[int]*store.ResourceOwnership // by vmid
 	quotas      map[string]*store.Quota          // by scopeType+"|"+scopeID
 	audit       []*store.AuditEntry              // append-only; newest last
+
+	// Phase 5 (ADR-0013) aggregates.
+	invitations map[string]*store.Invitation // by id
+	totp        map[string]*store.TOTPSecret // by userID
+	recovery    []*fakeRecoveryCode          // append-only; single-use via UsedAt
+	challenges  map[string]*fakeChallenge    // by id
+	chalByHash  map[string]string            // token_hash -> challenge id
+}
+
+// fakeRecoveryCode is one stored recovery code (hashed, single-use).
+type fakeRecoveryCode struct {
+	UserID   string
+	CodeHash string
+	UsedAt   *time.Time
+}
+
+// fakeChallenge wraps a LoginChallenge with the token hash the domain struct
+// deliberately omits (mirrors sessions storing only the hash).
+type fakeChallenge struct {
+	c         store.LoginChallenge
+	tokenHash string
 }
 
 var _ store.Store = (*Fake)(nil)
@@ -49,6 +70,11 @@ func New() *Fake {
 		ownership:   map[int]*store.ResourceOwnership{},
 		quotas:      map[string]*store.Quota{},
 		audit:       []*store.AuditEntry{},
+		invitations: map[string]*store.Invitation{},
+		totp:        map[string]*store.TOTPSecret{},
+		recovery:    []*fakeRecoveryCode{},
+		challenges:  map[string]*fakeChallenge{},
+		chalByHash:  map[string]string{},
 	}
 }
 
@@ -199,6 +225,23 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	for k, v := range f.memberships {
 		memberships[k] = v
 	}
+	invitations := make(map[string]*store.Invitation, len(f.invitations))
+	for k, v := range f.invitations {
+		invitations[k] = v
+	}
+	totp := make(map[string]*store.TOTPSecret, len(f.totp))
+	for k, v := range f.totp {
+		totp[k] = v
+	}
+	recovery := append([]*fakeRecoveryCode(nil), f.recovery...)
+	challenges := make(map[string]*fakeChallenge, len(f.challenges))
+	for k, v := range f.challenges {
+		challenges[k] = v
+	}
+	chalByHash := make(map[string]string, len(f.chalByHash))
+	for k, v := range f.chalByHash {
+		chalByHash[k] = v
+	}
 	f.mu.Unlock()
 
 	if err := fn(f); err != nil {
@@ -207,6 +250,11 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 		f.projects = projects
 		f.ownership = ownership
 		f.memberships = memberships
+		f.invitations = invitations
+		f.totp = totp
+		f.recovery = recovery
+		f.challenges = challenges
+		f.chalByHash = chalByHash
 		f.mu.Unlock()
 		return err
 	}
@@ -264,9 +312,14 @@ func (f *Fake) ListProjectsByTenant(_ context.Context, tenantID string) ([]store
 func (f *Fake) CreateUser(_ context.Context, p store.CreateUserParams) (*store.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.failed("CreateUser"); err != nil {
+		return nil, err
+	}
+	// Mirror UNIQUE(lower(email)): a duplicate email is a conflict (so the
+	// invite-accept path can map a raced create to a 409, not a 500).
 	for _, u := range f.users {
 		if strings.EqualFold(u.Email, p.Email) {
-			return nil, fmt.Errorf("duplicate email")
+			return nil, fmt.Errorf("create user: %w", store.ErrConflict)
 		}
 	}
 	id := f.next("user")
@@ -974,4 +1027,284 @@ func rank(role string) int {
 	default:
 		return 0
 	}
+}
+
+// --- invitations (Phase 5) ---
+
+func (f *Fake) CreateInvitation(_ context.Context, p store.CreateInvitationParams) (*store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CreateInvitation"); err != nil {
+		return nil, err
+	}
+	// Supersede any still-pending invite for the same (email, scope).
+	for id, inv := range f.invitations {
+		if inv.AcceptedAt == nil && strings.EqualFold(inv.Email, p.Email) &&
+			inv.ScopeType == p.ScopeType && inv.ScopeID == p.ScopeID {
+			delete(f.invitations, id)
+		}
+	}
+	// Mirror the UNIQUE(token_hash) constraint.
+	for _, inv := range f.invitations {
+		if inv.TokenHash == p.TokenHash {
+			return nil, fmt.Errorf("create invitation: %w", store.ErrConflict)
+		}
+	}
+	id := f.next("inv")
+	inv := &store.Invitation{
+		ID: id, TokenHash: p.TokenHash, Email: p.Email, ScopeType: p.ScopeType,
+		ScopeID: p.ScopeID, Role: p.Role, InvitedBy: p.InvitedBy, ExpiresAt: p.ExpiresAt,
+		CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	f.invitations[id] = inv
+	c := *inv
+	return &c, nil
+}
+
+func (f *Fake) GetInvitationByTokenHash(_ context.Context, tokenHash string) (*store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, inv := range f.invitations {
+		if inv.TokenHash == tokenHash {
+			c := *inv
+			return &c, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) GetInvitationByID(_ context.Context, id string) (*store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetInvitationByID"); err != nil {
+		return nil, err
+	}
+	if inv, ok := f.invitations[id]; ok {
+		c := *inv
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) ListPendingInvitationsByScopes(_ context.Context, scopeType string, scopeIDs []string) ([]store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListPendingInvitationsByScopes"); err != nil {
+		return nil, err
+	}
+	want := map[string]bool{}
+	for _, id := range scopeIDs {
+		want[id] = true
+	}
+	out := []store.Invitation{}
+	for _, inv := range f.invitations {
+		if inv.ScopeType == scopeType && want[inv.ScopeID] && inv.AcceptedAt == nil {
+			out = append(out, *inv)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (f *Fake) MarkInvitationAccepted(_ context.Context, id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("MarkInvitationAccepted"); err != nil {
+		return false, err
+	}
+	inv, ok := f.invitations[id]
+	if !ok || inv.AcceptedAt != nil {
+		return false, nil // gone or already accepted (raced)
+	}
+	t := f.Now()
+	inv.AcceptedAt = &t
+	inv.UpdatedAt = t
+	return true, nil
+}
+
+func (f *Fake) DeleteInvitation(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.invitations[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.invitations, id)
+	return nil
+}
+
+// --- TOTP secrets (Phase 5) ---
+
+func (f *Fake) UpsertTOTPSecret(_ context.Context, userID string, secretEncrypted []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertTOTPSecret"); err != nil {
+		return err
+	}
+	// ON CONFLICT resets confirmed_at to NULL: re-enroll always starts unconfirmed.
+	f.totp[userID] = &store.TOTPSecret{
+		UserID:          userID,
+		SecretEncrypted: append([]byte(nil), secretEncrypted...),
+		ConfirmedAt:     nil,
+	}
+	return nil
+}
+
+func (f *Fake) GetTOTPSecret(_ context.Context, userID string) (*store.TOTPSecret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.totp[userID]; ok {
+		c := *t
+		c.SecretEncrypted = append([]byte(nil), t.SecretEncrypted...)
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) ConfirmTOTPSecret(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.totp[userID]
+	if !ok || t.ConfirmedAt != nil {
+		return store.ErrNotFound // nothing unconfirmed to confirm
+	}
+	now := f.Now()
+	t.ConfirmedAt = &now
+	return nil
+}
+
+func (f *Fake) DeleteTOTPSecret(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.totp, userID) // idempotent
+	return nil
+}
+
+// --- recovery codes (Phase 5) ---
+
+func (f *Fake) ReplaceRecoveryCodes(_ context.Context, userID string, codeHashes []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ReplaceRecoveryCodes"); err != nil {
+		return err
+	}
+	// Delete all of the user's codes, then insert the new set.
+	kept := f.recovery[:0:0]
+	for _, rc := range f.recovery {
+		if rc.UserID != userID {
+			kept = append(kept, rc)
+		}
+	}
+	for _, h := range codeHashes {
+		kept = append(kept, &fakeRecoveryCode{UserID: userID, CodeHash: h})
+	}
+	f.recovery = kept
+	return nil
+}
+
+func (f *Fake) ConsumeRecoveryCode(_ context.Context, userID, codeHash string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ConsumeRecoveryCode"); err != nil {
+		return false, err
+	}
+	for _, rc := range f.recovery {
+		if rc.UserID == userID && rc.CodeHash == codeHash && rc.UsedAt == nil {
+			t := f.Now()
+			rc.UsedAt = &t
+			return true, nil
+		}
+	}
+	return false, nil // unknown or already-used code
+}
+
+func (f *Fake) CountUnusedRecoveryCodes(_ context.Context, userID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, rc := range f.recovery {
+		if rc.UserID == userID && rc.UsedAt == nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *Fake) DeleteRecoveryCodes(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.recovery[:0:0]
+	for _, rc := range f.recovery {
+		if rc.UserID != userID {
+			kept = append(kept, rc)
+		}
+	}
+	f.recovery = kept
+	return nil
+}
+
+// --- login challenges (Phase 5) ---
+
+func (f *Fake) CreateLoginChallenge(_ context.Context, p store.CreateLoginChallengeParams) (*store.LoginChallenge, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CreateLoginChallenge"); err != nil {
+		return nil, err
+	}
+	if _, ok := f.chalByHash[p.TokenHash]; ok {
+		return nil, fmt.Errorf("create login challenge: %w", store.ErrConflict)
+	}
+	id := f.next("chal")
+	lc := store.LoginChallenge{
+		ID: id, UserID: p.UserID, Attempts: 0, CreatedAt: f.Now(),
+		ExpiresAt: p.ExpiresAt, IP: p.IP, UserAgent: p.UserAgent,
+	}
+	f.challenges[id] = &fakeChallenge{c: lc, tokenHash: p.TokenHash}
+	f.chalByHash[p.TokenHash] = id
+	c := lc
+	return &c, nil
+}
+
+func (f *Fake) GetLoginChallengeByTokenHash(_ context.Context, tokenHash string) (*store.LoginChallenge, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.chalByHash[tokenHash]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	c := f.challenges[id].c
+	return &c, nil
+}
+
+func (f *Fake) ConsumeLoginChallenge(_ context.Context, id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ConsumeLoginChallenge"); err != nil {
+		return false, err
+	}
+	ch, ok := f.challenges[id]
+	if !ok || ch.c.ConsumedAt != nil {
+		return false, nil // gone or already consumed
+	}
+	t := f.Now()
+	ch.c.ConsumedAt = &t
+	return true, nil
+}
+
+func (f *Fake) RecordChallengeFailure(_ context.Context, id string, maxAttempts int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("RecordChallengeFailure"); err != nil {
+		return false, err
+	}
+	ch, ok := f.challenges[id]
+	if !ok || ch.c.ConsumedAt != nil {
+		return true, nil // already consumed/locked (or gone)
+	}
+	ch.c.Attempts++
+	if ch.c.Attempts >= maxAttempts {
+		t := f.Now()
+		ch.c.ConsumedAt = &t
+		return true, nil
+	}
+	return false, nil
 }

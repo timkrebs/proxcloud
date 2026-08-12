@@ -22,6 +22,10 @@ import (
 const (
 	// CookieName is the session cookie the browser holds.
 	CookieName = "proxcloud_session"
+	// ChallengeCookieName carries the interim second-factor login challenge token
+	// (ADR-0013 §3). It is scoped to /api/auth and is NEVER accepted by
+	// Authenticate/Verify — it grants only the right to finish step two.
+	ChallengeCookieName = "proxcloud_totp"
 	// tokenBytes is the opaque session token length (256 bits of entropy).
 	tokenBytes = 32
 	// touchThrottle bounds how often an active session's last_seen_at is
@@ -103,6 +107,37 @@ func (s *Sessions) Issue(ctx context.Context, userID string, r *http.Request) (*
 		Secure:   s.secure,
 		MaxAge:   int(s.absoluteTTL.Seconds()),
 	}, nil
+}
+
+// IssueChallengeCookie returns the proxcloud_totp cookie carrying the raw
+// interim login-challenge token (ADR-0013 §3). It is scoped to /api/auth so it
+// never rides along on non-auth requests, and its lifetime matches the stored
+// challenge (LOGIN_CHALLENGE_TTL). Verify/Authenticate never read this cookie —
+// holding it grants nothing but the right to attempt POST /api/auth/login/totp.
+func (s *Sessions) IssueChallengeCookie(token string, ttl time.Duration) *http.Cookie {
+	return &http.Cookie{
+		Name:     ChallengeCookieName,
+		Value:    token,
+		Path:     "/api/auth",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.secure,
+		MaxAge:   int(ttl.Seconds()),
+	}
+}
+
+// ClearChallengeCookie returns an expired proxcloud_totp cookie that removes the
+// interim challenge from the browser (on success, lockout, or expiry).
+func (s *Sessions) ClearChallengeCookie() *http.Cookie {
+	return &http.Cookie{
+		Name:     ChallengeCookieName,
+		Value:    "",
+		Path:     "/api/auth",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.secure,
+		MaxAge:   -1,
+	}
 }
 
 // Clear returns an expired cookie that removes the session from the browser.

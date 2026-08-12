@@ -14,6 +14,17 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  async headers() {
+    return [
+      {
+        // The invitation token is a path segment on /invite/{token}; no-referrer
+        // keeps that single-use credential out of the Referer header on any
+        // outbound navigation/subresource.
+        source: "/invite/:token*",
+        headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
+      },
+    ];
+  },
 };
 
 export default nextConfig;

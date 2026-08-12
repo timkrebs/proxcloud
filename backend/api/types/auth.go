@@ -8,6 +8,14 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+// LoginResponse is the POST /api/auth/login response — now always 200 with this
+// body (contract change from the Phase-2 204). When TotpRequired is true, NO
+// session cookie is set; a proxcloud_totp challenge cookie is set instead and the
+// caller must complete POST /api/auth/login/totp.
+type LoginResponse struct {
+	TotpRequired bool `json:"totpRequired"`
+}
+
 // BootstrapStatus is the GET /api/auth/bootstrap-status response.
 type BootstrapStatus struct {
 	// NeedsBootstrap is true iff zero users exist (first-run).
@@ -37,6 +45,10 @@ type Me struct {
 	TOTPEnabled     bool   `json:"totpEnabled"`
 	// ActiveTenantId mirrors sessions.active_tenant_id; "" when unset/never chosen.
 	ActiveTenantId string `json:"activeTenantId"`
+	// RecoveryCodesRemaining is the count of unused TOTP recovery codes (drives
+	// the Settings "N codes left" line). 0 when TOTP is disabled. Never lists the
+	// codes themselves — those are shown once, at enable/regenerate.
+	RecoveryCodesRemaining int `json:"recoveryCodesRemaining"`
 	// Tenants is every tenant the caller can reach (ListTenantsForUser).
 	Tenants []TenantMembership `json:"tenants"`
 }

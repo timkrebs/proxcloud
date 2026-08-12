@@ -45,6 +45,15 @@ export interface LoginRequest {
   password: string;
 }
 /**
+ * LoginResponse is the POST /api/auth/login response — now always 200 with this
+ * body (contract change from the Phase-2 204). When TotpRequired is true, NO
+ * session cookie is set; a proxcloud_totp challenge cookie is set instead and the
+ * caller must complete POST /api/auth/login/totp.
+ */
+export interface LoginResponse {
+  totpRequired: boolean;
+}
+/**
  * BootstrapStatus is the GET /api/auth/bootstrap-status response.
  */
 export interface BootstrapStatus {
@@ -82,6 +91,12 @@ export interface Me {
    * ActiveTenantId mirrors sessions.active_tenant_id; "" when unset/never chosen.
    */
   activeTenantId: string;
+  /**
+   * RecoveryCodesRemaining is the count of unused TOTP recovery codes (drives
+   * the Settings "N codes left" line). 0 when TOTP is disabled. Never lists the
+   * codes themselves — those are shown once, at enable/regenerate.
+   */
+  recoveryCodesRemaining: number /* int */;
   /**
    * Tenants is every tenant the caller can reach (ListTenantsForUser).
    */
@@ -267,9 +282,10 @@ export interface ErrorEnvelope {
 export interface APIError {
   /**
    * Code is one of: unauthenticated | forbidden | not_found | conflict |
-   * invalid_request | rate_limited | proxmox_auth_failed |
-   * proxmox_permission_denied | proxmox_unreachable | proxmox_error |
-   * agent_unavailable | console_disabled | timeout | internal
+   * invalid_request | rate_limited | email_mismatch | account_exists |
+   * totp_challenge_expired | proxmox_auth_failed | proxmox_permission_denied |
+   * proxmox_unreachable | proxmox_error | agent_unavailable |
+   * console_disabled | timeout | internal
    */
   code: string;
   message: string;
@@ -467,6 +483,64 @@ export interface ACLEntry {
 export interface Health {
   status: string; // ok
   proxmox?: string; // ok | unreachable (populated once the PVE client is wired)
+}
+
+//////////
+// source: invitation.go
+
+/**
+ * CreateInvitationRequest is POST /api/tenants/{tenantId}/invitations (Owner).
+ * scopeType/scopeId select a tenant-scope or project-scope grant; a project
+ * scope's scopeId must belong to {tenantId}. role ∈ owner|contributor|reader and
+ * may not exceed the inviter's own effective role (no privilege escalation).
+ */
+export interface CreateInvitationRequest {
+  email: string;
+  scopeType: string; // "tenant" | "project"
+  scopeId: string; // tenantId (tenant scope) or projectId (project scope)
+  role: string; // "owner" | "contributor" | "reader"
+}
+/**
+ * Invitation is a pending invite as an Owner sees it. It NEVER carries the token
+ * (the raw token lives only in the emailed accept link; the DB stores its hash).
+ */
+export interface Invitation {
+  id: string;
+  email: string;
+  scopeType: string;
+  scopeId: string;
+  scopeLabel: string; // resolved tenant/project display name
+  role: string;
+  invitedBy: string; // inviter display name/email; "" if user gone
+  expiresAt: string /* RFC3339 */;
+  createdAt: string /* RFC3339 */;
+  status: string; // "pending" | "expired" (accepted rows are not listed)
+}
+/**
+ * InvitationDetails is the public GET /api/auth/invitations/{token} response.
+ * Enumeration-safe: an unknown/expired/used token returns 404, never these
+ * fields. It NEVER echoes the token.
+ */
+export interface InvitationDetails {
+  email: string; // the address the invite was sent to
+  tenantName: string; // tenant the invite grants access to
+  scopeType: string;
+  scopeLabel: string;
+  role: string;
+  expiresAt: string /* RFC3339 */;
+  requiresAccount: boolean; // true ⇒ no user for Email yet → collect displayName+password
+  signedInMatches: boolean; // true ⇒ caller is signed in AS Email → one-click attach
+}
+/**
+ * AcceptInvitationRequest is POST /api/auth/invitations/{token}/accept. For a
+ * NEW account (RequiresAccount) displayName+password are required (runtime-
+ * validated); for an existing/attached account both are ignored. They are
+ * therefore optional on the wire (omitempty ⇒ tygo emits `displayName?`,
+ * `password?`), matching how the frontend actually sends them.
+ */
+export interface AcceptInvitationRequest {
+  displayName?: string;
+  password?: string;
 }
 
 //////////
@@ -895,4 +969,54 @@ export interface CatalogStorage {
   storage: string;
   type: string;
   content: string[];
+}
+
+//////////
+// source: totp.go
+
+/**
+ * EnrollTOTPResponse is the POST /api/auth/totp/enroll response. The shared
+ * secret is generated, AES-256-GCM sealed, and stored UNCONFIRMED server-side;
+ * nothing here reveals it in plaintext beyond the standard otpauth secret the
+ * user keys into their authenticator app.
+ */
+export interface EnrollTOTPResponse {
+  otpauthUri: string; // otpauth://totp/Issuer:email?secret=…&issuer=Issuer
+  qrPngDataUri: string; // "data:image/png;base64,…" — server-rendered QR
+  manualKey: string; // base32 secret, for manual authenticator entry
+}
+/**
+ * VerifyEnrollRequest is the POST /api/auth/totp/verify body — a 6-digit code
+ * from the authenticator that proves possession of the pending secret.
+ */
+export interface VerifyEnrollRequest {
+  code: string;
+}
+/**
+ * VerifyEnrollResponse is returned ONCE, at enable, carrying the 10 plaintext
+ * recovery codes. They are never retrievable again (only unused counts appear in Me).
+ */
+export interface VerifyEnrollResponse {
+  recoveryCodes: string[]; // 10 × "XXXXX-XXXXX"
+}
+/**
+ * PasswordConfirmRequest re-prompts the caller's password before a sensitive
+ * account mutation (TOTP disable, recovery-code regeneration).
+ */
+export interface PasswordConfirmRequest {
+  password: string;
+}
+/**
+ * LoginTOTPRequest is the POST /api/auth/login/totp body. Code is a 6-digit TOTP
+ * OR a recovery code ("XXXXX-XXXXX"); the handler auto-detects by shape.
+ */
+export interface LoginTOTPRequest {
+  code: string;
+}
+/**
+ * RecoveryCodesResponse is returned ONCE, at regenerate, carrying the 10 new
+ * plaintext recovery codes. Never retrievable again.
+ */
+export interface RecoveryCodesResponse {
+  recoveryCodes: string[]; // 10 × "XXXXX-XXXXX"
 }

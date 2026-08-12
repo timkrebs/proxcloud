@@ -47,6 +47,22 @@ type Config struct {
 	// leaked). Default 45m > the 30m clone stepTimeout + margin (ADR-0012 §2.3).
 	ReservationTTL time.Duration
 
+	// Outbound email (Phase 5 invitations, ADR-0013). When SMTPHost is empty the
+	// server uses the dev LogMailer (prints the accept link to stdout); when set,
+	// an SMTPMailer delivers real mail. Credentials are never logged. If SMTPHost
+	// is set, SMTPFrom is required.
+	SMTPHost     string
+	SMTPPort     string // default 587
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	SMTPStartTLS bool // default true
+
+	// Phase 5 security lifetimes (ADR-0013), validated at boot.
+	InvitationTTL     time.Duration // default 72h
+	LoginChallengeTTL time.Duration // default 5m
+	TOTPIssuer        string        // otpauth issuer label; default "Proxcloud"
+
 	// Optional flat-rate pricing; all cost UI is hidden when unset.
 	PricingCurrency    string
 	PricingVCPUMonth   float64
@@ -84,6 +100,13 @@ func Load() (*Config, error) {
 		ListenAddr:         envOr("LISTEN_ADDR", ":8080"),
 		Dev:                os.Getenv("PROXCLOUD_ENV") != "production",
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		SMTPHost:           strings.TrimSpace(os.Getenv("SMTP_HOST")),
+		SMTPPort:           envOr("SMTP_PORT", "587"),
+		SMTPUsername:       os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:       os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:           strings.TrimSpace(os.Getenv("SMTP_FROM")),
+		SMTPStartTLS:       envBool("SMTP_STARTTLS", true),
+		TOTPIssuer:         envOr("TOTP_ISSUER", "Proxcloud"),
 	}
 	// Dev-only convenience default so `go run` works without a compose file;
 	// in production DATABASE_URL must be set explicitly (fail-closed below).
@@ -133,6 +156,13 @@ func Load() (*Config, error) {
 	cfg.SessionAbsoluteTTL = parseDuration("SESSION_ABSOLUTE_TTL", 720*time.Hour, &problems)
 	cfg.ReconcilerInterval = parseDuration("RECONCILER_INTERVAL", 5*time.Minute, &problems)
 	cfg.ReservationTTL = parseDuration("RESERVATION_TTL", 45*time.Minute, &problems)
+	cfg.InvitationTTL = parseDuration("INVITATION_TTL", 72*time.Hour, &problems)
+	cfg.LoginChallengeTTL = parseDuration("LOGIN_CHALLENGE_TTL", 5*time.Minute, &problems)
+	// Email: a configured SMTP host must carry a From address (else the accept
+	// mail has no envelope sender). Secrets/host are never echoed into the problem.
+	if cfg.SMTPHost != "" && cfg.SMTPFrom == "" {
+		problems = append(problems, "SMTP_FROM is required when SMTP_HOST is set")
+	}
 	if cfg.InsecureCookies && !cfg.Dev {
 		problems = append(problems, "PROXCLOUD_INSECURE_COOKIES must not be set in production")
 	}
@@ -174,6 +204,26 @@ func envOr(key, def string) string {
 	}
 	return def
 }
+
+// envBool reads an optional boolean env var. An unset/empty value returns def;
+// "false", "0", "no", and "off" (case-insensitive) are false, anything else is
+// true. Used for defaults-true flags like SMTP_STARTTLS.
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// SMTPEnabled reports whether a real SMTP driver is configured (SMTP_HOST set).
+// main.go selects SMTPMailer when true, else the dev LogMailer.
+func (c *Config) SMTPEnabled() bool { return c.SMTPHost != "" }
 
 // decodeSecretsKey parses SECRETS_KEY from hex (64 chars) or base64 and
 // requires exactly 32 bytes (AES-256). Returns a problem description on error.

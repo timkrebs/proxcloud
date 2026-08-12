@@ -191,6 +191,11 @@ func (s *PgStore) CreateUser(ctx context.Context, p CreateUserParams) (*User, er
 	           RETURNING ` + userColumns
 	u, err := scanUser(s.q.QueryRow(ctx, q, p.Email, p.DisplayName, p.PasswordHash, p.PasswordAlgo, p.IsPlatformAdmin))
 	if err != nil {
+		// A duplicate email (UNIQUE(lower(email))) is a conflict, not an opaque
+		// 500 — it lets the invite-accept path map a raced create to a 409.
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: create user: %w", ErrConflict)
+		}
 		return nil, fmt.Errorf("store: create user: %w", err)
 	}
 	return u, nil
@@ -959,4 +964,312 @@ func (s *PgStore) GetEffectiveRoles(ctx context.Context, userID, tenantID string
 		return "", nil, fmt.Errorf("store: get effective roles: %w", err)
 	}
 	return tenantRole, projectRoles, nil
+}
+
+// --- Phase 5: invitations, TOTP, recovery codes, login challenges (ADR-0013) ---
+
+// invited_by is cast to text so a NULL inviter scans cleanly into *string.
+const invitationColumns = `id::text, token_hash, email, scope_type, scope_id::text,
+	role, invited_by::text, expires_at, accepted_at, created_at, updated_at`
+
+func scanInvitation(row pgx.Row) (*Invitation, error) {
+	var inv Invitation
+	err := row.Scan(&inv.ID, &inv.TokenHash, &inv.Email, &inv.ScopeType, &inv.ScopeID,
+		&inv.Role, &inv.InvitedBy, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt, &inv.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &inv, nil
+}
+
+// CreateInvitation implements InvitationStore. It first supersedes any still-
+// pending invite for the same (email, scope) so re-inviting refreshes the link,
+// then inserts the new row. Both statements share s.q, so the caller MUST wrap
+// this in WithTx for the supersede+insert to be atomic. A token_hash collision
+// maps to ErrConflict.
+func (s *PgStore) CreateInvitation(ctx context.Context, p CreateInvitationParams) (*Invitation, error) {
+	const del = `DELETE FROM invitations
+	             WHERE lower(email) = lower($1) AND scope_type = $2 AND scope_id = $3::uuid
+	               AND accepted_at IS NULL`
+	if _, err := s.q.Exec(ctx, del, p.Email, p.ScopeType, p.ScopeID); err != nil {
+		return nil, fmt.Errorf("store: supersede pending invitations: %w", err)
+	}
+	const ins = `INSERT INTO invitations (token_hash, email, scope_type, scope_id, role, invited_by, expires_at)
+	             VALUES ($1, $2, $3, $4::uuid, $5, $6::uuid, $7)
+	             RETURNING ` + invitationColumns
+	inv, err := scanInvitation(s.q.QueryRow(ctx, ins,
+		p.TokenHash, p.Email, p.ScopeType, p.ScopeID, p.Role, p.InvitedBy, p.ExpiresAt))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: create invitation: %w", ErrConflict)
+		}
+		return nil, fmt.Errorf("store: create invitation: %w", err)
+	}
+	return inv, nil
+}
+
+// GetInvitationByTokenHash implements InvitationStore.
+func (s *PgStore) GetInvitationByTokenHash(ctx context.Context, tokenHash string) (*Invitation, error) {
+	const q = `SELECT ` + invitationColumns + ` FROM invitations WHERE token_hash = $1`
+	inv, err := scanInvitation(s.q.QueryRow(ctx, q, tokenHash))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get invitation by token hash: %w", err)
+	}
+	return inv, nil
+}
+
+// GetInvitationByID implements InvitationStore (Owner revoke authorization).
+func (s *PgStore) GetInvitationByID(ctx context.Context, id string) (*Invitation, error) {
+	const q = `SELECT ` + invitationColumns + ` FROM invitations WHERE id = $1::uuid`
+	inv, err := scanInvitation(s.q.QueryRow(ctx, q, id))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get invitation by id: %w", err)
+	}
+	return inv, nil
+}
+
+// ListPendingInvitationsByScopes implements InvitationStore (scope filter in SQL,
+// accepted_at IS NULL). An empty scopeIDs slice is a cheap empty result.
+func (s *PgStore) ListPendingInvitationsByScopes(ctx context.Context, scopeType string, scopeIDs []string) ([]Invitation, error) {
+	out := []Invitation{}
+	if len(scopeIDs) == 0 {
+		return out, nil
+	}
+	const q = `SELECT ` + invitationColumns + ` FROM invitations
+	           WHERE scope_type = $1 AND scope_id = ANY($2::uuid[]) AND accepted_at IS NULL
+	           ORDER BY created_at`
+	rows, err := s.q.Query(ctx, q, scopeType, scopeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: list pending invitations by scopes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		inv, err := scanInvitation(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan invitation: %w", err)
+		}
+		out = append(out, *inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list pending invitations by scopes: %w", err)
+	}
+	return out, nil
+}
+
+// MarkInvitationAccepted implements InvitationStore. The WHERE accepted_at IS
+// NULL guard makes a double-accept race lose cleanly (second call → false).
+func (s *PgStore) MarkInvitationAccepted(ctx context.Context, id string) (bool, error) {
+	const q = `UPDATE invitations SET accepted_at = now(), updated_at = now()
+	           WHERE id = $1::uuid AND accepted_at IS NULL`
+	tag, err := s.q.Exec(ctx, q, id)
+	if err != nil {
+		return false, fmt.Errorf("store: mark invitation accepted: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// DeleteInvitation implements InvitationStore (Owner revoke).
+func (s *PgStore) DeleteInvitation(ctx context.Context, id string) error {
+	const q = `DELETE FROM invitations WHERE id = $1::uuid`
+	tag, err := s.q.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("store: delete invitation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpsertTOTPSecret implements TOTPStore. ON CONFLICT it overwrites the ciphertext
+// and resets confirmed_at to NULL, so re-enrolling always starts unconfirmed.
+func (s *PgStore) UpsertTOTPSecret(ctx context.Context, userID string, secretEncrypted []byte) error {
+	const q = `INSERT INTO totp_secrets (user_id, secret_encrypted)
+	           VALUES ($1::uuid, $2)
+	           ON CONFLICT (user_id) DO UPDATE
+	             SET secret_encrypted = EXCLUDED.secret_encrypted,
+	                 confirmed_at = NULL,
+	                 updated_at = now()`
+	if _, err := s.q.Exec(ctx, q, userID, secretEncrypted); err != nil {
+		return fmt.Errorf("store: upsert totp secret: %w", err)
+	}
+	return nil
+}
+
+// GetTOTPSecret implements TOTPStore.
+func (s *PgStore) GetTOTPSecret(ctx context.Context, userID string) (*TOTPSecret, error) {
+	const q = `SELECT user_id::text, secret_encrypted, confirmed_at
+	           FROM totp_secrets WHERE user_id = $1::uuid`
+	var t TOTPSecret
+	err := s.q.QueryRow(ctx, q, userID).Scan(&t.UserID, &t.SecretEncrypted, &t.ConfirmedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get totp secret: %w", err)
+	}
+	return &t, nil
+}
+
+// ConfirmTOTPSecret implements TOTPStore. ErrNotFound when there is no
+// unconfirmed row to confirm (missing, or a raced double-confirm).
+func (s *PgStore) ConfirmTOTPSecret(ctx context.Context, userID string) error {
+	const q = `UPDATE totp_secrets SET confirmed_at = now(), updated_at = now()
+	           WHERE user_id = $1::uuid AND confirmed_at IS NULL`
+	tag, err := s.q.Exec(ctx, q, userID)
+	if err != nil {
+		return fmt.Errorf("store: confirm totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeleteTOTPSecret implements TOTPStore. Idempotent (no error when absent).
+func (s *PgStore) DeleteTOTPSecret(ctx context.Context, userID string) error {
+	const q = `DELETE FROM totp_secrets WHERE user_id = $1::uuid`
+	if _, err := s.q.Exec(ctx, q, userID); err != nil {
+		return fmt.Errorf("store: delete totp secret: %w", err)
+	}
+	return nil
+}
+
+// ReplaceRecoveryCodes implements RecoveryCodeStore: delete all + insert the new
+// set. Both statements share s.q, so the caller MUST wrap this in WithTx so the
+// regenerate is atomic. An empty codeHashes slice clears the user's codes.
+func (s *PgStore) ReplaceRecoveryCodes(ctx context.Context, userID string, codeHashes []string) error {
+	const del = `DELETE FROM recovery_codes WHERE user_id = $1::uuid`
+	if _, err := s.q.Exec(ctx, del, userID); err != nil {
+		return fmt.Errorf("store: clear recovery codes: %w", err)
+	}
+	if len(codeHashes) == 0 {
+		return nil
+	}
+	// unnest expands the text[] into one row per hash — one INSERT, no fan-out.
+	const ins = `INSERT INTO recovery_codes (user_id, code_hash)
+	             SELECT $1::uuid, unnest($2::text[])`
+	if _, err := s.q.Exec(ctx, ins, userID, codeHashes); err != nil {
+		return fmt.Errorf("store: insert recovery codes: %w", err)
+	}
+	return nil
+}
+
+// ConsumeRecoveryCode implements RecoveryCodeStore. The WHERE used_at IS NULL
+// guard makes each code single-use atomically (reuse → false).
+func (s *PgStore) ConsumeRecoveryCode(ctx context.Context, userID, codeHash string) (bool, error) {
+	const q = `UPDATE recovery_codes SET used_at = now()
+	           WHERE user_id = $1::uuid AND code_hash = $2 AND used_at IS NULL`
+	tag, err := s.q.Exec(ctx, q, userID, codeHash)
+	if err != nil {
+		return false, fmt.Errorf("store: consume recovery code: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// CountUnusedRecoveryCodes implements RecoveryCodeStore.
+func (s *PgStore) CountUnusedRecoveryCodes(ctx context.Context, userID string) (int, error) {
+	const q = `SELECT count(*) FROM recovery_codes WHERE user_id = $1::uuid AND used_at IS NULL`
+	var n int
+	if err := s.q.QueryRow(ctx, q, userID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count unused recovery codes: %w", err)
+	}
+	return n, nil
+}
+
+// DeleteRecoveryCodes implements RecoveryCodeStore. Idempotent.
+func (s *PgStore) DeleteRecoveryCodes(ctx context.Context, userID string) error {
+	const q = `DELETE FROM recovery_codes WHERE user_id = $1::uuid`
+	if _, err := s.q.Exec(ctx, q, userID); err != nil {
+		return fmt.Errorf("store: delete recovery codes: %w", err)
+	}
+	return nil
+}
+
+const loginChallengeColumns = `id::text, user_id::text, attempts, created_at,
+	expires_at, consumed_at, ip, user_agent`
+
+func scanLoginChallenge(row pgx.Row) (*LoginChallenge, error) {
+	var c LoginChallenge
+	err := row.Scan(&c.ID, &c.UserID, &c.Attempts, &c.CreatedAt,
+		&c.ExpiresAt, &c.ConsumedAt, &c.IP, &c.UserAgent)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// CreateLoginChallenge implements LoginChallengeStore. A token_hash collision
+// (astronomically unlikely) maps to ErrConflict.
+func (s *PgStore) CreateLoginChallenge(ctx context.Context, p CreateLoginChallengeParams) (*LoginChallenge, error) {
+	const q = `INSERT INTO login_challenges (token_hash, user_id, expires_at, ip, user_agent)
+	           VALUES ($1, $2::uuid, $3, $4, $5)
+	           RETURNING ` + loginChallengeColumns
+	c, err := scanLoginChallenge(s.q.QueryRow(ctx, q, p.TokenHash, p.UserID, p.ExpiresAt, p.IP, p.UserAgent))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: create login challenge: %w", ErrConflict)
+		}
+		return nil, fmt.Errorf("store: create login challenge: %w", err)
+	}
+	return c, nil
+}
+
+// GetLoginChallengeByTokenHash implements LoginChallengeStore.
+func (s *PgStore) GetLoginChallengeByTokenHash(ctx context.Context, tokenHash string) (*LoginChallenge, error) {
+	const q = `SELECT ` + loginChallengeColumns + ` FROM login_challenges WHERE token_hash = $1`
+	c, err := scanLoginChallenge(s.q.QueryRow(ctx, q, tokenHash))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get login challenge by token hash: %w", err)
+	}
+	return c, nil
+}
+
+// ConsumeLoginChallenge implements LoginChallengeStore (success path). The WHERE
+// consumed_at IS NULL guard makes it single-use atomically.
+func (s *PgStore) ConsumeLoginChallenge(ctx context.Context, id string) (bool, error) {
+	const q = `UPDATE login_challenges SET consumed_at = now()
+	           WHERE id = $1::uuid AND consumed_at IS NULL`
+	tag, err := s.q.Exec(ctx, q, id)
+	if err != nil {
+		return false, fmt.Errorf("store: consume login challenge: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// RecordChallengeFailure implements LoginChallengeStore. It increments attempts
+// and self-consumes the challenge once attempts reach maxAttempts, all in one
+// guarded UPDATE, returning whether the challenge is now locked. An already-
+// consumed (or gone) challenge reports locked=true.
+func (s *PgStore) RecordChallengeFailure(ctx context.Context, id string, maxAttempts int) (bool, error) {
+	const q = `UPDATE login_challenges
+	           SET attempts = attempts + 1,
+	               consumed_at = CASE WHEN attempts + 1 >= $2 THEN now() ELSE consumed_at END
+	           WHERE id = $1::uuid AND consumed_at IS NULL
+	           RETURNING consumed_at IS NOT NULL`
+	var locked bool
+	err := s.q.QueryRow(ctx, q, id, maxAttempts).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No unconsumed row matched: it was already consumed/locked (or gone).
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: record challenge failure: %w", err)
+	}
+	return locked, nil
 }

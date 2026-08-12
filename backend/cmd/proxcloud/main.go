@@ -16,6 +16,7 @@ import (
 
 	apitypes "github.com/timkrebs9/proxcloud/backend/api/types"
 
+	"github.com/timkrebs9/proxcloud/backend/internal/auditz"
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/bootstrap"
@@ -25,8 +26,10 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/mail"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/reconciler"
+	"github.com/timkrebs9/proxcloud/backend/internal/secrets"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
@@ -78,6 +81,40 @@ func main() {
 	}
 	seedCancel()
 
+	// Secrets-at-rest cipher (ADR-0013 §2): AES-256-GCM over SECRETS_KEY, used to
+	// seal the TOTP secret. Fail-closed if the (already-validated) key is rejected.
+	cipher, err := secrets.New(cfg.SecretsKey)
+	if err != nil {
+		log.Error("startup failed", "stage", "secrets-cipher", "err", err)
+		os.Exit(1)
+	}
+
+	// Outbound mail (ADR-0013 §5): SMTPMailer when SMTP_HOST is set, else the dev
+	// LogMailer that prints the accept link to stdout (never through slog).
+	var mailer mail.Mailer
+	if cfg.SMTPEnabled() {
+		mailer = mail.SMTPMailer{
+			Host:     cfg.SMTPHost,
+			Port:     cfg.SMTPPort,
+			User:     cfg.SMTPUsername,
+			Pass:     cfg.SMTPPassword,
+			From:     cfg.SMTPFrom,
+			StartTLS: cfg.SMTPStartTLS,
+		}
+		log.Info("mailer: smtp", "host", cfg.SMTPHost, "port", cfg.SMTPPort, "starttls", cfg.SMTPStartTLS)
+	} else {
+		mailer = mail.LogMailer{W: os.Stdout}
+		log.Info("mailer: dev log-to-stdout — set SMTP_HOST to send real email")
+	}
+
+	// FRONTEND_ORIGIN backs the absolute invitation accept link
+	// (FRONTEND_ORIGIN + /invite/{token}). Empty is not a hard config error — the
+	// server must still boot in dev, and Owners can always create invites — but the
+	// emailed accept link would be relative and unusable, so warn loudly.
+	if cfg.FrontendOrigin == "" {
+		log.Warn("FRONTEND_ORIGIN is empty — invitation accept links will be relative and unusable until it is set")
+	}
+
 	hasher := auth.NewHasher()
 	sessions := auth.NewSessions(st, !cfg.InsecureCookies, cfg.SessionIdleTTL, cfg.SessionAbsoluteTTL)
 	authHandler := &auth.Handler{
@@ -86,6 +123,14 @@ func main() {
 		Hasher:   hasher,
 		Log:      log,
 		Limiter:  auth.NewLoginLimiter(),
+		// Phase 5 wiring (ADR-0013): consumed by the invitation/TOTP/login-2FA
+		// handlers in later chunks; injected here so the seam is real.
+		Secrets:           cipher,
+		Mailer:            mailer,
+		Auditz:            &auditz.Recorder{Store: st, Log: log},
+		InvitationTTL:     cfg.InvitationTTL,
+		LoginChallengeTTL: cfg.LoginChallengeTTL,
+		TOTPIssuer:        cfg.TOTPIssuer,
 	}
 
 	pve, err := proxmox.New(cfg)
@@ -119,7 +164,8 @@ func main() {
 		return st.ReleaseOwnership(ctx, ownershipID)
 	}
 	authzMW := &authz.Middleware{Store: st, Log: log}
-	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW}
+	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW,
+		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {

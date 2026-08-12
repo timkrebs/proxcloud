@@ -52,6 +52,9 @@ export const qk = {
   members: (tenantId?: string) => ["members", tenantId] as const,
   tenantSummary: (tenantId?: string) => ["tenantSummary", tenantId] as const,
 
+  // ── Invitations (Phase 5, Owner-only) ────────────────────────────────────
+  invitations: (tenantId?: string) => ["invitations", tenantId] as const,
+
   // ── Quotas + activity (Phase 4) ──────────────────────────────────────────
   // Tenant-scoped: leading segment + tenant id, matching the pattern above so a
   // tenant switch produces a distinct cache entry and mutations can prefix-

@@ -79,6 +79,13 @@ func buildRegistry() map[routeKey]Rule {
 		{http.MethodGet, "/api/auth/bootstrap-status", PublicRule},
 		{http.MethodPost, "/api/auth/bootstrap", PublicRule}, // hard-guarded: 409 once any user exists
 		{http.MethodPost, "/api/auth/login", PublicRule},
+		// Second-factor login (ADR-0013 §3): the interim proxcloud_totp challenge
+		// cookie is the credential; the caller is not yet signed in, so it is public.
+		{http.MethodPost, "/api/auth/login/totp", PublicRule},
+		// Invitation accept surface (ADR-0013 §2): validate + accept are public —
+		// the opaque token is the credential; the caller may be signed out or new.
+		{http.MethodGet, "/api/auth/invitations/{token}", PublicRule},
+		{http.MethodPost, "/api/auth/invitations/{token}/accept", PublicRule},
 		// Console websocket authenticates via a one-shot, single-use session id
 		// in the path (not the cookie), so it is public at the router level.
 		{http.MethodGet, "/api/console/ws/{sessionId}", PublicRule},
@@ -90,6 +97,12 @@ func buildRegistry() map[routeKey]Rule {
 		{http.MethodPost, "/api/auth/password", AuthenticatedRule},
 		{http.MethodGet, "/api/auth/sessions", AuthenticatedRule},
 		{http.MethodDelete, "/api/auth/sessions/{id}", AuthenticatedRule},
+		// Account-level TOTP + recovery management (ADR-0013 §3). Not on the
+		// tenant subtree → audited by auditz in the handlers, not AuditOnMutation.
+		{http.MethodPost, "/api/auth/totp/enroll", AuthenticatedRule},
+		{http.MethodPost, "/api/auth/totp/verify", AuthenticatedRule},
+		{http.MethodPost, "/api/auth/totp/disable", AuthenticatedRule},
+		{http.MethodPost, "/api/auth/totp/recovery-codes", AuthenticatedRule},
 		{http.MethodGet, "/api/events", AuthenticatedRule},
 		{http.MethodGet, "/api/notifications", AuthenticatedRule},
 		{http.MethodPost, "/api/notifications/read", AuthenticatedRule},
@@ -127,6 +140,9 @@ func buildRegistry() map[routeKey]Rule {
 		{http.MethodGet, "/api/tenants/{tenantId}/projects/{projectId}/quota", ReaderRule},
 		{http.MethodPut, "/api/tenants/{tenantId}/projects/{projectId}/quota", OwnerRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/members", OwnerRule},
+		{http.MethodGet, "/api/tenants/{tenantId}/invitations", OwnerRule},
+		{http.MethodPost, "/api/tenants/{tenantId}/invitations", OwnerRule},
+		{http.MethodDelete, "/api/tenants/{tenantId}/invitations/{invitationId}", OwnerRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/resources", ReaderRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/catalog/nextid", ContributorRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/catalog/nodes", ContributorRule},

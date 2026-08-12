@@ -26,7 +26,32 @@ type fakeStore struct {
 	projects    map[string]*store.Project        // by id
 	ownership   map[int]*store.ResourceOwnership // by vmid
 
+	// Phase 5 (ADR-0013) aggregates.
+	invitations map[string]*store.Invitation // by id
+	totp        map[string]*store.TOTPSecret // by userID
+	recovery    []*fakeRecoveryCode          // single-use via UsedAt
+	challenges  map[string]*fakeChallenge    // by id
+	chalByHash  map[string]string            // token_hash -> challenge id
+
+	// audit records intent/finalize rows so the chunk-C security-mutation tests
+	// can assert one row per mutation (mirrors storetest.Fake.AllAudit).
+	audit []*store.AuditEntry
+	fail  map[string]error // method name -> forced error (fail-closed coverage)
+
 	now func() time.Time
+}
+
+// fakeRecoveryCode is one stored recovery code (hashed, single-use).
+type fakeRecoveryCode struct {
+	UserID   string
+	CodeHash string
+	UsedAt   *time.Time
+}
+
+// fakeChallenge wraps a LoginChallenge with the token hash the domain struct omits.
+type fakeChallenge struct {
+	c         store.LoginChallenge
+	tokenHash string
 }
 
 func newFakeStore() *fakeStore {
@@ -37,10 +62,39 @@ func newFakeStore() *fakeStore {
 		tenants:     map[string]*store.Tenant{},
 		projects:    map[string]*store.Project{},
 		ownership:   map[int]*store.ResourceOwnership{},
+		invitations: map[string]*store.Invitation{},
+		totp:        map[string]*store.TOTPSecret{},
+		recovery:    []*fakeRecoveryCode{},
+		challenges:  map[string]*fakeChallenge{},
+		chalByHash:  map[string]string{},
+		audit:       []*store.AuditEntry{},
+		fail:        map[string]error{},
 		now:         time.Now,
 	}
 	f.tenants["default"] = &store.Tenant{ID: "tenant-default", Name: "Default", Slug: "default"}
 	return f
+}
+
+// failOn forces method (by name) to return err until cleared with a nil err.
+func (f *fakeStore) failOn(method string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		delete(f.fail, method)
+		return
+	}
+	f.fail[method] = err
+}
+
+// allAudit returns a copy of every recorded audit row (test convenience).
+func (f *fakeStore) allAudit() []store.AuditEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.AuditEntry, 0, len(f.audit))
+	for _, e := range f.audit {
+		out = append(out, *e)
+	}
+	return out
 }
 
 func (f *fakeStore) nextID(prefix string) string {
@@ -84,9 +138,13 @@ func (f *fakeStore) ListProjectsByTenant(context.Context, string) ([]store.Proje
 func (f *fakeStore) CreateUser(_ context.Context, p store.CreateUserParams) (*store.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.fail["CreateUser"]; err != nil {
+		return nil, err
+	}
+	// Mirror UNIQUE(lower(email)): a duplicate email is a conflict.
 	for _, u := range f.users {
 		if strings.EqualFold(u.Email, p.Email) {
-			return nil, fmt.Errorf("duplicate email")
+			return nil, fmt.Errorf("create user: %w", store.ErrConflict)
 		}
 	}
 	now := f.now()
@@ -608,16 +666,281 @@ func (f *fakeStore) ReserveOwnership(_ context.Context, p store.ReserveOwnership
 	return cloneOwnership(o), nil
 }
 
-func (f *fakeStore) InsertAuditIntent(_ context.Context, _ store.AuditIntent) (string, error) {
+func (f *fakeStore) InsertAuditIntent(_ context.Context, a store.AuditIntent) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.nextID("audit"), nil
+	if err := f.fail["InsertAuditIntent"]; err != nil {
+		return "", err
+	}
+	id := f.nextID("audit")
+	f.audit = append(f.audit, &store.AuditEntry{
+		ID: id, TS: f.now(), ActorUserID: a.ActorUserID, TenantID: a.TenantID, ProjectID: a.ProjectID,
+		Action: a.Action, TargetType: a.TargetType, TargetID: a.TargetID, Outcome: "pending", IP: a.IP,
+	})
+	return id, nil
 }
 
-func (f *fakeStore) FinalizeAudit(context.Context, string, string, []byte) error { return nil }
+func (f *fakeStore) FinalizeAudit(_ context.Context, id, outcome string, detail []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail["FinalizeAudit"]; err != nil {
+		return err
+	}
+	for _, e := range f.audit {
+		if e.ID == id {
+			e.Outcome = outcome
+			e.Detail = detail
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
 
 func (f *fakeStore) ListAudit(context.Context, store.AuditQuery) ([]store.AuditEntry, error) {
 	return nil, nil
+}
+
+// --- invitations, TOTP, recovery codes, login challenges (Phase 5) ---
+//
+// Functional in-memory doubles: chunk A does not exercise them, but the Phase-5
+// TOTP/accept handlers (chunks B/C) live in this package and will, so single-use
+// and supersede semantics are enforced here just like storetest.Fake.
+
+func (f *fakeStore) CreateInvitation(_ context.Context, p store.CreateInvitationParams) (*store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, inv := range f.invitations {
+		if inv.AcceptedAt == nil && strings.EqualFold(inv.Email, p.Email) &&
+			inv.ScopeType == p.ScopeType && inv.ScopeID == p.ScopeID {
+			delete(f.invitations, id)
+		}
+	}
+	for _, inv := range f.invitations {
+		if inv.TokenHash == p.TokenHash {
+			return nil, fmt.Errorf("create invitation: %w", store.ErrConflict)
+		}
+	}
+	now := f.now()
+	inv := &store.Invitation{
+		ID: f.nextID("inv"), TokenHash: p.TokenHash, Email: p.Email, ScopeType: p.ScopeType,
+		ScopeID: p.ScopeID, Role: p.Role, InvitedBy: p.InvitedBy, ExpiresAt: p.ExpiresAt,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	f.invitations[inv.ID] = inv
+	c := *inv
+	return &c, nil
+}
+
+func (f *fakeStore) GetInvitationByTokenHash(_ context.Context, tokenHash string) (*store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, inv := range f.invitations {
+		if inv.TokenHash == tokenHash {
+			c := *inv
+			return &c, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) GetInvitationByID(_ context.Context, id string) (*store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if inv, ok := f.invitations[id]; ok {
+		c := *inv
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) ListPendingInvitationsByScopes(_ context.Context, scopeType string, scopeIDs []string) ([]store.Invitation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	want := map[string]bool{}
+	for _, id := range scopeIDs {
+		want[id] = true
+	}
+	out := []store.Invitation{}
+	for _, inv := range f.invitations {
+		if inv.ScopeType == scopeType && want[inv.ScopeID] && inv.AcceptedAt == nil {
+			out = append(out, *inv)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) MarkInvitationAccepted(_ context.Context, id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inv, ok := f.invitations[id]
+	if !ok || inv.AcceptedAt != nil {
+		return false, nil
+	}
+	t := f.now()
+	inv.AcceptedAt = &t
+	inv.UpdatedAt = t
+	return true, nil
+}
+
+func (f *fakeStore) DeleteInvitation(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.invitations[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.invitations, id)
+	return nil
+}
+
+func (f *fakeStore) UpsertTOTPSecret(_ context.Context, userID string, secretEncrypted []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.totp[userID] = &store.TOTPSecret{
+		UserID:          userID,
+		SecretEncrypted: append([]byte(nil), secretEncrypted...),
+		ConfirmedAt:     nil,
+	}
+	return nil
+}
+
+func (f *fakeStore) GetTOTPSecret(_ context.Context, userID string) (*store.TOTPSecret, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.totp[userID]; ok {
+		c := *t
+		c.SecretEncrypted = append([]byte(nil), t.SecretEncrypted...)
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) ConfirmTOTPSecret(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.totp[userID]
+	if !ok || t.ConfirmedAt != nil {
+		return store.ErrNotFound
+	}
+	now := f.now()
+	t.ConfirmedAt = &now
+	return nil
+}
+
+func (f *fakeStore) DeleteTOTPSecret(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.totp, userID)
+	return nil
+}
+
+func (f *fakeStore) ReplaceRecoveryCodes(_ context.Context, userID string, codeHashes []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.recovery[:0:0]
+	for _, rc := range f.recovery {
+		if rc.UserID != userID {
+			kept = append(kept, rc)
+		}
+	}
+	for _, h := range codeHashes {
+		kept = append(kept, &fakeRecoveryCode{UserID: userID, CodeHash: h})
+	}
+	f.recovery = kept
+	return nil
+}
+
+func (f *fakeStore) ConsumeRecoveryCode(_ context.Context, userID, codeHash string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, rc := range f.recovery {
+		if rc.UserID == userID && rc.CodeHash == codeHash && rc.UsedAt == nil {
+			t := f.now()
+			rc.UsedAt = &t
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeStore) CountUnusedRecoveryCodes(_ context.Context, userID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, rc := range f.recovery {
+		if rc.UserID == userID && rc.UsedAt == nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeStore) DeleteRecoveryCodes(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.recovery[:0:0]
+	for _, rc := range f.recovery {
+		if rc.UserID != userID {
+			kept = append(kept, rc)
+		}
+	}
+	f.recovery = kept
+	return nil
+}
+
+func (f *fakeStore) CreateLoginChallenge(_ context.Context, p store.CreateLoginChallengeParams) (*store.LoginChallenge, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.chalByHash[p.TokenHash]; ok {
+		return nil, fmt.Errorf("create login challenge: %w", store.ErrConflict)
+	}
+	id := f.nextID("chal")
+	lc := store.LoginChallenge{
+		ID: id, UserID: p.UserID, Attempts: 0, CreatedAt: f.now(),
+		ExpiresAt: p.ExpiresAt, IP: p.IP, UserAgent: p.UserAgent,
+	}
+	f.challenges[id] = &fakeChallenge{c: lc, tokenHash: p.TokenHash}
+	f.chalByHash[p.TokenHash] = id
+	c := lc
+	return &c, nil
+}
+
+func (f *fakeStore) GetLoginChallengeByTokenHash(_ context.Context, tokenHash string) (*store.LoginChallenge, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.chalByHash[tokenHash]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	c := f.challenges[id].c
+	return &c, nil
+}
+
+func (f *fakeStore) ConsumeLoginChallenge(_ context.Context, id string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch, ok := f.challenges[id]
+	if !ok || ch.c.ConsumedAt != nil {
+		return false, nil
+	}
+	t := f.now()
+	ch.c.ConsumedAt = &t
+	return true, nil
+}
+
+func (f *fakeStore) RecordChallengeFailure(_ context.Context, id string, maxAttempts int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch, ok := f.challenges[id]
+	if !ok || ch.c.ConsumedAt != nil {
+		return true, nil
+	}
+	ch.c.Attempts++
+	if ch.c.Attempts >= maxAttempts {
+		t := f.now()
+		ch.c.ConsumedAt = &t
+		return true, nil
+	}
+	return false, nil
 }
 
 // --- helpers ---

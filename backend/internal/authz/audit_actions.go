@@ -26,6 +26,9 @@ var auditActions = map[routeKey]string{
 	{http.MethodDelete, "/api/tenants/{tenantId}/projects/{projectId}"}:    "project.delete",
 	{http.MethodPut, "/api/tenants/{tenantId}/projects/{projectId}/quota"}: "project.quota.update",
 
+	{http.MethodPost, "/api/tenants/{tenantId}/invitations"}:                  "invitation.create",
+	{http.MethodDelete, "/api/tenants/{tenantId}/invitations/{invitationId}"}: "invitation.revoke",
+
 	{http.MethodPost, "/api/tenants/{tenantId}/guests"}:                                                "guest.create",
 	{http.MethodPatch, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/config"}:                   "guest.config.update",
 	{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/resize"}:                    "guest.disk.resize",

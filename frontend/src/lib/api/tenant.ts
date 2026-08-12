@@ -43,12 +43,13 @@ export function useProjects() {
 }
 
 /** Tenant members — Owner-only read (read-only in Phase 3). */
-export function useMembers() {
+export function useMembers(enabled = true) {
   const tenantId = useActiveTenantId();
   return useQuery({
     queryKey: qk.members(tenantId ?? undefined),
     queryFn: () => apiFetch<Member[]>(`/api/tenants/${tenantId}/members`),
-    enabled: tenantId !== null,
+    // Owner-gated route: don't fire (and 403) for non-Owners.
+    enabled: tenantId !== null && enabled,
   });
 }
 
