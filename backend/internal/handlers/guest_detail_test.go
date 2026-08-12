@@ -164,7 +164,7 @@ func doBody(t *testing.T, mock *proxmoxtest.MockClient, method, target, body str
 		Broker:   events.NewBroker(),
 	}
 	r := chi.NewRouter()
-	r.Route("/api", func(r chi.Router) { d.Mount(r) })
+	r.Route("/api", func(r chi.Router) { mountLegacy(d, r) })
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(method, target, strings.NewReader(body)))
 	return rec, struct{}{}

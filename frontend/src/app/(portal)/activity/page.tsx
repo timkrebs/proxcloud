@@ -11,15 +11,19 @@ import { Flyout } from "@/components/ui/Flyout";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { apiFetch } from "@/lib/api/client";
 import type { TaskLog, TaskSummary } from "@/lib/api/generated/types";
-import { useCluster, useTasks } from "@/lib/api/queries";
+import { useTasks } from "@/lib/api/queries";
+import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { formatDateTime, relativeTime } from "@/lib/format";
 import { statusLabel } from "@/lib/status";
 
 function TaskLogFlyout({ task, onClose }: { task: TaskSummary; onClose: () => void }) {
+  const tenantId = useActiveTenantId();
   const log = useQuery({
     queryKey: ["task", task.upid, "log"],
-    queryFn: () => apiFetch<TaskLog>(`/api/tasks/${encodeURIComponent(task.upid)}/log?limit=200`),
+    queryFn: () =>
+      apiFetch<TaskLog>(`/api/tenants/${tenantId}/tasks/${encodeURIComponent(task.upid)}/log?limit=200`),
     refetchInterval: task.status === "running" ? 2000 : false,
+    enabled: tenantId !== null,
   });
 
   return (
@@ -59,7 +63,6 @@ function TaskLogFlyout({ task, onClose }: { task: TaskSummary; onClose: () => vo
 
 export default function ActivityPage() {
   const tasks = useTasks({});
-  const cluster = useCluster();
   const [open, setOpen] = useState<TaskSummary | null>(null);
 
   return (
@@ -71,8 +74,7 @@ export default function ActivityPage() {
       </nav>
       <h1 className="mb-1 text-[24px] font-semibold">Activity log</h1>
       <p className="mb-3 text-[12px] text-ink-2">
-        All control-plane operations on {cluster.data?.name || "this cluster"} — Proxmox&apos;s own task
-        history, live.
+        Control-plane operations on your resources — Proxmox&apos;s own task history, live.
       </p>
 
       <Card>

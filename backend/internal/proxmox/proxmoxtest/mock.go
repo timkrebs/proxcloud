@@ -48,6 +48,10 @@ type MockClient struct {
 	OnCreateVM   func(ctx context.Context, node string, params map[string]any) (pmx.UPID, error)
 	OnCreateLXC  func(ctx context.Context, node string, params map[string]any) (pmx.UPID, error)
 	OnCloneGuest func(ctx context.Context, src pmx.GuestRef, newVMID int, name, pool string, full bool, storage string) (pmx.UPID, error)
+
+	OnCreatePool     func(ctx context.Context, poolID, comment string) error
+	OnDeletePool     func(ctx context.Context, poolID string) error
+	OnAddPoolMembers func(ctx context.Context, poolID string, vmids []int) error
 }
 
 func (m *MockClient) GuestStatus(ctx context.Context, ref pmx.GuestRef) (*pmx.GuestStatusInfo, error) {
@@ -271,4 +275,25 @@ func (m *MockClient) CloneGuest(ctx context.Context, src pmx.GuestRef, newVMID i
 		panic(unstubbed("CloneGuest"))
 	}
 	return m.OnCloneGuest(ctx, src, newVMID, name, pool, full, storage)
+}
+
+func (m *MockClient) CreatePool(ctx context.Context, poolID, comment string) error {
+	if m.OnCreatePool == nil {
+		panic(unstubbed("CreatePool"))
+	}
+	return m.OnCreatePool(ctx, poolID, comment)
+}
+
+func (m *MockClient) DeletePool(ctx context.Context, poolID string) error {
+	if m.OnDeletePool == nil {
+		panic(unstubbed("DeletePool"))
+	}
+	return m.OnDeletePool(ctx, poolID)
+}
+
+func (m *MockClient) AddPoolMembers(ctx context.Context, poolID string, vmids []int) error {
+	if m.OnAddPoolMembers == nil {
+		panic(unstubbed("AddPoolMembers"))
+	}
+	return m.OnAddPoolMembers(ctx, poolID, vmids)
 }

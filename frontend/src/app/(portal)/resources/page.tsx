@@ -14,7 +14,8 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi, Svc } from "@/components/ui/icons";
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
 import type { GuestSummary } from "@/lib/api/generated/types";
-import { usePools, useResources } from "@/lib/api/queries";
+import { useResources } from "@/lib/api/queries";
+import { useProjects } from "@/lib/api/tenant";
 import { useGuestAction } from "@/lib/api/mutations";
 import { formatBytesPair, formatPct, formatUptime } from "@/lib/format";
 import { pushToast } from "@/lib/stores/toastStore";
@@ -62,18 +63,22 @@ function ResourcesPageInner() {
   const params = useSearchParams();
   const router = useRouter();
   const setPane = useUiStore((s) => s.setPane);
+  const projectFilter = useUiStore((s) => s.projectFilter);
+  const setProjectFilter = useUiStore((s) => s.setProjectFilter);
 
   const typeParam = params.get("type");
   const type = typeParam === "qemu" || typeParam === "lxc" ? typeParam : undefined;
-  const [pool, setPool] = useState<string>("");
   const [node, setNode] = useState<string>("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "vmid", dir: 1 });
   const [selected, setSelected] = useState<Record<string, boolean>>({});
 
-  const resources = useResources({ type, pool: pool || undefined, node: node || undefined });
-  const pools = usePools();
+  const resources = useResources({ type, projectId: projectFilter ?? undefined, node: node || undefined });
+  const projects = useProjects();
   const action = useGuestAction();
+
+  const activeProjectName =
+    projectFilter === null ? "all" : (projects.data ?? []).find((p) => p.id === projectFilter)?.name ?? "…";
 
   const rows = useMemo(() => {
     const list = (resources.data ?? []).filter(
@@ -155,19 +160,19 @@ function ResourcesPageInner() {
       {/* filter pills + search */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <FilterPill onClick={() => setPane("tenant")}>
-          Pool == {pool === "" ? "all" : pool}
+          Project == {activeProjectName}
         </FilterPill>
-        {(pools.data ?? []).length > 0 ? (
+        {(projects.data ?? []).length > 0 ? (
           <select
-            value={pool}
-            onChange={(e) => setPool(e.target.value)}
+            value={projectFilter ?? ""}
+            onChange={(e) => setProjectFilter(e.target.value || null)}
             className="h-[26px] rounded-pill border border-dashed border-line-soft bg-card px-2 text-[12px] outline-none hover:border-accent"
-            aria-label="Filter by pool"
+            aria-label="Filter by project"
           >
-            <option value="">All pools</option>
-            {(pools.data ?? []).map((p) => (
-              <option key={p.poolId} value={p.poolId}>
-                {p.poolId}
+            <option value="">All projects</option>
+            {(projects.data ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
               </option>
             ))}
           </select>
@@ -271,11 +276,13 @@ function ResourcesPageInner() {
                   {sortHeader("name", "Name")}
                   {sortHeader("vmid", "VMID")}
                   {sortHeader("type", "Type")}
+                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">Project</th>
                   {sortHeader("node", "Node")}
                   {sortHeader("status", "Status")}
                   {sortHeader("cpuPct", "CPU")}
                   {sortHeader("mem", "RAM")}
                   {sortHeader("uptimeSec", "Uptime")}
+                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">Creator</th>
                   <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">Tags</th>
                 </tr>
               </thead>
@@ -303,6 +310,7 @@ function ResourcesPageInner() {
                     </td>
                     <td className="px-3 text-ink-2 tabular-nums">{g.vmid}</td>
                     <td className="px-3 text-ink-2">{g.type === "qemu" ? "Virtual machine" : "LXC container"}</td>
+                    <td className="px-3 text-ink-2">{g.projectName || "—"}</td>
                     <td className="px-3 text-ink-2">{g.node}</td>
                     <td className="px-3">
                       <StatusDot status={g.status} label={g.status.charAt(0).toUpperCase() + g.status.slice(1)} />
@@ -316,6 +324,7 @@ function ResourcesPageInner() {
                     <td className="px-3 text-ink-2 tabular-nums">
                       {g.status === "running" ? formatUptime(g.uptimeSec) : "—"}
                     </td>
+                    <td className="px-3 text-ink-2">{g.createdBy || "—"}</td>
                     <td className="px-3">
                       {g.tags.map((t) => (
                         <span

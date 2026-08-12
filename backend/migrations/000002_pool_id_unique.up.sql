@@ -1,0 +1,11 @@
+-- Migration 000002: globally unique pool_id on projects.
+--
+-- Closes a cross-tenant pool-id collision: a project's pool id is derived as
+-- pc-<tenantSlug>-<projectSlug>, and because slugs may themselves contain
+-- hyphens two different (tenant, project) pairs can render the same string.
+-- Without this constraint a colliding second project would silently bind to
+-- (and DeleteProject could then remove) another tenant's Proxmox pool. The
+-- UNIQUE makes the collision fail loudly at insert time (23505 -> ErrConflict
+-- -> HTTP 409) instead. The pre-existing UNIQUE (tenant_id, slug) already
+-- prevents intra-tenant slug reuse; this adds the cross-tenant pool guarantee.
+ALTER TABLE projects ADD CONSTRAINT projects_pool_id_key UNIQUE (pool_id);

@@ -4,19 +4,26 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
+import { AdminOnly } from "@/components/chrome/AdminOnly";
 import { Card } from "@/components/ui/Card";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { apiFetch } from "@/lib/api/client";
 import type { StorageSummary } from "@/lib/api/generated/types";
+import { useMe } from "@/lib/api/queries";
 import { formatBytesPair } from "@/lib/format";
 
 export default function StoragePage() {
+  const me = useMe();
+  const isAdmin = !!me.data?.isPlatformAdmin;
   const storage = useQuery({
     queryKey: ["storage"],
-    queryFn: () => apiFetch<StorageSummary[]>("/api/storage"),
+    queryFn: () => apiFetch<StorageSummary[]>("/api/admin/storage"),
     refetchInterval: 30_000,
+    enabled: isAdmin,
   });
+
+  if (me.data && !isAdmin) return <AdminOnly resource="Storage" />;
 
   return (
     <div className="max-w-[1360px] px-8 pt-5 pb-10">

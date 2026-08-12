@@ -35,6 +35,12 @@ type CreateGuestRequest struct {
 	Name string `json:"name"` // qemu: DNS name; lxc: hostname
 	Node string `json:"node"`
 	VMID int    `json:"vmid"`
+
+	// ProjectId is required (Phase 3): the backend derives the Proxmox pool from
+	// it. Replaces the old client-supplied Pool, which is now server-derived.
+	ProjectId string `json:"projectId"`
+	// Pool is deprecated and ignored on input — the handler overwrites it with
+	// the project's pool before the request reaches the deploy engine.
 	Pool string `json:"pool,omitempty"`
 
 	Source CreateSource `json:"source"`

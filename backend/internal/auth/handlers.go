@@ -238,13 +238,64 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, internalErr())
 		return
 	}
+
+	tenants := []types.TenantMembership{}
+	tws, err := h.Store.ListTenantsForUser(r.Context(), user.ID)
+	if err != nil {
+		h.logger().Error("me list tenants", "err", err)
+		writeErr(w, internalErr())
+		return
+	}
+	for _, tw := range tws {
+		tenants = append(tenants, types.TenantMembership{ID: tw.ID, Name: tw.Name, Slug: tw.Slug, Role: tw.Role})
+	}
+
 	writeJSON(w, http.StatusOK, types.Me{
 		ID:              user.ID,
 		Email:           user.Email,
 		DisplayName:     user.DisplayName,
 		IsPlatformAdmin: user.IsPlatformAdmin,
 		TOTPEnabled:     user.TOTPEnabled,
+		ActiveTenantId:  id.ActiveTenantID,
+		Tenants:         tenants,
 	})
+}
+
+// SetActiveTenant handles PATCH /api/auth/active-tenant. It sets
+// sessions.active_tenant_id after verifying the caller is a member of the target
+// tenant (or platform-admin). 404 if not a member — no existence leak.
+func (h *Handler) SetActiveTenant(w http.ResponseWriter, r *http.Request) {
+	id, ok := IdentityFrom(r.Context())
+	if !ok {
+		writeErr(w, &types.APIError{Code: "unauthenticated", Message: "Not signed in.", Status: http.StatusUnauthorized})
+		return
+	}
+	var req types.SetActiveTenantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.TenantId) == "" {
+		writeErr(w, &types.APIError{Code: "invalid_request", Message: "Request body must be JSON with a tenantId.", Status: http.StatusBadRequest})
+		return
+	}
+	tenantID := strings.TrimSpace(req.TenantId)
+
+	if !id.IsPlatformAdmin {
+		tenantRole, projectRoles, err := h.Store.GetEffectiveRoles(r.Context(), id.UserID, tenantID)
+		if err != nil {
+			h.logger().Error("set active tenant: effective roles", "err", err)
+			writeErr(w, internalErr())
+			return
+		}
+		if tenantRole == "" && len(projectRoles) == 0 {
+			writeErr(w, &types.APIError{Code: "not_found", Message: "Tenant not found.", Status: http.StatusNotFound})
+			return
+		}
+	}
+
+	if err := h.Store.SetSessionActiveTenant(r.Context(), id.SessionID, &tenantID); err != nil {
+		h.logger().Error("set active tenant", "err", err)
+		writeErr(w, internalErr())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ChangePassword handles POST /api/auth/password. Re-verifies the current

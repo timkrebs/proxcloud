@@ -47,6 +47,9 @@ type Store interface {
 	UserStore
 	SessionStore
 	MembershipStore
+	TenantStore
+	ProjectStore
+	OwnershipStore
 }
 
 // UserStore is the users aggregate.
@@ -63,6 +66,70 @@ type UserStore interface {
 	UpdatePasswordHash(ctx context.Context, userID, passwordHash, passwordAlgo string) error
 	// SetTOTPEnabled flips the totp_enabled flag (Phase 5 wiring; stubbed use now).
 	SetTOTPEnabled(ctx context.Context, userID string, enabled bool) error
+	// ListUsersByIDs resolves a batch of user ids to their rows, keyed by id.
+	// Missing ids are simply absent from the map (no error). Used to enrich
+	// ownership rows with the creator's display name without an N+1 fan-out.
+	ListUsersByIDs(ctx context.Context, ids []string) (map[string]User, error)
+}
+
+// TenantStore is the tenants aggregate.
+type TenantStore interface {
+	// CreateTenant inserts a tenant (name + pre-derived slug) and returns it.
+	CreateTenant(ctx context.Context, p CreateTenantParams) (*Tenant, error)
+	// GetTenantByID returns the tenant with the given id, or ErrNotFound.
+	GetTenantByID(ctx context.Context, id string) (*Tenant, error)
+	// ListTenantsForUser returns every tenant the user can reach — via a direct
+	// tenant-scope membership or via a project-scope membership inside it — each
+	// tagged with the user's highest role anywhere in that tenant (display only).
+	ListTenantsForUser(ctx context.Context, userID string) ([]TenantWithRole, error)
+}
+
+// ProjectStore is the projects aggregate.
+type ProjectStore interface {
+	// CreateProject inserts a project (tenant, name, slug, pool id) and returns it.
+	CreateProject(ctx context.Context, p CreateProjectParams) (*Project, error)
+	// GetProjectByID returns the project with the given id, or ErrNotFound.
+	GetProjectByID(ctx context.Context, id string) (*Project, error)
+	// RenameProject changes only the display name (poolId/slug never change,
+	// ADR-0008) and returns the updated row, or ErrNotFound.
+	RenameProject(ctx context.Context, id, name string) (*Project, error)
+	// DeleteProject removes the project row. Callers MUST verify emptiness first
+	// (CountActiveOwnershipByProject == 0); the DB does not cascade-delete guests.
+	DeleteProject(ctx context.Context, id string) error
+	// CountActiveOwnershipByProject counts the project's live ownership rows
+	// (status active or pending — everything not tombstoned), i.e. the guests a
+	// delete would orphan. It is the emptiness gate for project deletion.
+	CountActiveOwnershipByProject(ctx context.Context, projectID string) (int, error)
+}
+
+// OwnershipStore is the resource_ownership aggregate: the VMID -> project ->
+// tenant map that the IDOR check and quota accounting stand on.
+type OwnershipStore interface {
+	// GetOwnershipByVMID returns the ownership row for a VMID, or ErrNotFound.
+	GetOwnershipByVMID(ctx context.Context, vmid int) (*ResourceOwnership, error)
+	// CreateOwnership inserts an ownership row. Status is "pending" (a create
+	// reservation, finalized on task success) or "active" (backfill of an
+	// already-existing guest). The Phase-4 quota reservation will wrap this in
+	// WithTx+AdvisoryLock; Phase 3 inserts directly.
+	CreateOwnership(ctx context.Context, p CreateOwnershipParams) (*ResourceOwnership, error)
+	// FinalizeOwnership transitions a pending row to active and records the
+	// creating task's UPID. ErrNotFound if the row is missing or not pending.
+	FinalizeOwnership(ctx context.Context, id, upid string) error
+	// ReleaseOwnership deletes a still-pending reservation (a create that failed
+	// or timed out), freeing the VMID for reuse. ErrNotFound if not pending.
+	ReleaseOwnership(ctx context.Context, id string) error
+	// TombstoneOwnership marks a row tombstoned (the Phase-4 reconciler's verdict
+	// for a guest that vanished from Proxmox). ErrNotFound if the row is missing.
+	TombstoneOwnership(ctx context.Context, id string) error
+	// ListOwnershipByTenant returns the tenant's ownership rows (tenant filter in
+	// SQL), ordered by VMID.
+	ListOwnershipByTenant(ctx context.Context, tenantID string) ([]ResourceOwnership, error)
+	// ListOwnershipByProject returns the project's ownership rows, ordered by VMID.
+	ListOwnershipByProject(ctx context.Context, projectID string) ([]ResourceOwnership, error)
+	// ListActiveVMIDs returns the set of VMIDs with a live ownership row (active
+	// or pending; tombstoned excluded). Drives the backfill/reconciler's
+	// "already owned?" check in one query.
+	ListActiveVMIDs(ctx context.Context) (map[int]bool, error)
 }
 
 // SessionStore is the server-side sessions aggregate.
@@ -73,6 +140,10 @@ type SessionStore interface {
 	GetSessionByTokenHash(ctx context.Context, tokenHash string) (*Session, error)
 	// TouchSession bumps last_seen_at (throttled by the caller).
 	TouchSession(ctx context.Context, sessionID string, at time.Time) error
+	// SetSessionActiveTenant sets (or clears, when tenantID is nil) the session's
+	// active_tenant_id — the tenant switch behind PATCH /api/auth/active-tenant.
+	// ErrNotFound if the session id does not exist.
+	SetSessionActiveTenant(ctx context.Context, sessionID string, tenantID *string) error
 	// RevokeSession sets revoked_at on a single session (logout).
 	RevokeSession(ctx context.Context, sessionID string) error
 	// RevokeOtherUserSessions revokes every one of a user's sessions except
@@ -90,6 +161,20 @@ type MembershipStore interface {
 	CreateMembership(ctx context.Context, p CreateMembershipParams) (*Membership, error)
 	// ListMembershipsByUser returns every membership held by a user.
 	ListMembershipsByUser(ctx context.Context, userID string) ([]Membership, error)
+	// ListMembershipsByScope returns every membership at one scope
+	// (scopeType "tenant"|"project", scopeID the tenant/project id) — the
+	// tenant members list, filtered in SQL.
+	ListMembershipsByScope(ctx context.Context, scopeType, scopeID string) ([]Membership, error)
+	// ListMembershipsByScopes returns every membership at any of scopeIDs of the
+	// given scopeType, in one query (scope_id = ANY($2)). It replaces a per-scope
+	// fan-out (the members list resolving each project's grants); an empty
+	// scopeIDs slice is a cheap empty result, not a query.
+	ListMembershipsByScopes(ctx context.Context, scopeType string, scopeIDs []string) ([]Membership, error)
+	// GetEffectiveRoles resolves, in a single tenant-filtered membership scan,
+	// the user's highest tenant-scope role in tenantID ("" if none) and a
+	// project-id -> highest-role map for every project of that tenant the user
+	// holds a project-scope membership in. Backs ResolveTenant/ResolveScope.
+	GetEffectiveRoles(ctx context.Context, userID, tenantID string) (tenantRole string, projectRoles map[string]string, err error)
 }
 
 // CreateUserParams are the inputs to CreateUser; generated columns (id,
@@ -117,6 +202,43 @@ type CreateMembershipParams struct {
 	ScopeType string // "tenant" | "project"
 	ScopeID   string
 	Role      string // "owner" | "contributor" | "reader"
+}
+
+// CreateTenantParams are the inputs to CreateTenant. Slug is caller-derived
+// (collision-suffixed) so the store never guesses a display-name transform.
+type CreateTenantParams struct {
+	Name string
+	Slug string
+}
+
+// CreateProjectParams are the inputs to CreateProject. PoolID is the Proxmox
+// pool the project mirrors (pc-<tenant>-<project>); slug is caller-derived.
+type CreateProjectParams struct {
+	TenantID string
+	Name     string
+	Slug     string
+	PoolID   string
+}
+
+// CreateOwnershipParams are the inputs to CreateOwnership. Status is "pending"
+// (a create reservation) or "active" (backfill of an existing guest); CreatedBy
+// is nil for backfilled/system-claimed rows.
+type CreateOwnershipParams struct {
+	TenantID  string
+	ProjectID string
+	VMID      int
+	GuestType string // "qemu" | "lxc"
+	Node      string
+	CreatedBy *string
+	Status    string // "pending" | "active"
+}
+
+// TenantWithRole is a tenant plus the requesting user's highest role anywhere
+// in it (display only; enforcement is always per-scope). Returned by
+// ListTenantsForUser to build the Me.tenants switcher.
+type TenantWithRole struct {
+	Tenant
+	Role string // "owner" | "contributor" | "reader" | ""
 }
 
 // User is a global identity. Access to tenants/projects flows via Membership.

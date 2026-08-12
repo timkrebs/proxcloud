@@ -14,6 +14,7 @@ import (
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
+	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 )
 
@@ -39,8 +40,23 @@ type Deps struct {
 	// origin directly because Next rewrites cannot proxy websockets.
 	ConsoleWS http.Handler
 
-	// Protected mounts additional authenticated routes; set per milestone.
-	Protected func(r chi.Router)
+	// Authz is the tenancy enforcement chain. When set, the /admin and
+	// /tenants/{tenantId} sub-surfaces are mounted behind it; when nil, only the
+	// flat account surface is served (bootstrap/degraded).
+	Authz *authz.Middleware
+
+	// Account mounts the tenant-agnostic, per-user handler routes
+	// (notifications, pricing) inside the authenticated group.
+	Account func(r chi.Router)
+
+	// Admin mounts the platform-admin routes under /api/admin, behind
+	// RequirePlatformAdmin.
+	Admin func(r chi.Router)
+
+	// Tenant mounts the tenant-scoped routes under /api/tenants/{tenantId},
+	// behind ResolveTenant → ResolveScope → Enforce (+ AuditOnMutation on the
+	// mutating subtree, applied inside Tenant).
+	Tenant func(r chi.Router)
 }
 
 // New builds the chi router with the standard middleware stack.
@@ -73,12 +89,17 @@ func New(d Deps) http.Handler {
 		}
 
 		// Authenticated group: Authenticate injects the *Identity into context
-		// and replaces the old stateless RequireSession.
+		// and replaces the old stateless RequireSession. It splits into three
+		// sub-surfaces: a flat tenant-agnostic account/stream surface, the
+		// platform-admin surface (/admin), and the tenant-scoped surface
+		// (/tenants/{tenantId}) behind the authz chain.
 		r.Group(func(r chi.Router) {
 			r.Use(d.Auth.Authenticate)
 
+			// --- flat account + stream surface ---
 			r.Post("/auth/logout", d.Auth.Logout)
 			r.Get("/auth/me", d.Auth.Me)
+			r.Patch("/auth/active-tenant", d.Auth.SetActiveTenant)
 			r.Post("/auth/password", d.Auth.ChangePassword)
 			r.Get("/auth/sessions", d.Auth.ListSessions)
 			r.Delete("/auth/sessions/{id}", d.Auth.DeleteSession)
@@ -86,8 +107,37 @@ func New(d Deps) http.Handler {
 			if d.Events != nil {
 				r.Get("/events", d.Events)
 			}
-			if d.Protected != nil {
-				d.Protected(r)
+			if d.Account != nil {
+				d.Account(r)
+			}
+
+			// --- platform-admin surface ---
+			if d.Admin != nil && d.Authz != nil {
+				r.Route("/admin", func(r chi.Router) {
+					r.Use(d.Authz.RequirePlatformAdmin)
+					d.Admin(r)
+				})
+			}
+
+			// --- tenant-scoped surface ---
+			//
+			// This MUST be an inline r.Group, not r.Route("/tenants/{tenantId}"):
+			// on a MOUNTED subrouter chi runs the group middleware BEFORE routing
+			// the remaining path, so Enforce would see the collapsed pattern
+			// "/api/tenants/{tenantId}/*" and fail every registry lookup. An inline
+			// group shares the parent tree, so the chain runs at the fully-resolved
+			// endpoint — Enforce sees "/api/tenants/{tenantId}/resources" etc.
+			// MountTenant therefore prefixes every route with /tenants/{tenantId}.
+			if d.Tenant != nil && d.Authz != nil {
+				r.Group(func(r chi.Router) {
+					r.Use(d.Authz.ResolveTenant)
+					r.Use(d.Authz.ResolveScope)
+					r.Use(d.Authz.Enforce)
+					// Audit choke-point on the mutating (non-GET) subtree; the
+					// middleware self-gates to non-GET so it is a single Use.
+					r.Use(d.Authz.AuditOnMutation)
+					d.Tenant(r)
+				})
 			}
 		})
 	})

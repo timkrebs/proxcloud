@@ -19,6 +19,23 @@ import (
 // stepTimeout bounds one deployment step (large full clones can be slow).
 const stepTimeout = 30 * time.Minute
 
+// CreateContext carries the tenancy context of a create from the handler into
+// the engine WITHOUT giving deploy a store dependency. The pool is applied via
+// the existing req.Pool → p["pool"] passthrough; the ownership reservation is
+// settled through the Finalize/Release hooks (wired to the store in main.go).
+type CreateContext struct {
+	TenantID      string
+	ProjectID     string
+	PoolID        string
+	ActorUserID   string
+	OwnershipID   string // the pending resource_ownership row to finalize/release
+	CloneSourceOK bool   // clone-source ownership was verified by the handler
+}
+
+// createCtxKey carries the CreateContext on the engine's request context so a
+// future hook (audit, quota) can read it; deploy itself never inspects the store.
+type createCtxKey struct{}
+
 // Engine executes deployments: create/clone (+ optional start) with live
 // per-step progress. Deployments are kept in memory — the guest itself and
 // the Proxmox task log remain the durable truth.
@@ -27,6 +44,12 @@ type Engine struct {
 	Registry *tasks.Registry
 	Broker   *events.Broker
 	Log      *slog.Logger
+
+	// Finalize/Release settle a create's pending ownership reservation. Both are
+	// optional (nil in tests) and keep deploy free of a store dependency:
+	// main.go wires them to store.FinalizeOwnership / store.ReleaseOwnership.
+	Finalize func(ctx context.Context, ownershipID, upid string) error
+	Release  func(ctx context.Context, ownershipID string) error
 
 	mu   sync.RWMutex
 	runs map[string]*types.Deployment
@@ -50,8 +73,9 @@ func (e *Engine) Get(id string) (*types.Deployment, bool) {
 	return &cp, true
 }
 
-// Submit validates the request and starts the deployment goroutine.
-func (e *Engine) Submit(req *types.CreateGuestRequest) (*types.Deployment, error) {
+// Submit validates the request and starts the deployment goroutine. cctx carries
+// the tenancy context (pool passthrough + ownership reservation to settle).
+func (e *Engine) Submit(req *types.CreateGuestRequest, cctx CreateContext) (*types.Deployment, error) {
 	if err := Validate(req); err != nil {
 		return nil, &types.APIError{Code: "invalid_request", Message: err.Error(), Status: 400}
 	}
@@ -87,14 +111,14 @@ func (e *Engine) Submit(req *types.CreateGuestRequest) (*types.Deployment, error
 	e.runs[dep.ID] = dep
 	e.mu.Unlock()
 
-	go e.run(dep.ID, req)
+	go e.run(dep.ID, req, cctx)
 	snapshot, _ := e.Get(dep.ID)
 	return snapshot, nil
 }
 
 // run executes the deployment steps sequentially.
-func (e *Engine) run(id string, req *types.CreateGuestRequest) {
-	ctx := context.Background()
+func (e *Engine) run(id string, req *types.CreateGuestRequest, cctx CreateContext) {
+	ctx := context.WithValue(context.Background(), createCtxKey{}, cctx)
 	res := types.TaskResource{Type: req.Type, VMID: req.VMID, Node: req.Node, Name: req.Name}
 
 	submitCreate := func() (proxmox.UPID, error) {
@@ -122,14 +146,18 @@ func (e *Engine) run(id string, req *types.CreateGuestRequest) {
 	label := e.stepLabel(id, "create")
 	upid, err := submitCreate()
 	if err != nil {
+		e.releaseOwnership(cctx)
 		e.failStep(id, "create", err)
 		return
 	}
 	e.Registry.Track(upid, label, "provisioning", res)
 	e.updateStep(id, "create", "running", string(upid), "")
 	if !e.awaitTask(id, "create", upid) {
+		e.releaseOwnership(cctx)
 		return
 	}
+	// The guest now exists: finalize its ownership reservation (pending → active).
+	e.finalizeOwnership(cctx, string(upid))
 
 	if req.StartAfterCreate {
 		ref := proxmox.GuestRef{Node: req.Node, Type: req.Type, VMID: req.VMID}
@@ -237,4 +265,41 @@ func (e *Engine) publish(id string) {
 	if d, ok := e.Get(id); ok {
 		e.Broker.Publish(events.Event{Name: "deployment", Data: d})
 	}
+}
+
+// ownershipCtxTimeout bounds the finalize/release store call — a short, bounded
+// write that must not hang the deployment goroutine.
+const ownershipCtxTimeout = 10 * time.Second
+
+// finalizeOwnership settles a successful create's pending reservation
+// (pending → active). No-op when no reservation was made or no hook is wired.
+func (e *Engine) finalizeOwnership(cctx CreateContext, upid string) {
+	if e.Finalize == nil || cctx.OwnershipID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ownershipCtxTimeout)
+	defer cancel()
+	if err := e.Finalize(ctx, cctx.OwnershipID, upid); err != nil {
+		e.logger().Warn("finalize ownership", "ownership", cctx.OwnershipID, "err", err)
+	}
+}
+
+// releaseOwnership frees a failed create's pending reservation so its VMID can be
+// reused. No-op when no reservation was made or no hook is wired.
+func (e *Engine) releaseOwnership(cctx CreateContext) {
+	if e.Release == nil || cctx.OwnershipID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ownershipCtxTimeout)
+	defer cancel()
+	if err := e.Release(ctx, cctx.OwnershipID); err != nil {
+		e.logger().Warn("release ownership", "ownership", cctx.OwnershipID, "err", err)
+	}
+}
+
+func (e *Engine) logger() *slog.Logger {
+	if e.Log != nil {
+		return e.Log
+	}
+	return slog.Default()
 }

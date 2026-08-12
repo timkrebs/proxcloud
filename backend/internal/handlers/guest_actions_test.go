@@ -30,7 +30,7 @@ func do(t *testing.T, mock *proxmoxtest.MockClient, method, target string) (*htt
 		Broker:   events.NewBroker(),
 	}
 	r := chi.NewRouter()
-	r.Route("/api", func(r chi.Router) { d.Mount(r) })
+	r.Route("/api", func(r chi.Router) { mountLegacy(d, r) })
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	return rec, reg
@@ -160,7 +160,7 @@ func TestResourcesTransitionalOverlay(t *testing.T) {
 	reg := tasks.NewRegistry()
 	d := &handlers.Deps{PVE: mock, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Registry: reg, Broker: events.NewBroker()}
 	r := chi.NewRouter()
-	r.Route("/api", func(r chi.Router) { d.Mount(r) })
+	r.Route("/api", func(r chi.Router) { mountLegacy(d, r) })
 
 	// Submit a stop, then list resources: 101 must show the overlay.
 	rec := httptest.NewRecorder()

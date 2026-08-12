@@ -7,10 +7,15 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import type { MetricsEvent, TaskEvent } from "@/lib/api/generated/types";
 import { qk } from "@/lib/api/queryKeys";
+import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { pushToast } from "@/lib/stores/toastStore";
 
 export function useEvents() {
   const qc = useQueryClient();
+  // The server derives the SSE ownership filter from the session's active
+  // tenant, so a tenant switch must reopen the stream — otherwise task events
+  // for the old tenant would keep flowing. Reconnect whenever it changes.
+  const activeTenantId = useActiveTenantId();
 
   useEffect(() => {
     const es = new EventSource("/api/events");
@@ -49,7 +54,7 @@ export function useEvents() {
 
     // EventSource reconnects automatically (server sends retry: 5000).
     return () => es.close();
-  }, [qc]);
+  }, [qc, activeTenantId]);
 }
 
 /** Read the latest live metrics event out of the cache (set by useEvents). */

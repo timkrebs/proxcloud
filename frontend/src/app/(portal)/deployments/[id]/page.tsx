@@ -11,6 +11,7 @@ import { Card } from "@/components/ui/Card";
 import { Mi, Spinner } from "@/components/ui/icons";
 import { apiFetch } from "@/lib/api/client";
 import type { Deployment, TaskLog } from "@/lib/api/generated/types";
+import { useActiveTenantId } from "@/lib/stores/uiStore";
 
 function StepIcon({ status }: { status: string }) {
   if (status === "running") return <Spinner size={15} />;
@@ -28,18 +29,20 @@ const STEP_LABEL: Record<string, string> = {
 
 export default function DeploymentPage() {
   const { id } = useParams<{ id: string }>();
+  const tenantId = useActiveTenantId();
   const dep = useQuery({
     queryKey: ["deployment", id],
-    queryFn: () => apiFetch<Deployment>(`/api/deployments/${id}`),
+    queryFn: () => apiFetch<Deployment>(`/api/tenants/${tenantId}/deployments/${id}`),
     refetchInterval: (q) => (q.state.data?.status === "running" ? 2000 : false),
+    enabled: tenantId !== null,
   });
 
   const failedStep = (dep.data?.steps ?? []).find((s) => s.status === "failed");
   const failLog = useQuery({
     queryKey: ["task", failedStep?.upid ?? "", "log"],
     queryFn: () =>
-      apiFetch<TaskLog>(`/api/tasks/${encodeURIComponent(failedStep!.upid!)}/log?limit=50`),
-    enabled: !!failedStep?.upid,
+      apiFetch<TaskLog>(`/api/tenants/${tenantId}/tasks/${encodeURIComponent(failedStep!.upid!)}/log?limit=50`),
+    enabled: !!failedStep?.upid && tenantId !== null,
   });
 
   if (dep.isPending) return <Skeleton className="m-8 h-40 max-w-[900px]" />;

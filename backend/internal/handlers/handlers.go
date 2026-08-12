@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
@@ -35,9 +36,13 @@ type Deps struct {
 	Broker   *events.Broker
 	Deploy   *deploy.Engine
 
-	// Store is the Postgres repository. Nil-safe and unused by handlers in
-	// Phase 1 — threaded here so later phases (tenancy, quotas, audit) have it.
+	// Store is the Postgres repository — the tenancy system of record.
 	Store store.Store
+
+	// Authz is the enforcement chain. Used by MountTenant to wrap the mutating
+	// (non-GET) subtree in the audit choke-point. Nil-safe: without it the
+	// mutating routes mount directly (test convenience).
+	Authz *authz.Middleware
 
 	// Console — nil when PROXMOX_CONSOLE_USER/PASSWORD are unset.
 	ConsoleAuth     *console.TicketAuth
@@ -48,9 +53,24 @@ type Deps struct {
 	Pricing *types.Pricing
 }
 
-// Mount attaches every core REST route. It matches httpserver.Deps.Protected,
-// so the caller decides the auth boundary; paths are relative to /api.
-func (d *Deps) Mount(r chi.Router) {
+// MountAccount attaches the tenant-agnostic, per-user account routes (paths
+// relative to /api). The /auth/* and /events routes are wired directly from the
+// auth.Handler / SSE handler in httpserver.New; these are the handler-owned
+// account routes.
+func (d *Deps) MountAccount(r chi.Router) {
+	r.Get("/notifications", d.ListNotifications)
+	r.Post("/notifications/read", d.MarkNotificationsRead)
+	r.Get("/pricing", d.GetPricing)
+}
+
+// MountAdmin attaches the platform-admin routes (paths relative to
+// /api/admin). The caller wraps this group in RequirePlatformAdmin. Full
+// cluster/node/storage/pool capacity views live here; tenant users get the
+// minimal catalog instead (ADR-0007 §4).
+func (d *Deps) MountAdmin(r chi.Router) {
+	r.Get("/tenants", d.ListTenantsAdmin)
+	r.Post("/tenants", d.CreateTenantAdmin)
+
 	r.Get("/cluster", d.GetCluster)
 	r.Get("/cluster/nextid", d.GetNextID)
 
@@ -61,37 +81,65 @@ func (d *Deps) Mount(r chi.Router) {
 	r.Get("/nodes/{node}/storages", d.GetNodeStorages)
 	r.Get("/nodes/{node}/storages/{storage}/content", d.GetStorageContent)
 
-	r.Get("/resources", d.ListResources)
+	r.Get("/resources", d.ListResourcesAdmin)
 	r.Get("/pools", d.ListPools)
 	r.Get("/storage", d.ListStorage)
-
-	r.Get("/guests/{node}/{type}/{vmid}", d.GetGuest)
-	r.Patch("/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)
-	r.Get("/guests/{node}/{type}/{vmid}/metrics", d.GetGuestMetrics)
-	r.Get("/guests/{node}/{type}/{vmid}/interfaces", d.GetGuestInterfaces)
-	r.Post("/guests/{node}/{type}/{vmid}/resize", d.ResizeGuestDisk)
-	r.Get("/guests/{node}/{type}/{vmid}/snapshots", d.ListSnapshots)
-	r.Post("/guests/{node}/{type}/{vmid}/snapshots", d.CreateSnapshot)
-	r.Post("/guests/{node}/{type}/{vmid}/snapshots/{name}/rollback", d.RollbackSnapshot)
-	r.Delete("/guests/{node}/{type}/{vmid}/snapshots/{name}", d.DeleteSnapshot)
-	r.Get("/guests/{node}/{type}/{vmid}/firewall", d.GetGuestFirewall)
-	r.Put("/guests/{node}/{type}/{vmid}/firewall/options", d.SetGuestFirewall)
-	r.Get("/guests/{node}/{type}/{vmid}/acl", d.GetGuestACL)
-	r.Post("/guests/{node}/{type}/{vmid}/{action}", d.GuestAction)
-	r.Delete("/guests/{node}/{type}/{vmid}", d.DeleteGuest)
 
 	r.Get("/tasks", d.ListTasks)
 	r.Get("/tasks/{upid}", d.GetTask)
 	r.Get("/tasks/{upid}/log", d.GetTaskLog)
+}
 
-	r.Get("/notifications", d.ListNotifications)
-	r.Post("/notifications/read", d.MarkNotificationsRead)
+// MountTenant attaches the tenant-scoped routes. Every route carries the full
+// /tenants/{tenantId} prefix because the caller mounts this as an INLINE group
+// (not a subrouter): that keeps the authz chain
+// (ResolveTenant → ResolveScope → Enforce → AuditOnMutation) running at the
+// fully-resolved endpoint so chi's RoutePattern is complete for the Enforce
+// lookup. All {vmid} routes are ownership-checked by ResolveScope;
+// AuditOnMutation self-gates to non-GET (the mutating choke-point).
+func (d *Deps) MountTenant(r chi.Router) {
+	const p = "/tenants/{tenantId}"
 
-	r.Post("/guests/{node}/{type}/{vmid}/console", d.OpenConsole)
-	r.Post("/guests", d.CreateGuest)
-	r.Get("/deployments/{id}", d.GetDeployment)
+	// --- read surface (Reader/Contributor) ---
+	r.Get(p+"/summary", d.GetTenantSummary)
+	r.Get(p+"/projects", d.ListProjects)
+	r.Get(p+"/projects/{projectId}", d.GetProject)
+	r.Get(p+"/members", d.ListMembers)
+	r.Get(p+"/resources", d.ListTenantResources)
 
-	r.Get("/pricing", d.GetPricing)
+	r.Get(p+"/catalog/nextid", d.GetNextID)
+	r.Get(p+"/catalog/nodes", d.ListCatalogNodes)
+	r.Get(p+"/catalog/nodes/{node}/bridges", d.GetNodeBridges)
+	r.Get(p+"/catalog/nodes/{node}/storages", d.ListCatalogStorages)
+	r.Get(p+"/catalog/nodes/{node}/storages/{storage}/content", d.GetStorageContent)
+
+	r.Get(p+"/guests/{node}/{type}/{vmid}", d.GetGuest)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/metrics", d.GetGuestMetrics)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/interfaces", d.GetGuestInterfaces)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/snapshots", d.ListSnapshots)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/firewall", d.GetGuestFirewall)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/acl", d.GetGuestACL)
+
+	r.Get(p+"/deployments/{id}", d.GetDeployment)
+	r.Get(p+"/tasks", d.ListTenantTasks)
+	r.Get(p+"/tasks/{upid}", d.GetTenantTask)
+	r.Get(p+"/tasks/{upid}/log", d.GetTenantTaskLog)
+
+	// --- mutating surface (Contributor/Owner) — gated by AuditOnMutation ---
+	r.Post(p+"/projects", d.CreateProject)
+	r.Patch(p+"/projects/{projectId}", d.RenameProject)
+	r.Delete(p+"/projects/{projectId}", d.DeleteProject)
+
+	r.Post(p+"/guests", d.CreateGuest)
+	r.Patch(p+"/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/resize", d.ResizeGuestDisk)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/snapshots", d.CreateSnapshot)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/snapshots/{name}/rollback", d.RollbackSnapshot)
+	r.Delete(p+"/guests/{node}/{type}/{vmid}/snapshots/{name}", d.DeleteSnapshot)
+	r.Put(p+"/guests/{node}/{type}/{vmid}/firewall/options", d.SetGuestFirewall)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/console", d.OpenConsole)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/{action}", d.GuestAction)
+	r.Delete(p+"/guests/{node}/{type}/{vmid}", d.DeleteGuest)
 }
 
 // Health probe tuning: a short deadline so /api/health stays snappy even

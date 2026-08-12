@@ -10,8 +10,9 @@ import { Select } from "@/components/ui/Select";
 import { Textarea } from "@/components/ui/Textarea";
 import { Toggle } from "@/components/ui/Toggle";
 import { Mi } from "@/components/ui/icons";
-import { useNodes, usePools, useResources } from "@/lib/api/queries";
-import { useBridges, useNextId, useNodeStorages, useStorageContent } from "@/lib/api/wizardQueries";
+import { useResources } from "@/lib/api/queries";
+import { useProjects } from "@/lib/api/tenant";
+import { useBridges, useCatalogNodes, useNextId, useNodeStorages, useStorageContent } from "@/lib/api/wizardQueries";
 import { formatBytes } from "@/lib/format";
 import {
   SIZE_PRESETS,
@@ -28,8 +29,8 @@ function fieldError(errs: WizardError[], field: string): string | undefined {
 
 export function BasicsTab({ errs }: { errs: WizardError[] }) {
   const s = useWizardStore();
-  const nodes = useNodes();
-  const pools = usePools();
+  const nodes = useCatalogNodes();
+  const projects = useProjects();
   const nextId = useNextId();
   const kindLabel = s.kind === "qemu" ? "virtual machine" : "container";
 
@@ -39,7 +40,7 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
   useEffect(() => {
     const st = useWizardStore.getState();
     if (st.node === "" && (nodes.data ?? []).length > 0) {
-      set({ node: nodes.data![0].node });
+      set({ node: nodes.data![0].name });
     }
     if (st.vmid === "" && nextId.data) {
       set({ vmid: String(nextId.data.vmid) });
@@ -53,7 +54,7 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
         straight to Review + create.
       </p>
 
-      <SectionHeading caption="Every resource lives on exactly one node; the pool groups resources like an Azure resource group.">
+      <SectionHeading caption="Every resource lives on exactly one node and belongs to a project — the resource group that scopes ownership and access.">
         Instance details
       </SectionHeading>
 
@@ -80,9 +81,43 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
         ) : (
           <Select value={s.node} onChange={(e) => s.set({ node: e.target.value, storage: "", bridge: "" })} className="w-[300px]">
             {(nodes.data ?? []).map((n) => (
-              <option key={n.node} value={n.node} disabled={!n.online}>
-                {n.node}
-                {n.online ? "" : " (offline)"}
+              <option key={n.name} value={n.name}>
+                {n.name}
+              </option>
+            ))}
+          </Select>
+        )}
+      </FormRow>
+
+      <FormRow
+        label="Project"
+        required
+        help="The resource group the new guest is created into; its pool and ownership derive from this."
+        error={fieldError(errs, "projectId")}
+      >
+        {projects.isPending ? (
+          <Skeleton className="h-8 w-[300px]" />
+        ) : projects.isError ? (
+          <CardError err={projects.error} />
+        ) : (projects.data ?? []).length === 0 ? (
+          <p className="text-[13px] text-ink-2">
+            No projects in this directory yet — create one from the Projects screen first.
+          </p>
+        ) : (
+          <Select
+            value={s.projectId}
+            invalid={!!fieldError(errs, "projectId")}
+            onChange={(e) => {
+              const id = e.target.value;
+              const name = (projects.data ?? []).find((p) => p.id === id)?.name ?? "";
+              s.set({ projectId: id, projectName: name });
+            }}
+            className="w-[300px]"
+          >
+            <option value="">Select a project…</option>
+            {(projects.data ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
               </option>
             ))}
           </Select>
@@ -91,21 +126,6 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
 
       <FormRow label="VMID" required help="Auto-suggested from the cluster's next free ID." error={fieldError(errs, "vmid")}>
         <Input value={s.vmid} onChange={(e) => s.set({ vmid: e.target.value })} className="w-[300px]" />
-      </FormRow>
-
-      <FormRow label="Pool" help="Optional Proxmox resource pool membership.">
-        {pools.isPending ? (
-          <Skeleton className="h-8 w-[300px]" />
-        ) : (
-          <Select value={s.pool} onChange={(e) => s.set({ pool: e.target.value })} className="w-[300px]">
-            <option value="">No pool</option>
-            {(pools.data ?? []).map((p) => (
-              <option key={p.poolId} value={p.poolId}>
-                {p.poolId}
-              </option>
-            ))}
-          </Select>
-        )}
       </FormRow>
     </div>
   );
@@ -326,13 +346,11 @@ export function SizeTab({ errs }: { errs: WizardError[] }) {
           ) : (
             <Select value={s.storage} onChange={(e) => s.set({ storage: e.target.value })} className="w-[300px]">
               <option value="">Select…</option>
-              {(storages.data ?? [])
-                .filter((st) => st.active)
-                .map((st) => (
-                  <option key={st.storage} value={st.storage}>
-                    {st.storage} ({formatBytes(st.avail, 0)} free)
-                  </option>
-                ))}
+              {(storages.data ?? []).map((st) => (
+                <option key={st.storage} value={st.storage}>
+                  {st.storage} ({st.type})
+                </option>
+              ))}
             </Select>
           )}
         </FormRow>
@@ -562,7 +580,7 @@ export function ReviewTab({ errs }: { errs: WizardError[] }) {
         ["Type", s.kind === "qemu" ? "Virtual machine" : "LXC container"],
         ["Node", s.node || "—"],
         ["VMID", s.vmid || "—"],
-        ["Pool", s.pool || "—"],
+        ["Project", s.projectName || "—"],
       ],
     },
     {

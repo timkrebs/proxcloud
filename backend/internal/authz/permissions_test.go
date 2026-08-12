@@ -23,14 +23,21 @@ import (
 func buildRealRouter(t *testing.T) chi.Routes {
 	t.Helper()
 	noop := func(http.ResponseWriter, *http.Request) {}
+	// The real handler surfaces; Authz is a real (store-less) middleware so the
+	// /admin and /tenants/{tenantId} groups mount with their full route trees.
+	mw := &authz.Middleware{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	api := &handlers.Deps{Authz: mw}
 	deps := httpserver.Deps{
 		Cfg:       &config.Config{},
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Auth:      &auth.Handler{Sessions: auth.NewSessions(nil, false, time.Hour, 24*time.Hour)},
 		Health:    noop,
-		Events:    noop,                     // mounts GET /api/events
-		ConsoleWS: http.HandlerFunc(noop),   // mounts GET /api/console/ws/{sessionId}
-		Protected: (&handlers.Deps{}).Mount, // the real route table
+		Events:    noop,                   // mounts GET /api/events
+		ConsoleWS: http.HandlerFunc(noop), // mounts GET /api/console/ws/{sessionId}
+		Authz:     mw,
+		Account:   api.MountAccount,
+		Admin:     api.MountAdmin,
+		Tenant:    api.MountTenant,
 	}
 	h := httpserver.New(deps)
 	routes, ok := h.(chi.Routes)

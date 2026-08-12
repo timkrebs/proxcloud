@@ -32,7 +32,8 @@ export interface WizardState {
   name: string;
   node: string;
   vmid: string; // keep as string for the input; validated to int
-  pool: string;
+  projectId: string; // required (Phase 3): the backend derives the pool from it
+  projectName: string; // display-only mirror for the summary/review panels
 
   // Image
   sourceMode: SourceMode;
@@ -81,7 +82,8 @@ const initial = (kind: WizardKind) => ({
   name: "",
   node: "",
   vmid: "",
-  pool: "",
+  projectId: "",
+  projectName: "",
   sourceMode: (kind === "lxc" ? "vztmpl" : "iso") as SourceMode,
   isoVolId: "",
   vztmplVolId: "",
@@ -143,6 +145,7 @@ export function validateWizard(s: WizardState, existingVmids: number[] = []): Wi
     });
   }
   if (s.node === "") errs.push({ tab: 0, field: "node", message: "Target node is required (Basics)." });
+  if (s.projectId === "") errs.push({ tab: 0, field: "projectId", message: "A project is required (Basics)." });
 
   const vmid = Number(s.vmid);
   if (!Number.isInteger(vmid) || vmid < 100 || vmid > 999999999) {
@@ -199,7 +202,7 @@ export function validateWizard(s: WizardState, existingVmids: number[] = []): Wi
   return errs;
 }
 
-/** Wire request for POST /api/guests. Call only when validation passes. */
+/** Wire request for POST /api/tenants/{tenantId}/guests. Call only when validation passes. */
 export function toCreateRequest(s: WizardState): CreateGuestRequest {
   const sshKeys = s.sshKeys
     .split("\n")
@@ -212,7 +215,7 @@ export function toCreateRequest(s: WizardState): CreateGuestRequest {
     name: s.name,
     node: s.node,
     vmid: Number(s.vmid),
-    ...(s.pool !== "" ? { pool: s.pool } : {}),
+    projectId: s.projectId,
     source:
       s.kind === "lxc"
         ? { mode: "vztmpl", vztmplVolId: s.vztmplVolId }

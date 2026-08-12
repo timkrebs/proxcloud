@@ -21,6 +21,21 @@ import (
 // ErrNotFound is returned by getters when no row matches.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrConflict is returned by writers when a row violates a uniqueness
+// constraint — a duplicate tenant/project slug, a duplicate pool id, or a VMID
+// that is already reserved. Handlers map it to HTTP 409 rather than leaking the
+// raw Postgres error. It is the write-path counterpart to ErrNotFound.
+var ErrConflict = errors.New("store: conflict")
+
+// isUniqueViolation reports whether err (or anything it wraps) is a Postgres
+// unique-violation, SQLSTATE 23505 — the signal that a slug/pool/VMID collided
+// with an existing UNIQUE constraint. Used to translate the raw pgx error into
+// the ErrConflict sentinel at the Create* boundary.
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
 // queryer is the subset of pgx shared by *pgxpool.Pool and pgx.Tx, so the same
 // query methods serve both pooled and transaction-scoped stores.
 type queryer interface {
@@ -293,6 +308,19 @@ func (s *PgStore) TouchSession(ctx context.Context, sessionID string, at time.Ti
 	return nil
 }
 
+// SetSessionActiveTenant sets or clears the session's active_tenant_id.
+func (s *PgStore) SetSessionActiveTenant(ctx context.Context, sessionID string, tenantID *string) error {
+	const q = `UPDATE sessions SET active_tenant_id = $2::uuid WHERE id = $1::uuid`
+	tag, err := s.q.Exec(ctx, q, sessionID, tenantID)
+	if err != nil {
+		return fmt.Errorf("store: set session active tenant: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // RevokeSession sets revoked_at on a single session.
 func (s *PgStore) RevokeSession(ctx context.Context, sessionID string) error {
 	const q = `UPDATE sessions SET revoked_at = now() WHERE id = $1::uuid AND revoked_at IS NULL`
@@ -432,8 +460,8 @@ func (s *PgStore) GetProjectByPoolID(ctx context.Context, poolID string) (*Proje
 
 // ListProjectsByTenant returns a tenant's projects ordered by slug.
 func (s *PgStore) ListProjectsByTenant(ctx context.Context, tenantID string) ([]Project, error) {
-	const q = `SELECT id::text, tenant_id::text, name, slug, pool_id, created_at, updated_at
-	           FROM projects WHERE tenant_id = $1 ORDER BY slug`
+	const q = `SELECT ` + projectColumns + `
+	           FROM projects WHERE tenant_id = $1::uuid ORDER BY slug`
 	rows, err := s.q.Query(ctx, q, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list projects: %w", err)
@@ -442,14 +470,463 @@ func (s *PgStore) ListProjectsByTenant(ctx context.Context, tenantID string) ([]
 
 	out := []Project{}
 	for rows.Next() {
-		var p Project
-		if err := rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Slug, &p.PoolID, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		p, err := scanProject(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: scan project: %w", err)
 		}
-		out = append(out, p)
+		out = append(out, *p)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list projects: %w", err)
 	}
 	return out, nil
+}
+
+// --- shared column lists + scanners for the Phase-3 aggregates ---
+
+const tenantColumns = `id::text, name, slug, created_at, updated_at`
+
+func scanTenant(row pgx.Row) (*Tenant, error) {
+	var t Tenant
+	err := row.Scan(&t.ID, &t.Name, &t.Slug, &t.CreatedAt, &t.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+const projectColumns = `id::text, tenant_id::text, name, slug, pool_id, created_at, updated_at`
+
+func scanProject(row pgx.Row) (*Project, error) {
+	var p Project
+	err := row.Scan(&p.ID, &p.TenantID, &p.Name, &p.Slug, &p.PoolID, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// created_by is cast to text so a NULL creator scans cleanly into *string.
+const ownershipColumns = `id::text, tenant_id::text, project_id::text, vmid, guest_type,
+	node, created_by::text, status, pve_upid, created_at, updated_at`
+
+func scanOwnership(row pgx.Row) (*ResourceOwnership, error) {
+	var o ResourceOwnership
+	err := row.Scan(&o.ID, &o.TenantID, &o.ProjectID, &o.VMID, &o.GuestType,
+		&o.Node, &o.CreatedBy, &o.Status, &o.PVEUPID, &o.CreatedAt, &o.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// roleRank orders the role hierarchy for max-role aggregation in Go
+// (owner > contributor > reader > none). The store owns this locally so it
+// never has to import authz (authz depends on store, not the reverse).
+func roleRank(role string) int {
+	switch role {
+	case "owner":
+		return 3
+	case "contributor":
+		return 2
+	case "reader":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// ListUsersByIDs implements UserStore.
+func (s *PgStore) ListUsersByIDs(ctx context.Context, ids []string) (map[string]User, error) {
+	out := map[string]User{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	const q = `SELECT ` + userColumns + ` FROM users WHERE id = ANY($1::uuid[])`
+	rows, err := s.q.Query(ctx, q, ids)
+	if err != nil {
+		return nil, fmt.Errorf("store: list users by ids: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan user: %w", err)
+		}
+		out[u.ID] = *u
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list users by ids: %w", err)
+	}
+	return out, nil
+}
+
+// CreateTenant implements TenantStore.
+func (s *PgStore) CreateTenant(ctx context.Context, p CreateTenantParams) (*Tenant, error) {
+	const q = `INSERT INTO tenants (name, slug) VALUES ($1, $2)
+	           RETURNING ` + tenantColumns
+	t, err := scanTenant(s.q.QueryRow(ctx, q, p.Name, p.Slug))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: create tenant: %w", ErrConflict)
+		}
+		return nil, fmt.Errorf("store: create tenant: %w", err)
+	}
+	return t, nil
+}
+
+// GetTenantByID implements TenantStore.
+func (s *PgStore) GetTenantByID(ctx context.Context, id string) (*Tenant, error) {
+	const q = `SELECT ` + tenantColumns + ` FROM tenants WHERE id = $1::uuid`
+	t, err := scanTenant(s.q.QueryRow(ctx, q, id))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get tenant by id: %w", err)
+	}
+	return t, nil
+}
+
+// ListTenantsForUser implements TenantStore. A user reaches a tenant either via
+// a direct tenant-scope membership or via a project-scope membership inside it;
+// the CTE unions both and the outer query keeps the highest role per tenant.
+func (s *PgStore) ListTenantsForUser(ctx context.Context, userID string) ([]TenantWithRole, error) {
+	const q = `
+		WITH utr AS (
+			SELECT m.scope_id AS tenant_id, m.role
+			FROM memberships m
+			WHERE m.user_id = $1::uuid AND m.scope_type = 'tenant'
+			UNION ALL
+			SELECT p.tenant_id AS tenant_id, m.role
+			FROM memberships m
+			JOIN projects p ON p.id = m.scope_id
+			WHERE m.user_id = $1::uuid AND m.scope_type = 'project'
+		)
+		SELECT t.id::text, t.name, t.slug, t.created_at, t.updated_at,
+			CASE max(CASE utr.role WHEN 'owner' THEN 3 WHEN 'contributor' THEN 2 WHEN 'reader' THEN 1 ELSE 0 END)
+				WHEN 3 THEN 'owner' WHEN 2 THEN 'contributor' WHEN 1 THEN 'reader' ELSE '' END AS role
+		FROM tenants t
+		JOIN utr ON utr.tenant_id = t.id
+		GROUP BY t.id, t.name, t.slug, t.created_at, t.updated_at
+		ORDER BY t.slug`
+	rows, err := s.q.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list tenants for user: %w", err)
+	}
+	defer rows.Close()
+
+	out := []TenantWithRole{}
+	for rows.Next() {
+		var tw TenantWithRole
+		if err := rows.Scan(&tw.ID, &tw.Name, &tw.Slug, &tw.CreatedAt, &tw.UpdatedAt, &tw.Role); err != nil {
+			return nil, fmt.Errorf("store: scan tenant-with-role: %w", err)
+		}
+		out = append(out, tw)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list tenants for user: %w", err)
+	}
+	return out, nil
+}
+
+// CreateProject implements ProjectStore.
+func (s *PgStore) CreateProject(ctx context.Context, p CreateProjectParams) (*Project, error) {
+	const q = `INSERT INTO projects (tenant_id, name, slug, pool_id)
+	           VALUES ($1::uuid, $2, $3, $4)
+	           RETURNING ` + projectColumns
+	proj, err := scanProject(s.q.QueryRow(ctx, q, p.TenantID, p.Name, p.Slug, p.PoolID))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: create project: %w", ErrConflict)
+		}
+		return nil, fmt.Errorf("store: create project: %w", err)
+	}
+	return proj, nil
+}
+
+// GetProjectByID implements ProjectStore.
+func (s *PgStore) GetProjectByID(ctx context.Context, id string) (*Project, error) {
+	const q = `SELECT ` + projectColumns + ` FROM projects WHERE id = $1::uuid`
+	p, err := scanProject(s.q.QueryRow(ctx, q, id))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get project by id: %w", err)
+	}
+	return p, nil
+}
+
+// RenameProject implements ProjectStore. Only the display name changes; slug
+// and pool_id are immutable (ADR-0008).
+func (s *PgStore) RenameProject(ctx context.Context, id, name string) (*Project, error) {
+	const q = `UPDATE projects SET name = $2, updated_at = now()
+	           WHERE id = $1::uuid
+	           RETURNING ` + projectColumns
+	p, err := scanProject(s.q.QueryRow(ctx, q, id, name))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: rename project: %w", err)
+	}
+	return p, nil
+}
+
+// DeleteProject implements ProjectStore. The caller checks emptiness first.
+func (s *PgStore) DeleteProject(ctx context.Context, id string) error {
+	const q = `DELETE FROM projects WHERE id = $1::uuid`
+	tag, err := s.q.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("store: delete project: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CountActiveOwnershipByProject implements ProjectStore. Live rows (active or
+// pending) block a delete; tombstoned ones do not.
+func (s *PgStore) CountActiveOwnershipByProject(ctx context.Context, projectID string) (int, error) {
+	const q = `SELECT count(*) FROM resource_ownership
+	           WHERE project_id = $1::uuid AND status IN ('active', 'pending')`
+	var n int
+	if err := s.q.QueryRow(ctx, q, projectID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count active ownership by project: %w", err)
+	}
+	return n, nil
+}
+
+// GetOwnershipByVMID implements OwnershipStore.
+func (s *PgStore) GetOwnershipByVMID(ctx context.Context, vmid int) (*ResourceOwnership, error) {
+	const q = `SELECT ` + ownershipColumns + ` FROM resource_ownership WHERE vmid = $1`
+	o, err := scanOwnership(s.q.QueryRow(ctx, q, vmid))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get ownership by vmid: %w", err)
+	}
+	return o, nil
+}
+
+// CreateOwnership implements OwnershipStore. A nil CreatedBy inserts NULL.
+func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) (*ResourceOwnership, error) {
+	const q = `INSERT INTO resource_ownership
+	             (tenant_id, project_id, vmid, guest_type, node, created_by, status)
+	           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7)
+	           RETURNING ` + ownershipColumns
+	o, err := scanOwnership(s.q.QueryRow(ctx, q,
+		p.TenantID, p.ProjectID, p.VMID, p.GuestType, p.Node, p.CreatedBy, p.Status))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("store: create ownership: %w", ErrConflict)
+		}
+		return nil, fmt.Errorf("store: create ownership: %w", err)
+	}
+	return o, nil
+}
+
+// FinalizeOwnership implements OwnershipStore: pending -> active + record UPID.
+func (s *PgStore) FinalizeOwnership(ctx context.Context, id, upid string) error {
+	const q = `UPDATE resource_ownership
+	           SET status = 'active', pve_upid = $2, updated_at = now()
+	           WHERE id = $1::uuid AND status = 'pending'`
+	tag, err := s.q.Exec(ctx, q, id, upid)
+	if err != nil {
+		return fmt.Errorf("store: finalize ownership: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ReleaseOwnership implements OwnershipStore: delete a still-pending reservation
+// so the VMID is free to reuse. Only pending rows are releasable.
+func (s *PgStore) ReleaseOwnership(ctx context.Context, id string) error {
+	const q = `DELETE FROM resource_ownership WHERE id = $1::uuid AND status = 'pending'`
+	tag, err := s.q.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("store: release ownership: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// TombstoneOwnership implements OwnershipStore (Phase-4 reconciler verdict).
+func (s *PgStore) TombstoneOwnership(ctx context.Context, id string) error {
+	const q = `UPDATE resource_ownership SET status = 'tombstoned', updated_at = now()
+	           WHERE id = $1::uuid`
+	tag, err := s.q.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("store: tombstone ownership: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ListOwnershipByTenant implements OwnershipStore (tenant filter in SQL).
+func (s *PgStore) ListOwnershipByTenant(ctx context.Context, tenantID string) ([]ResourceOwnership, error) {
+	const q = `SELECT ` + ownershipColumns + ` FROM resource_ownership
+	           WHERE tenant_id = $1::uuid ORDER BY vmid`
+	return s.listOwnership(ctx, q, tenantID)
+}
+
+// ListOwnershipByProject implements OwnershipStore.
+func (s *PgStore) ListOwnershipByProject(ctx context.Context, projectID string) ([]ResourceOwnership, error) {
+	const q = `SELECT ` + ownershipColumns + ` FROM resource_ownership
+	           WHERE project_id = $1::uuid ORDER BY vmid`
+	return s.listOwnership(ctx, q, projectID)
+}
+
+func (s *PgStore) listOwnership(ctx context.Context, q, arg string) ([]ResourceOwnership, error) {
+	rows, err := s.q.Query(ctx, q, arg)
+	if err != nil {
+		return nil, fmt.Errorf("store: list ownership: %w", err)
+	}
+	defer rows.Close()
+	out := []ResourceOwnership{}
+	for rows.Next() {
+		o, err := scanOwnership(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan ownership: %w", err)
+		}
+		out = append(out, *o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list ownership: %w", err)
+	}
+	return out, nil
+}
+
+// ListActiveVMIDs implements OwnershipStore: the set of VMIDs with a live
+// ownership row (active or pending).
+func (s *PgStore) ListActiveVMIDs(ctx context.Context) (map[int]bool, error) {
+	const q = `SELECT vmid FROM resource_ownership WHERE status IN ('active', 'pending')`
+	rows, err := s.q.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("store: list active vmids: %w", err)
+	}
+	defer rows.Close()
+	out := map[int]bool{}
+	for rows.Next() {
+		var vmid int
+		if err := rows.Scan(&vmid); err != nil {
+			return nil, fmt.Errorf("store: scan vmid: %w", err)
+		}
+		out[vmid] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list active vmids: %w", err)
+	}
+	return out, nil
+}
+
+// ListMembershipsByScope implements MembershipStore (scope filter in SQL).
+func (s *PgStore) ListMembershipsByScope(ctx context.Context, scopeType, scopeID string) ([]Membership, error) {
+	const q = `SELECT id::text, user_id::text, scope_type, scope_id::text, role, created_at, updated_at
+	           FROM memberships WHERE scope_type = $1 AND scope_id = $2::uuid ORDER BY created_at`
+	rows, err := s.q.Query(ctx, q, scopeType, scopeID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list memberships by scope: %w", err)
+	}
+	defer rows.Close()
+	out := []Membership{}
+	for rows.Next() {
+		var m Membership
+		if err := rows.Scan(&m.ID, &m.UserID, &m.ScopeType, &m.ScopeID, &m.Role, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan membership: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list memberships by scope: %w", err)
+	}
+	return out, nil
+}
+
+// ListMembershipsByScopes implements MembershipStore: one query over a batch of
+// scope ids (scope_id = ANY), replacing a per-scope fan-out.
+func (s *PgStore) ListMembershipsByScopes(ctx context.Context, scopeType string, scopeIDs []string) ([]Membership, error) {
+	out := []Membership{}
+	if len(scopeIDs) == 0 {
+		return out, nil
+	}
+	const q = `SELECT id::text, user_id::text, scope_type, scope_id::text, role, created_at, updated_at
+	           FROM memberships WHERE scope_type = $1 AND scope_id = ANY($2::uuid[]) ORDER BY created_at`
+	rows, err := s.q.Query(ctx, q, scopeType, scopeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: list memberships by scopes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m Membership
+		if err := rows.Scan(&m.ID, &m.UserID, &m.ScopeType, &m.ScopeID, &m.Role, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan membership: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list memberships by scopes: %w", err)
+	}
+	return out, nil
+}
+
+// GetEffectiveRoles implements MembershipStore. One tenant-filtered membership
+// scan yields the tenant role and the per-project roles; the max-role reduction
+// happens in Go via roleRank.
+func (s *PgStore) GetEffectiveRoles(ctx context.Context, userID, tenantID string) (string, map[string]string, error) {
+	const q = `
+		SELECT m.scope_type, m.scope_id::text, m.role
+		FROM memberships m
+		LEFT JOIN projects p ON m.scope_type = 'project' AND p.id = m.scope_id
+		WHERE m.user_id = $1::uuid
+		  AND (
+		    (m.scope_type = 'tenant'  AND m.scope_id = $2::uuid)
+		    OR (m.scope_type = 'project' AND p.tenant_id = $2::uuid)
+		  )`
+	rows, err := s.q.Query(ctx, q, userID, tenantID)
+	if err != nil {
+		return "", nil, fmt.Errorf("store: get effective roles: %w", err)
+	}
+	defer rows.Close()
+
+	tenantRole := ""
+	projectRoles := map[string]string{}
+	for rows.Next() {
+		var scopeType, scopeID, role string
+		if err := rows.Scan(&scopeType, &scopeID, &role); err != nil {
+			return "", nil, fmt.Errorf("store: scan effective role: %w", err)
+		}
+		switch scopeType {
+		case "tenant":
+			if roleRank(role) > roleRank(tenantRole) {
+				tenantRole = role
+			}
+		case "project":
+			if roleRank(role) > roleRank(projectRoles[scopeID]) {
+				projectRoles[scopeID] = role
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", nil, fmt.Errorf("store: get effective roles: %w", err)
+	}
+	return tenantRole, projectRoles, nil
 }

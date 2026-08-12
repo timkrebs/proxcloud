@@ -22,6 +22,15 @@ type GuestSummary struct {
 	Tags      []string `json:"tags"`
 	Template  bool     `json:"template"`
 
+	// Tenancy enrichment (Phase 3). ProjectID/ProjectName come from the
+	// resource_ownership row; CreatedBy is the creator's display name or email
+	// ("" for backfilled/unknown). On the admin cluster-wide list, a VMID with
+	// no ownership row carries ProjectID "" and Unassigned true.
+	ProjectID   string `json:"projectId,omitempty"`
+	ProjectName string `json:"projectName,omitempty"`
+	CreatedBy   string `json:"createdBy,omitempty"`
+	Unassigned  bool   `json:"unassigned,omitempty"`
+
 	// PendingTaskUPID is set while a Proxcloud-initiated task is running
 	// against this guest; Status then carries the transitional value.
 	PendingTaskUPID string `json:"pendingTaskUpid,omitempty"`

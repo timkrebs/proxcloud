@@ -14,6 +14,7 @@ import { Spinner } from "@/components/ui/icons";
 import { ApiError, apiFetch } from "@/lib/api/client";
 import type { ConsoleSession } from "@/lib/api/generated/types";
 import { useGuest, type GuestParams } from "@/lib/api/guestQueries";
+import { useActiveTenantId } from "@/lib/stores/uiStore";
 
 function wsUrl(sessionId: string): string {
   const secure = typeof window !== "undefined" && window.location.protocol === "https:";
@@ -30,16 +31,23 @@ function wsUrl(sessionId: string): string {
   return `${origin}/api/console/ws/${encodeURIComponent(sessionId)}`;
 }
 
-async function openSession(g: GuestParams, kind: "vnc" | "term"): Promise<ConsoleSession> {
-  return apiFetch<ConsoleSession>(`/api/guests/${encodeURIComponent(g.node)}/${g.type}/${g.vmid}/console`, {
-    method: "POST",
-    body: JSON.stringify({ kind }),
-  });
+async function openSession(
+  tenantId: string,
+  g: GuestParams,
+  kind: "vnc" | "term",
+): Promise<ConsoleSession> {
+  return apiFetch<ConsoleSession>(
+    `/api/tenants/${tenantId}/guests/${encodeURIComponent(g.node)}/${g.type}/${g.vmid}/console`,
+    {
+      method: "POST",
+      body: JSON.stringify({ kind }),
+    },
+  );
 }
 
 type Phase = "idle" | "connecting" | "connected" | "closed" | "error";
 
-function VncConsole({ g }: { g: GuestParams }) {
+function VncConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
   const el = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<{ disconnect(): void } | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -49,7 +57,7 @@ function VncConsole({ g }: { g: GuestParams }) {
     setPhase("connecting");
     setError(null);
     try {
-      const sess = await openSession(g, "vnc");
+      const sess = await openSession(tenantId, g, "vnc");
       const { default: RFB } = await import("@novnc/novnc");
       if (!el.current) return;
       const rfb = new RFB(el.current, wsUrl(sess.sessionId), {
@@ -64,7 +72,7 @@ function VncConsole({ g }: { g: GuestParams }) {
       setError(err);
       setPhase("error");
     }
-  }, [g]);
+  }, [g, tenantId]);
 
   useEffect(() => {
     connect();
@@ -96,7 +104,7 @@ function VncConsole({ g }: { g: GuestParams }) {
   );
 }
 
-function TermConsole({ g }: { g: GuestParams }) {
+function TermConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
   const el = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -106,7 +114,7 @@ function TermConsole({ g }: { g: GuestParams }) {
     setPhase("connecting");
     setError(null);
     try {
-      const sess = await openSession(g, "term");
+      const sess = await openSession(tenantId, g, "term");
       const [{ Terminal }, { FitAddon }] = await Promise.all([
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
@@ -157,7 +165,7 @@ function TermConsole({ g }: { g: GuestParams }) {
       setError(err);
       setPhase("error");
     }
-  }, [g]);
+  }, [g, tenantId]);
 
   useEffect(() => {
     connect();
@@ -209,6 +217,18 @@ function ConsoleError({ err, retry }: { err: unknown; retry: () => void }) {
 export default function ConsolePage() {
   const g = useGuestParams();
   const guest = useGuest(g);
+  const tenantId = useActiveTenantId();
+
+  if (tenantId === null) {
+    return (
+      <div>
+        <BladeHeading>Console</BladeHeading>
+        <p className="flex items-center gap-2 text-[13px] text-ink-2">
+          <Spinner size={14} /> Loading directory…
+        </p>
+      </div>
+    );
+  }
 
   if (guest.data && guest.data.status !== "running") {
     return (
@@ -226,7 +246,7 @@ export default function ConsolePage() {
   return (
     <div>
       <BladeHeading sub={g.type === "qemu" ? "noVNC" : "xterm.js"}>Console</BladeHeading>
-      {g.type === "qemu" ? <VncConsole g={g} /> : <TermConsole g={g} />}
+      {g.type === "qemu" ? <VncConsole g={g} tenantId={tenantId} /> : <TermConsole g={g} tenantId={tenantId} />}
     </div>
   );
 }

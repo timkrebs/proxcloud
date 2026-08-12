@@ -16,6 +16,8 @@ function validLxc(): WizardState {
     name: "cache-01",
     node: "pve01",
     vmid: "200",
+    projectId: "p-web",
+    projectName: "Web",
     vztmplVolId: "local:vztmpl/debian-12.tar.zst",
     storage: "local-lvm",
     bridge: "vmbr0",
@@ -30,6 +32,8 @@ function validVm(): WizardState {
     name: "web-02",
     node: "pve01",
     vmid: "106",
+    projectId: "p-web",
+    projectName: "Web",
     isoVolId: "local:iso/debian-12.iso",
     storage: "local-lvm",
     bridge: "vmbr0",
@@ -87,6 +91,16 @@ describe("validateWizard", () => {
     validVm();
     const errs = validateWizard(useWizardStore.getState(), [106, 200]);
     expect(errs.some((e) => e.field === "vmid" && e.message.includes("already in use"))).toBe(true);
+  });
+
+  it("requires a project (Basics, tab 0)", () => {
+    validVm();
+    useWizardStore.getState().set({ projectId: "" });
+    const errs = validateWizard(useWizardStore.getState());
+    expect(errs.some((e) => e.field === "projectId" && e.tab === 0)).toBe(true);
+    // Choosing a project clears the error.
+    useWizardStore.getState().set({ projectId: "p-web" });
+    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "projectId")).toBe(false);
   });
 
   it("requires a template for LXC", () => {
@@ -169,10 +183,9 @@ describe("tab gating", () => {
 });
 
 describe("toCreateRequest", () => {
-  it("builds the LXC wire request", () => {
+  it("builds the LXC wire request with projectId and no pool", () => {
     validLxc();
     useWizardStore.getState().set({
-      pool: "homelab",
       vlanTag: "20",
       firewall: true,
       ipMode: "static",
@@ -186,7 +199,7 @@ describe("toCreateRequest", () => {
       type: "lxc",
       name: "cache-01",
       vmid: 200,
-      pool: "homelab",
+      projectId: "p-web",
       source: { mode: "vztmpl", vztmplVolId: "local:vztmpl/debian-12.tar.zst" },
       cores: 2,
       memoryMb: 2048,
@@ -200,6 +213,8 @@ describe("toCreateRequest", () => {
       tags: ["env-prod"],
       startAfterCreate: true,
     });
+    // The deprecated client-supplied pool is gone — the backend derives it.
+    expect("pool" in req).toBe(false);
   });
 
   it("linked clones omit storage; full clones keep it", () => {

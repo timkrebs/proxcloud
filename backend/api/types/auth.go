@@ -27,13 +27,18 @@ type ChangePasswordRequest struct {
 	NewPassword     string `json:"newPassword"`
 }
 
-// Me is the GET /api/auth/me response — the signed-in principal.
+// Me is the GET /api/auth/me response — the signed-in principal plus the
+// tenants they can reach and their active tenant (from the session).
 type Me struct {
 	ID              string `json:"id"`
 	Email           string `json:"email"`
 	DisplayName     string `json:"displayName"`
 	IsPlatformAdmin bool   `json:"isPlatformAdmin"`
 	TOTPEnabled     bool   `json:"totpEnabled"`
+	// ActiveTenantId mirrors sessions.active_tenant_id; "" when unset/never chosen.
+	ActiveTenantId string `json:"activeTenantId"`
+	// Tenants is every tenant the caller can reach (ListTenantsForUser).
+	Tenants []TenantMembership `json:"tenants"`
 }
 
 // SessionInfo is one entry in GET /api/auth/sessions — a live server-side

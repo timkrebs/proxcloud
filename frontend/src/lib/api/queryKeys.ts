@@ -2,10 +2,23 @@
 // from here so SSE-driven invalidation stays consistent.
 
 export interface ResourceFilters {
+  /**
+   * Tenant scope (Phase 3). Lives INSIDE the filter object so
+   * qk.resources(f) = ["resources", f] keeps its leading segment — the
+   * prefix invalidations in sse.ts / mutations.ts on ["resources"] still match
+   * — while a tenant switch still produces a distinct cache entry.
+   */
+  tenantId?: string;
   type?: "qemu" | "lxc";
-  pool?: string;
+  projectId?: string;
   node?: string;
   search?: string;
+}
+
+export interface TaskFilters {
+  tenantId?: string;
+  running?: boolean;
+  vmid?: number;
 }
 
 export const qk = {
@@ -19,10 +32,16 @@ export const qk = {
   resources: (filters: ResourceFilters = {}) => ["resources", filters] as const,
   pools: ["pools"] as const,
   storage: ["storage"] as const,
-  tasks: (filters: { running?: boolean; vmid?: number } = {}) => ["tasks", filters] as const,
+  tasks: (filters: TaskFilters = {}) => ["tasks", filters] as const,
   task: (upid: string) => ["task", upid] as const,
   taskLog: (upid: string) => ["task", upid, "log"] as const,
   notifications: ["notifications"] as const,
   liveMetrics: ["liveMetrics"] as const,
   pricing: ["pricing"] as const,
+
+  // ── Tenancy (Phase 3) ────────────────────────────────────────────────────
+  projects: (tenantId?: string) => ["projects", tenantId] as const,
+  project: (tenantId?: string, projectId?: string) => ["project", tenantId, projectId] as const,
+  members: (tenantId?: string) => ["members", tenantId] as const,
+  tenantSummary: (tenantId?: string) => ["tenantSummary", tenantId] as const,
 };

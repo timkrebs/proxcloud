@@ -11,7 +11,8 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi, Svc, type SvcName } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
 import type { GuestSummary } from "@/lib/api/generated/types";
-import { useCluster, useHealth, useNodeMetrics, useNodes, usePricing, useResources } from "@/lib/api/queries";
+import { useCluster, useHealth, useMe, useNodeMetrics, useNodes, usePricing, useResources } from "@/lib/api/queries";
+import { useTenantSummary } from "@/lib/api/tenant";
 import { formatBytesPair, formatMoney, formatPct, formatUptime, relativeTime } from "@/lib/format";
 import { listRecent } from "@/lib/stores/recent";
 
@@ -38,20 +39,23 @@ export function Skeleton({ className = "" }: { className?: string }) {
 
 // ── §3.1 service tiles ───────────────────────────────────────────────────────
 
-const TILES: { label: string; icon: SvcName | "plus"; href: string }[] = [
+const TILES: { label: string; icon: SvcName | "plus"; href: string; adminOnly?: boolean }[] = [
   { label: "Virtual machine", icon: "vm", href: "/create/vm" },
   { label: "LXC container", icon: "lxc", href: "/create/lxc" },
-  { label: "Nodes", icon: "node", href: "/nodes" },
-  { label: "Storage", icon: "vol", href: "/storage" },
+  { label: "Projects", icon: "allres", href: "/projects" },
+  { label: "Nodes", icon: "node", href: "/nodes", adminOnly: true },
+  { label: "Storage", icon: "vol", href: "/storage", adminOnly: true },
   { label: "See the catalog", icon: "plus", href: "/create" },
 ];
 
 export function ServiceTiles() {
+  const isAdmin = !!useMe().data?.isPlatformAdmin;
+  const tiles = TILES.filter((t) => !t.adminOnly || isAdmin);
   return (
     <section>
       <h2 className="mt-[26px] mb-[10px] text-[14px] font-semibold">Proxcloud services</h2>
       <div className="flex flex-wrap gap-2">
-        {TILES.map((t) => (
+        {tiles.map((t) => (
           <Link
             key={t.label}
             href={t.href}
@@ -300,6 +304,46 @@ export function ServiceHealthCard() {
             status={health.data?.proxmox === "ok" ? "online" : "offline"}
             label="Proxmox API"
           />
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── tenant summary (non-admin dashboard header card) ─────────────────────────
+
+export function TenantSummaryCard() {
+  const summary = useTenantSummary();
+  return (
+    <Card className="p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-[14px] font-semibold">Directory</h3>
+        <Link href="/projects" className="text-[13px]">
+          Manage projects
+        </Link>
+      </div>
+      {summary.isPending ? (
+        <Skeleton className="h-20" />
+      ) : summary.isError ? (
+        <CardError err={summary.error} />
+      ) : (
+        <div className="space-y-[6px] text-[13px]">
+          <div className="flex justify-between">
+            <span className="text-ink-2">Tenant</span>
+            <span className="font-semibold">{summary.data.tenant.name}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-ink-2">Your role</span>
+            <span className="capitalize">{summary.data.role || "—"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-ink-2">Projects</span>
+            <span className="tabular-nums">{summary.data.projectCount}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-ink-2">Resources</span>
+            <span className="tabular-nums">{summary.data.resourceCount}</span>
+          </div>
         </div>
       )}
     </Card>

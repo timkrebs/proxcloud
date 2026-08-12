@@ -40,6 +40,17 @@ type Identity struct {
 	Email           string
 	IsPlatformAdmin bool
 	SessionID       string
+
+	// Set by the authz chain (Phase 3). The *Identity in context is a
+	// per-request pointer, so ResolveTenant/ResolveScope mutate these in place.
+	// Declared now as plumbing; the middleware that populates them ships in the
+	// next chunk, so they stay zero-valued (and unused) until then. Roles are
+	// plain strings ("owner"|"contributor"|"reader"|"") — the ordering/compare
+	// type lives in authz so auth never imports authz.
+	ActiveTenantID    string // resolveTenant: the request's active tenant
+	TenantRole        string // resolveTenant: max tenant-scope role ("" if project-only member)
+	ResolvedProjectID string // resolveScope: from {projectId} or {vmid}->ownership ("" = tenant-level)
+	EffectiveRole     string // resolveScope: max(TenantRole, projectRole) for this request
 }
 
 // Sessions issues, verifies, and revokes Postgres-backed sessions.
@@ -134,12 +145,19 @@ func (s *Sessions) Verify(ctx context.Context, r *http.Request) (*Identity, erro
 		// Best-effort; a failed touch never fails the request.
 		_ = s.store.TouchSession(ctx, sess.ID, now)
 	}
-	return &Identity{
+	id := &Identity{
 		UserID:          user.ID,
 		Email:           user.Email,
 		IsPlatformAdmin: user.IsPlatformAdmin,
 		SessionID:       sess.ID,
-	}, nil
+	}
+	// Seed the session's active tenant so the flat account/stream surface (Me,
+	// SSE scoping) can read it without a URL {tenantId}. The tenant-scoped authz
+	// chain overwrites ActiveTenantID from the path param for scoped routes.
+	if sess.ActiveTenantID != nil {
+		id.ActiveTenantID = *sess.ActiveTenantID
+	}
+	return id, nil
 }
 
 // Live reports whether a stored session is still usable right now — not

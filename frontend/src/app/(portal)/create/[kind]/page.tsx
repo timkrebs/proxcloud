@@ -22,6 +22,7 @@ import { StatusDot } from "@/components/ui/StatusDot";
 import { ApiError, apiFetch } from "@/lib/api/client";
 import type { CreateGuestResponse } from "@/lib/api/generated/types";
 import { usePricing, useResources } from "@/lib/api/queries";
+import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { pushToast } from "@/lib/stores/toastStore";
 import { CostRows } from "@/components/wizard/CostRows";
 import {
@@ -38,6 +39,7 @@ export default function WizardPage() {
   const s = useWizardStore();
   const resources = useResources();
   const pricing = usePricing();
+  const tenantId = useActiveTenantId();
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
@@ -50,7 +52,7 @@ export default function WizardPage() {
 
   const create = useMutation({
     mutationFn: () =>
-      apiFetch<CreateGuestResponse>("/api/guests", {
+      apiFetch<CreateGuestResponse>(`/api/tenants/${tenantId}/guests`, {
         method: "POST",
         body: JSON.stringify(toCreateRequest(s)),
       }),
@@ -134,6 +136,7 @@ export default function WizardPage() {
           </h3>
           {[
             ["Type", kind === "qemu" ? "Virtual machine" : "LXC container"],
+            ["Project", s.projectName || "—"],
             ["Compute", `${s.cores || "—"} vCPU · ${s.memoryMb || "—"} MiB`],
             ...(s.sourceMode !== "clone" ? [["Disk", `${s.diskGb || "—"} GiB${s.storage ? ` on ${s.storage}` : ""}`]] : []),
             ["Node", s.node || "—"],
@@ -161,7 +164,7 @@ export default function WizardPage() {
 
       {/* sticky footer §3.3 */}
       <div className="sticky bottom-0 z-[5] -mx-8 mt-7 flex items-center gap-2 border-t border-line bg-card px-8 py-3">
-        <Button variant="primary" disabled={create.isPending || submitted} onClick={onReview ? submit : () => s.set({ tab: 6, maxTab: 6 })}>
+        <Button variant="primary" disabled={create.isPending || submitted || (onReview && tenantId === null)} onClick={onReview ? submit : () => s.set({ tab: 6, maxTab: 6 })}>
           {onReview ? (create.isPending ? "Creating…" : "Create") : "Review + create"}
         </Button>
         <Button variant="secondary" disabled={s.tab === 0} onClick={() => s.prev()}>

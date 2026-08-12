@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 )
@@ -202,6 +204,147 @@ func (d *Deps) GetTaskLog(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 
+	lines, total, err := d.PVE.TaskLog(r.Context(), upid, start, limit)
+	if err != nil {
+		httpserver.WriteError(w, err)
+		return
+	}
+	httpserver.WriteJSON(w, http.StatusOK, types.TaskLog{Total: total, Lines: lines})
+}
+
+// --- tenant-scoped tasks (ownership-filtered) ---
+
+// tenantOwnedVMIDs returns the set of VMIDs the tenant owns (active or pending).
+func (d *Deps) tenantOwnedVMIDs(ctx context.Context, tenantID string) (map[int]bool, error) {
+	owns, err := d.Store.ListOwnershipByTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	set := map[int]bool{}
+	for _, o := range owns {
+		if o.Status == "active" || o.Status == "pending" {
+			set[o.VMID] = true
+		}
+	}
+	return set, nil
+}
+
+// checkTaskOwnership resolves a UPID's target VMID and verifies the active tenant
+// owns it, else 404 (never 403). A task whose target is not a VMID we can
+// attribute to the tenant is treated as not owned.
+func (d *Deps) checkTaskOwnership(ctx context.Context, upid proxmox.UPID, tenantID string) *types.APIError {
+	vmid, err := strconv.Atoi(upid.ID())
+	if err != nil || vmid < 1 {
+		return notFound("Task not found.")
+	}
+	if _, err := authz.ResolveOwnership(ctx, d.Store, vmid, tenantID); err != nil {
+		return notFound("Task not found.")
+	}
+	return nil
+}
+
+// ListTenantTasks serves GET /api/tenants/{tenantId}/tasks — cluster tasks
+// filtered to the tenant's owned VMIDs.
+func (d *Deps) ListTenantTasks(w http.ResponseWriter, r *http.Request) {
+	id, ok := requireIdentity(w, r)
+	if !ok || !d.requireStore(w) {
+		return
+	}
+	owned, err := d.tenantOwnedVMIDs(r.Context(), id.ActiveTenantID)
+	if err != nil {
+		httpserver.WriteError(w, err)
+		return
+	}
+
+	q := r.URL.Query()
+	limit := 50
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	runningOnly := q.Get("running") == "true"
+	vmidFilter := 0
+	if v := q.Get("vmid"); v != "" {
+		vmidFilter, _ = strconv.Atoi(v)
+	}
+
+	infos, err := d.PVE.ClusterTasks(r.Context())
+	if err != nil {
+		httpserver.WriteError(w, err)
+		return
+	}
+
+	out := []types.TaskSummary{}
+	for _, t := range infos {
+		s := d.taskSummary(t)
+		// Ownership scope: keep only tasks targeting a VMID this tenant owns.
+		if s.Resource == nil || !owned[s.Resource.VMID] {
+			continue
+		}
+		if runningOnly && s.Status != "running" {
+			continue
+		}
+		if vmidFilter > 0 && s.Resource.VMID != vmidFilter {
+			continue
+		}
+		out = append(out, s)
+		if len(out) >= limit {
+			break
+		}
+	}
+	httpserver.WriteJSON(w, http.StatusOK, out)
+}
+
+// GetTenantTask serves GET /api/tenants/{tenantId}/tasks/{upid} with an explicit
+// ownership check (the path lacks a {vmid}).
+func (d *Deps) GetTenantTask(w http.ResponseWriter, r *http.Request) {
+	id, ok := requireIdentity(w, r)
+	if !ok || !d.requireStore(w) {
+		return
+	}
+	upid, apiErr := upidParam(r)
+	if apiErr != nil {
+		httpserver.WriteError(w, apiErr)
+		return
+	}
+	if apiErr := d.checkTaskOwnership(r.Context(), upid, id.ActiveTenantID); apiErr != nil {
+		httpserver.WriteError(w, apiErr)
+		return
+	}
+	info, err := d.PVE.TaskStatus(r.Context(), upid)
+	if err != nil {
+		httpserver.WriteError(w, err)
+		return
+	}
+	httpserver.WriteJSON(w, http.StatusOK, d.taskSummary(*info))
+}
+
+// GetTenantTaskLog serves GET /api/tenants/{tenantId}/tasks/{upid}/log with the
+// same explicit ownership check.
+func (d *Deps) GetTenantTaskLog(w http.ResponseWriter, r *http.Request) {
+	id, ok := requireIdentity(w, r)
+	if !ok || !d.requireStore(w) {
+		return
+	}
+	upid, apiErr := upidParam(r)
+	if apiErr != nil {
+		httpserver.WriteError(w, apiErr)
+		return
+	}
+	if apiErr := d.checkTaskOwnership(r.Context(), upid, id.ActiveTenantID); apiErr != nil {
+		httpserver.WriteError(w, apiErr)
+		return
+	}
+	q := r.URL.Query()
+	start, _ := strconv.Atoi(q.Get("start"))
+	if start < 0 {
+		start = 0
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit < 1 || limit > 500 {
+		limit = 200
+	}
 	lines, total, err := d.PVE.TaskLog(r.Context(), upid, start, limit)
 	if err != nil {
 		httpserver.WriteError(w, err)

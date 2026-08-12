@@ -114,6 +114,21 @@ type Client interface {
 
 	// CloneGuest clones src into newVMID (full or linked).
 	CloneGuest(ctx context.Context, src GuestRef, newVMID int, name, pool string, full bool, storage string) (UPID, error)
+
+	// Pool management (ADR-0008). These calls are SYNCHRONOUS — PVE returns a
+	// 2xx with an empty body and no UPID, so they never route through the
+	// task/UPID polling path. Success is the absence of an error.
+
+	// CreatePool creates a resource pool. It is idempotent: a "pool already
+	// exists" failure (PVE reports it as HTTP 500) is treated as success, so
+	// callers can "ensure" a pool without a prior existence check.
+	CreatePool(ctx context.Context, poolID, comment string) error
+	// DeletePool removes a resource pool. The caller must have emptied it first
+	// (a project delete never orphans a guest).
+	DeletePool(ctx context.Context, poolID string) error
+	// AddPoolMembers adds VMIDs to a pool (PVE's PUT adds, never replaces). It
+	// is idempotent: an "already a pool member" failure is treated as success.
+	AddPoolMembers(ctx context.Context, poolID string, vmids []int) error
 }
 
 // GuestRef identifies one guest for node-scoped API calls.
@@ -135,6 +150,18 @@ func (u UPID) Node() string {
 		return ""
 	}
 	return parts[1]
+}
+
+// ID returns the task-target id embedded in the UPID (the seventh
+// colon-separated field, which is the VMID for guest tasks), or "" if the value
+// is not a well-formed UPID. Format:
+// UPID:node:pid:pstart:starttime:type:id:user:
+func (u UPID) ID() string {
+	parts := strings.Split(string(u), ":")
+	if len(parts) < 7 || parts[0] != "UPID" {
+		return ""
+	}
+	return parts[6]
 }
 
 // ClusterInfo is the digested /cluster/status: identity, quorum, node counts.

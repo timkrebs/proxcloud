@@ -1,20 +1,22 @@
 "use client";
 // Data-connected portal chrome: everything inside <Providers> that needs
-// live queries — user chip, bell badge + notifications pane, cluster/pool
-// pane, palette resource search, and the single SSE connection.
-import { useEffect, useState } from "react";
+// live queries — user chip, bell badge + notifications pane, the directory
+// (tenant + project) switcher, palette resource search, and the single SSE
+// connection. Also hydrates the active tenant from /api/auth/me.
+import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 
 import CommandPalette, { type PaletteResource } from "@/components/chrome/CommandPalette";
-import { ClusterPane } from "@/components/chrome/ClusterPane";
+import { TenantPane } from "@/components/chrome/ClusterPane";
 import { NotificationsPane, type NotificationItem } from "@/components/chrome/NotificationsPane";
 import SideNav from "@/components/chrome/SideNav";
 import { ToastHost } from "@/components/chrome/ToastHost";
 import TopBar from "@/components/chrome/TopBar";
 import { apiFetch } from "@/lib/api/client";
 import { qk } from "@/lib/api/queryKeys";
-import { useCluster, useMe, useNodes, useNotifications, usePools, useResources } from "@/lib/api/queries";
+import { useMe, useNotifications, useResources } from "@/lib/api/queries";
+import { useProjects, useSwitchTenant } from "@/lib/api/tenant";
 import { useEvents } from "@/lib/sse";
 import { useUiStore } from "@/lib/stores/uiStore";
 import { relativeTime } from "@/lib/format";
@@ -28,18 +30,36 @@ function initialsOf(name: string): string {
 export default function PortalChrome({ children }: { children: React.ReactNode }) {
   const openPane = useUiStore((s) => s.openPane);
   const setPane = useUiStore((s) => s.setPane);
+  const activeTenantId = useUiStore((s) => s.activeTenantId);
+  const setActiveTenant = useUiStore((s) => s.setActiveTenant);
+  const projectFilter = useUiStore((s) => s.projectFilter);
+  const setProjectFilter = useUiStore((s) => s.setProjectFilter);
   const router = useRouter();
   const qc = useQueryClient();
-  const [selectedPool, setSelectedPool] = useState<string | null>(null);
 
   useEvents();
 
   const me = useMe();
-  const cluster = useCluster();
-  const nodes = useNodes();
-  const pools = usePools();
   const notifications = useNotifications();
   const resources = useResources();
+  const projects = useProjects();
+  const switchTenant = useSwitchTenant();
+
+  // Hydrate the active tenant once /api/auth/me is known: prefer the persisted
+  // id iff still a member, else the session's active tenant, else the first
+  // reachable tenant. Guarded so it only writes when the resolved id actually
+  // changes (never spuriously clears the project filter).
+  useEffect(() => {
+    if (!me.data) return;
+    const tenants = me.data.tenants ?? [];
+    const isMember = (id: string | null | undefined): boolean => !!id && tenants.some((t) => t.id === id);
+    const persisted = useUiStore.getState().activeTenantId;
+    let next: string | null = null;
+    if (isMember(persisted)) next = persisted;
+    else if (isMember(me.data.activeTenantId)) next = me.data.activeTenantId;
+    else if (tenants.length > 0) next = tenants[0].id;
+    if (next !== useUiStore.getState().activeTenantId) setActiveTenant(next);
+  }, [me.data, setActiveTenant]);
 
   const notifItems: NotificationItem[] = (notifications.data ?? []).map((n) => ({
     id: n.id,
@@ -69,10 +89,6 @@ export default function PortalChrome({ children }: { children: React.ReactNode }
       node: g.node,
       kind: g.type === "qemu" ? ("vm" as const) : ("lxc" as const),
     }));
-
-  // Standalone nodes have no corosync cluster name — the node's own name is
-  // the honest identity to show.
-  const clusterName = cluster.data?.name || nodes.data?.[0]?.node;
 
   const closePane = () => setPane(null);
   const signOut = async () => {
@@ -119,12 +135,16 @@ export default function PortalChrome({ children }: { children: React.ReactNode }
         />
       ) : null}
       {openPane === "tenant" ? (
-        <ClusterPane
-          clusterName={clusterName}
-          online={(cluster.data?.nodesOnline ?? 0) > 0}
-          pools={(pools.data ?? []).map((p) => ({ poolid: p.poolId, comment: p.comment }))}
-          selectedPool={selectedPool}
-          onSelectPool={setSelectedPool}
+        <TenantPane
+          tenants={me.data?.tenants ?? []}
+          activeTenantId={activeTenantId}
+          onSelectTenant={(id) => switchTenant.mutate(id)}
+          switching={switchTenant.isPending}
+          projects={projects.data ?? []}
+          projectsPending={projects.isPending && activeTenantId !== null}
+          projectsError={projects.error}
+          selectedProjectId={projectFilter}
+          onSelectProject={setProjectFilter}
           onClose={closePane}
           onSignOut={signOut}
         />

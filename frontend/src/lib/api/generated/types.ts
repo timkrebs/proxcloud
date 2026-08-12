@@ -37,7 +37,8 @@ export interface ChangePasswordRequest {
   newPassword: string;
 }
 /**
- * Me is the GET /api/auth/me response — the signed-in principal.
+ * Me is the GET /api/auth/me response — the signed-in principal plus the
+ * tenants they can reach and their active tenant (from the session).
  */
 export interface Me {
   id: string;
@@ -45,6 +46,14 @@ export interface Me {
   displayName: string;
   isPlatformAdmin: boolean;
   totpEnabled: boolean;
+  /**
+   * ActiveTenantId mirrors sessions.active_tenant_id; "" when unset/never chosen.
+   */
+  activeTenantId: string;
+  /**
+   * Tenants is every tenant the caller can reach (ListTenantsForUser).
+   */
+  tenants: TenantMembership[];
 }
 /**
  * SessionInfo is one entry in GET /api/auth/sessions — a live server-side
@@ -154,6 +163,15 @@ export interface CreateGuestRequest {
   name: string; // qemu: DNS name; lxc: hostname
   node: string;
   vmid: number /* int */;
+  /**
+   * ProjectId is required (Phase 3): the backend derives the Proxmox pool from
+   * it. Replaces the old client-supplied Pool, which is now server-derived.
+   */
+  projectId: string;
+  /**
+   * Pool is deprecated and ignored on input — the handler overwrites it with
+   * the project's pool before the request reaches the deploy engine.
+   */
   pool?: string;
   source: CreateSource;
   cores: number /* int */;
@@ -580,6 +598,16 @@ export interface GuestSummary {
   tags: string[];
   template: boolean;
   /**
+   * Tenancy enrichment (Phase 3). ProjectID/ProjectName come from the
+   * resource_ownership row; CreatedBy is the creator's display name or email
+   * ("" for backfilled/unknown). On the admin cluster-wide list, a VMID with
+   * no ownership row carries ProjectID "" and Unassigned true.
+   */
+  projectId?: string;
+  projectName?: string;
+  createdBy?: string;
+  unassigned?: boolean;
+  /**
    * PendingTaskUPID is set while a Proxcloud-initiated task is running
    * against this guest; Status then carries the transitional value.
    */
@@ -678,4 +706,107 @@ export interface TaskLogLine {
 export interface TaskLog {
   total: number /* int */;
   lines: TaskLogLine[];
+}
+
+//////////
+// source: tenancy.go
+
+/**
+ * Tenant ≙ Azure Directory — the top of the scoping hierarchy.
+ */
+export interface Tenant {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: string /* RFC3339 */;
+  updatedAt: string /* RFC3339 */;
+}
+/**
+ * TenantMembership is one entry in Me.tenants: a tenant the caller can reach
+ * plus their highest role anywhere in it (display only; enforcement is per-scope).
+ */
+export interface TenantMembership {
+  id: string;
+  name: string;
+  slug: string;
+  role: string; // owner | contributor | reader | ""
+}
+/**
+ * Project ≙ Resource Group, backed by the Proxmox pool PoolID.
+ */
+export interface Project {
+  id: string;
+  tenantId: string;
+  name: string;
+  slug: string;
+  poolId: string;
+  createdAt: string /* RFC3339 */;
+  updatedAt: string /* RFC3339 */;
+}
+/**
+ * Member is one tenant member (read-only in Phase 3; invites land in Phase 5).
+ */
+export interface Member {
+  userId: string;
+  email: string;
+  displayName: string;
+  scopeType: string; // tenant | project
+  scopeId: string;
+  role: string;
+}
+/**
+ * TenantSummary is the tenant dashboard header (GET …/summary).
+ */
+export interface TenantSummary {
+  tenant: Tenant;
+  role: string;
+  projectCount: number /* int */;
+  resourceCount: number /* int */;
+}
+/**
+ * CreateProjectRequest is POST …/projects.
+ */
+export interface CreateProjectRequest {
+  name: string;
+}
+/**
+ * RenameProjectRequest is PATCH …/projects/{projectId}.
+ */
+export interface RenameProjectRequest {
+  name: string;
+}
+/**
+ * DeleteProjectRequest is DELETE …/projects/{projectId}.
+ */
+export interface DeleteProjectRequest {
+  confirmName: string;
+}
+/**
+ * CreateTenantRequest is POST /api/admin/tenants.
+ */
+export interface CreateTenantRequest {
+  name: string;
+}
+/**
+ * SetActiveTenantRequest is PATCH /api/auth/active-tenant.
+ */
+export interface SetActiveTenantRequest {
+  tenantId: string;
+}
+/**
+ * CatalogNode is a placeable node in the wizard catalog (names only — no
+ * capacity detail for non-admins, ADR-0007 §4).
+ */
+export interface CatalogNode {
+  name: string;
+}
+/**
+ * CatalogStorage is a storage in the wizard catalog: id + content types only.
+ * Capacity (free/total) is deliberately omitted for non-admins — it is never
+ * emitted as a fabricated zero (ADR-0007 §4, iron rule "never invent data").
+ */
+export interface CatalogStorage {
+  storage: string;
+  type: string;
+  content: string[];
 }

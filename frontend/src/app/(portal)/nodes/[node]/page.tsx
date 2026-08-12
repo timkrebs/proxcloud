@@ -5,11 +5,12 @@ import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
+import { AdminOnly } from "@/components/chrome/AdminOnly";
 import { Card } from "@/components/ui/Card";
 import { Sparkline } from "@/components/ui/Sparkline";
 import { apiFetch } from "@/lib/api/client";
 import type { NodeDetail } from "@/lib/api/generated/types";
-import { useNodeMetrics } from "@/lib/api/queries";
+import { useMe, useNodeMetrics } from "@/lib/api/queries";
 import { formatBytes, formatBytesPair, formatPct, formatRate, formatUptime } from "@/lib/format";
 
 function Row({ k, v }: { k: string; v: React.ReactNode }) {
@@ -23,10 +24,13 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
 
 export default function NodeDetailPage() {
   const { node } = useParams<{ node: string }>();
+  const me = useMe();
+  const isAdmin = !!me.data?.isPlatformAdmin;
   const detail = useQuery({
     queryKey: ["node", node],
-    queryFn: () => apiFetch<NodeDetail>(`/api/nodes/${encodeURIComponent(node)}`),
+    queryFn: () => apiFetch<NodeDetail>(`/api/admin/nodes/${encodeURIComponent(node)}`),
     refetchInterval: 10_000,
+    enabled: isAdmin,
   });
   const metrics = useNodeMetrics(node);
   const s = metrics.data?.series ?? {};
@@ -51,6 +55,8 @@ export default function NodeDetailPage() {
       max: undefined,
     },
   ];
+
+  if (me.data && !isAdmin) return <AdminOnly resource="Nodes" />;
 
   return (
     <div className="max-w-[1100px] px-8 pt-5 pb-10">

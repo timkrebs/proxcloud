@@ -22,7 +22,9 @@ type fakeStore struct {
 	users       map[string]*store.User
 	sessions    map[string]*store.Session
 	memberships map[string]*store.Membership
-	tenants     map[string]*store.Tenant // by slug
+	tenants     map[string]*store.Tenant         // by slug
+	projects    map[string]*store.Project        // by id
+	ownership   map[int]*store.ResourceOwnership // by vmid
 
 	now func() time.Time
 }
@@ -33,6 +35,8 @@ func newFakeStore() *fakeStore {
 		sessions:    map[string]*store.Session{},
 		memberships: map[string]*store.Membership{},
 		tenants:     map[string]*store.Tenant{},
+		projects:    map[string]*store.Project{},
+		ownership:   map[int]*store.ResourceOwnership{},
 		now:         time.Now,
 	}
 	f.tenants["default"] = &store.Tenant{ID: "tenant-default", Name: "Default", Slug: "default"}
@@ -190,6 +194,17 @@ func (f *fakeStore) TouchSession(_ context.Context, sessionID string, at time.Ti
 	return nil
 }
 
+func (f *fakeStore) SetSessionActiveTenant(_ context.Context, sessionID string, tenantID *string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[sessionID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	s.ActiveTenantID = tenantID
+	return nil
+}
+
 func (f *fakeStore) RevokeSession(_ context.Context, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -257,7 +272,323 @@ func (f *fakeStore) ListMembershipsByUser(_ context.Context, userID string) ([]s
 	return out, nil
 }
 
+func (f *fakeStore) ListMembershipsByScope(_ context.Context, scopeType, scopeID string) ([]store.Membership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.Membership{}
+	for _, m := range f.memberships {
+		if m.ScopeType == scopeType && m.ScopeID == scopeID {
+			out = append(out, *m)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) ListMembershipsByScopes(_ context.Context, scopeType string, scopeIDs []string) ([]store.Membership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	want := map[string]bool{}
+	for _, id := range scopeIDs {
+		want[id] = true
+	}
+	out := []store.Membership{}
+	for _, m := range f.memberships {
+		if m.ScopeType == scopeType && want[m.ScopeID] {
+			out = append(out, *m)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) GetEffectiveRoles(_ context.Context, userID, tenantID string) (string, map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	tenantRole := ""
+	projectRoles := map[string]string{}
+	for _, m := range f.memberships {
+		if m.UserID != userID {
+			continue
+		}
+		switch m.ScopeType {
+		case "tenant":
+			if m.ScopeID == tenantID && fakeRoleRank(m.Role) > fakeRoleRank(tenantRole) {
+				tenantRole = m.Role
+			}
+		case "project":
+			if p, ok := f.projects[m.ScopeID]; ok && p.TenantID == tenantID &&
+				fakeRoleRank(m.Role) > fakeRoleRank(projectRoles[m.ScopeID]) {
+				projectRoles[m.ScopeID] = m.Role
+			}
+		}
+	}
+	return tenantRole, projectRoles, nil
+}
+
+// --- users (Phase 3) ---
+
+func (f *fakeStore) ListUsersByIDs(_ context.Context, ids []string) (map[string]store.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]store.User{}
+	for _, id := range ids {
+		if u, ok := f.users[id]; ok {
+			out[id] = *cloneUser(u)
+		}
+	}
+	return out, nil
+}
+
+// --- tenants (Phase 3) ---
+
+func (f *fakeStore) CreateTenant(_ context.Context, p store.CreateTenantParams) (*store.Tenant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.tenants[p.Slug]; ok {
+		return nil, fmt.Errorf("create tenant: %w", store.ErrConflict)
+	}
+	now := f.now()
+	t := &store.Tenant{ID: f.nextID("tenant"), Name: p.Name, Slug: p.Slug, CreatedAt: now, UpdatedAt: now}
+	f.tenants[p.Slug] = t
+	return cloneTenant(t), nil
+}
+
+func (f *fakeStore) GetTenantByID(_ context.Context, id string) (*store.Tenant, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, t := range f.tenants {
+		if t.ID == id {
+			return cloneTenant(t), nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) ListTenantsForUser(_ context.Context, userID string) ([]store.TenantWithRole, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	roleByTenant := map[string]string{}
+	for _, m := range f.memberships {
+		if m.UserID != userID {
+			continue
+		}
+		var tid string
+		switch m.ScopeType {
+		case "tenant":
+			tid = m.ScopeID
+		case "project":
+			if p, ok := f.projects[m.ScopeID]; ok {
+				tid = p.TenantID
+			}
+		}
+		if tid != "" && fakeRoleRank(m.Role) > fakeRoleRank(roleByTenant[tid]) {
+			roleByTenant[tid] = m.Role
+		}
+	}
+	out := []store.TenantWithRole{}
+	for _, t := range f.tenants {
+		if role, ok := roleByTenant[t.ID]; ok {
+			out = append(out, store.TenantWithRole{Tenant: *cloneTenant(t), Role: role})
+		}
+	}
+	return out, nil
+}
+
+// --- projects (Phase 3) ---
+
+func (f *fakeStore) CreateProject(_ context.Context, p store.CreateProjectParams) (*store.Project, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, ex := range f.projects {
+		if ex.PoolID == p.PoolID || (ex.TenantID == p.TenantID && ex.Slug == p.Slug) {
+			return nil, fmt.Errorf("create project: %w", store.ErrConflict)
+		}
+	}
+	now := f.now()
+	proj := &store.Project{
+		ID: f.nextID("proj"), TenantID: p.TenantID, Name: p.Name, Slug: p.Slug,
+		PoolID: p.PoolID, CreatedAt: now, UpdatedAt: now,
+	}
+	f.projects[proj.ID] = proj
+	return cloneProject(proj), nil
+}
+
+func (f *fakeStore) GetProjectByID(_ context.Context, id string) (*store.Project, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.projects[id]; ok {
+		return cloneProject(p), nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) RenameProject(_ context.Context, id, name string) (*store.Project, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.projects[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	p.Name = name
+	p.UpdatedAt = f.now()
+	return cloneProject(p), nil
+}
+
+func (f *fakeStore) DeleteProject(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.projects[id]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.projects, id)
+	return nil
+}
+
+func (f *fakeStore) CountActiveOwnershipByProject(_ context.Context, projectID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, o := range f.ownership {
+		if o.ProjectID == projectID && (o.Status == "active" || o.Status == "pending") {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// --- ownership (Phase 3) ---
+
+func (f *fakeStore) GetOwnershipByVMID(_ context.Context, vmid int) (*store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if o, ok := f.ownership[vmid]; ok {
+		return cloneOwnership(o), nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) CreateOwnership(_ context.Context, p store.CreateOwnershipParams) (*store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.ownership[p.VMID]; ok {
+		return nil, fmt.Errorf("create ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+	}
+	now := f.now()
+	o := &store.ResourceOwnership{
+		ID: f.nextID("own"), TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID,
+		GuestType: p.GuestType, Node: p.Node, CreatedBy: p.CreatedBy, Status: p.Status,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	f.ownership[p.VMID] = o
+	return cloneOwnership(o), nil
+}
+
+func (f *fakeStore) FinalizeOwnership(_ context.Context, id, upid string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, o := range f.ownership {
+		if o.ID == id && o.Status == "pending" {
+			o.Status = "active"
+			u := upid
+			o.PVEUPID = &u
+			o.UpdatedAt = f.now()
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) ReleaseOwnership(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for vmid, o := range f.ownership {
+		if o.ID == id && o.Status == "pending" {
+			delete(f.ownership, vmid)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) TombstoneOwnership(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, o := range f.ownership {
+		if o.ID == id {
+			o.Status = "tombstoned"
+			o.UpdatedAt = f.now()
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) ListOwnershipByTenant(_ context.Context, tenantID string) ([]store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.ResourceOwnership{}
+	for _, o := range f.ownership {
+		if o.TenantID == tenantID {
+			out = append(out, *cloneOwnership(o))
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) ListOwnershipByProject(_ context.Context, projectID string) ([]store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.ResourceOwnership{}
+	for _, o := range f.ownership {
+		if o.ProjectID == projectID {
+			out = append(out, *cloneOwnership(o))
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) ListActiveVMIDs(context.Context) (map[int]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[int]bool{}
+	for vmid, o := range f.ownership {
+		if o.Status == "active" || o.Status == "pending" {
+			out[vmid] = true
+		}
+	}
+	return out, nil
+}
+
 // --- helpers ---
+
+// fakeRoleRank mirrors store.roleRank (unexported there) for the fake's
+// max-role reductions in ListTenantsForUser/GetEffectiveRoles.
+func fakeRoleRank(role string) int {
+	switch role {
+	case "owner":
+		return 3
+	case "contributor":
+		return 2
+	case "reader":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cloneTenant(t *store.Tenant) *store.Tenant {
+	c := *t
+	return &c
+}
+
+func cloneProject(p *store.Project) *store.Project {
+	c := *p
+	return &c
+}
+
+func cloneOwnership(o *store.ResourceOwnership) *store.ResourceOwnership {
+	c := *o
+	return &c
+}
 
 func strPtr(s string) *string {
 	if s == "" {

@@ -58,7 +58,7 @@ func TestEngineCreateAndStartSucceed(t *testing.T) {
 
 	req := lxcReq()
 	req.StartAfterCreate = true
-	dep, err := e.Submit(req)
+	dep, err := e.Submit(req, CreateContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestEngineCreateTaskFails(t *testing.T) {
 
 	req := vmReq()
 	req.StartAfterCreate = false
-	dep, err := e.Submit(req)
+	dep, err := e.Submit(req, CreateContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestEngineSubmitErrorSurfacesPVEMessage(t *testing.T) {
 	}
 	e, _ := testEngine(mock)
 
-	dep, err := e.Submit(lxcReq())
+	dep, err := e.Submit(lxcReq(), CreateContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestEngineSubmitRejectsInvalid(t *testing.T) {
 	e, _ := testEngine(&proxmoxtest.MockClient{})
 	req := vmReq()
 	req.Name = "Bad Name"
-	if _, err := e.Submit(req); err == nil {
+	if _, err := e.Submit(req, CreateContext{}); err == nil {
 		t.Fatal("invalid request accepted")
 	}
 }

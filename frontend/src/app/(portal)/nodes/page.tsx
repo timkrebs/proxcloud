@@ -3,15 +3,19 @@
 import Link from "next/link";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
+import { AdminOnly } from "@/components/chrome/AdminOnly";
 import { Card } from "@/components/ui/Card";
 import { ProgressBar } from "@/components/ui/ProgressBar";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Svc } from "@/components/ui/icons";
-import { useNodes } from "@/lib/api/queries";
+import { useMe, useNodes } from "@/lib/api/queries";
 import { formatBytesPair, formatPct, formatUptime } from "@/lib/format";
 
 export default function NodesPage() {
+  const me = useMe();
   const nodes = useNodes();
+
+  if (me.data && !me.data.isPlatformAdmin) return <AdminOnly resource="Nodes" />;
 
   return (
     <div className="max-w-[1360px] px-8 pt-5 pb-10">

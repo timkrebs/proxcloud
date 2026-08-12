@@ -17,6 +17,8 @@ import (
 	apitypes "github.com/timkrebs9/proxcloud/backend/api/types"
 
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
+	"github.com/timkrebs9/proxcloud/backend/internal/authz"
+	"github.com/timkrebs9/proxcloud/backend/internal/bootstrap"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
@@ -91,10 +93,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Ownership backfill (ADR-0010): claim every pre-existing cluster guest into
+	// the default tenant/project BEFORE serving, so a later chunk's scoping
+	// enforcement never 404s a guest the platform already runs. Idempotent and
+	// best-effort against Proxmox — it only fails startup if the local system of
+	// record is broken (a missing default tenant/project is fail-closed).
+	backfillCtx, backfillCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := bootstrap.BackfillOwnership(backfillCtx, st, pve, log); err != nil {
+		backfillCancel()
+		log.Error("startup failed", "stage", "ownership-backfill", "err", err)
+		os.Exit(1)
+	}
+	backfillCancel()
+
 	broker := events.NewBroker()
 	registry := tasks.NewRegistry()
 	engine := deploy.NewEngine(pve, registry, broker, log)
-	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st}
+	// Settle create-time ownership reservations without giving deploy a store
+	// dependency: the engine calls these after the create step settles.
+	engine.Finalize = func(ctx context.Context, ownershipID, upid string) error {
+		return st.FinalizeOwnership(ctx, ownershipID, upid)
+	}
+	engine.Release = func(ctx context.Context, ownershipID string) error {
+		return st.ReleaseOwnership(ctx, ownershipID)
+	}
+	authzMW := &authz.Middleware{Store: st, Log: log}
+	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {
@@ -153,9 +177,12 @@ func main() {
 			Log:       log,
 			Auth:      authHandler,
 			Health:    api.Health(),
-			Events:    events.Handler(broker, log),
+			Events:    events.Handler(broker, log, ownedVMIDsResolver(st)),
 			ConsoleWS: consoleWS,
-			Protected: api.Mount,
+			Authz:     authzMW,
+			Account:   api.MountAccount,
+			Admin:     api.MountAdmin,
+			Tenant:    api.MountTenant,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -178,4 +205,23 @@ func main() {
 		log.Error("shutdown", "err", err)
 	}
 	log.Info("stopped")
+}
+
+// ownedVMIDsResolver adapts the store to the SSE handler's per-connection
+// owned-VMID query (ADR-0011): the set of VMIDs the tenant owns (active or
+// pending), tenant-filtered in SQL.
+func ownedVMIDsResolver(st store.Store) events.OwnedVMIDsFunc {
+	return func(ctx context.Context, tenantID string) (map[int]bool, error) {
+		owns, err := st.ListOwnershipByTenant(ctx, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		set := make(map[int]bool, len(owns))
+		for _, o := range owns {
+			if o.Status == "active" || o.Status == "pending" {
+				set[o.VMID] = true
+			}
+		}
+		return set, nil
+	}
 }
