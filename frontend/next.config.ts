@@ -6,6 +6,10 @@ import type { NextConfig } from "next";
 const backendOrigin = process.env.BACKEND_ORIGIN ?? "http://localhost:8080";
 
 const nextConfig: NextConfig = {
+  // Emit a self-contained server bundle (.next/standalone) so the production
+  // image ships only the traced runtime — no full node_modules. See
+  // frontend/Dockerfile prod stage.
+  output: "standalone",
   async rewrites() {
     return [
       {
