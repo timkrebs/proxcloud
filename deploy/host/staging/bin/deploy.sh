@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Proxcloud STAGING deploy (ADR-0014 §4.1). Single stack, no blue/green, no
+# rollback (staging is disposable — rebuild from scratch instead). Idempotent.
+#
+# Invoked ONLY by the forced-command wrapper (already validates the arg):
+#   deploy.sh <ref>        # 40-hex git SHA or vMAJOR.MINOR.PATCH
+#   deploy.sh --rollback   # rejected: staging has no rollback
+set -euo pipefail
+
+ROOT=/opt/proxcloud
+STATE_DIR="$ROOT/state"
+REF_RE='^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$'
+BACKEND_PORT=8080
+FRONTEND_PORT=3000
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+log() { printf '%s [deploy-staging] %s\n' "$(now)" "$*"; }
+
+[ -f "$ROOT/.env" ] || { printf 'FATAL: %s/.env missing\n' "$ROOT" >&2; exit 1; }
+set -a
+# shellcheck source=/dev/null
+. "$ROOT/.env"
+set +a
+REGISTRY="${REGISTRY:-ghcr.io/timkrebs9}"
+MIGRATE_TIMEOUT="${MIGRATE_TIMEOUT:-300}"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
+export REGISTRY
+
+notify() { local prio="$1"; shift; [ -n "${NTFY_URL:-}" ] || return 0
+  curl -fsS -H "Priority: $prio" -H "Title: proxcloud-staging" -d "$*" "$NTFY_URL" >/dev/null 2>&1 || true; }
+die() { printf '%s [deploy-staging][FATAL] %s\n' "$(now)" "$*" >&2; notify high "staging deploy FAILED: $*"; exit 1; }
+
+compose() { docker compose --env-file "$ROOT/.env" -p proxcloud-staging -f "$ROOT/docker-compose.yml" "$@"; }
+
+ghcr_login() {
+  [ -n "${GHCR_TOKEN:-}" ] || return 0
+  printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${GHCR_USER:-}" --password-stdin >/dev/null 2>&1 \
+    || log "warning: ghcr login failed (packages may be public — continuing)"
+}
+
+wait_health() { # wait_health <expected-ref>
+  local ref="$1" got field deadline
+  # 40-hex ref -> assert .commit; vX.Y.Z ref -> assert .semver.
+  if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then field='.commit'; else field='.semver'; fi
+  deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+  while :; do
+    if curl -fsS "http://127.0.0.1:$BACKEND_PORT/api/health" >/dev/null 2>&1; then
+      got="$(curl -fsS "http://127.0.0.1:$BACKEND_PORT/api/v1/version" 2>/dev/null | jq -r "$field" 2>/dev/null || true)"
+      if [ "$got" = "$ref" ]; then log "backend healthy and ${field#.}=$got"; return 0; fi
+      log "version not matching yet (want $ref, got ${got:-<none>})"
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 3
+  done
+}
+
+wait_frontend() {
+  local code deadline
+  deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+  while :; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$FRONTEND_PORT/" 2>/dev/null || echo 000)"
+    if [ "$code" != "000" ] && [ "$code" -lt 500 ] 2>/dev/null; then log "frontend responding (HTTP $code)"; return 0; fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 3
+  done
+}
+
+do_deploy() {
+  local ref="$1"
+  [[ "$ref" =~ $REF_RE ]] || die "invalid ref: $ref"
+  export IMAGE_REF="$ref"
+  mkdir -p "$STATE_DIR"
+
+  ghcr_login
+  log "start postgres"
+  compose up -d postgres
+
+  log "pull backend/frontend @ $ref"
+  compose pull backend frontend
+
+  if [ "${USE_MIGRATOR_SERVICE:-0}" = "1" ]; then
+    log "migrator service @ $ref — output captured"
+    if ! timeout "$MIGRATE_TIMEOUT" \
+      docker compose --env-file "$ROOT/.env" -p proxcloud-staging -f "$ROOT/docker-compose.yml" \
+        run --rm migrator 2>&1 | tee "$STATE_DIR/last-migrate.log"; then
+      die "migrator service failed/timed out (backend 'migrate' subcommand present? see deploy/README.md)"
+    fi
+  fi
+
+  log "start backend (applies embedded migrations at boot)"
+  compose up -d backend
+  if ! wait_health "$ref"; then
+    compose logs --no-color --tail 200 backend | tee "$STATE_DIR/last-migrate.log" || true
+    die "backend unhealthy or version mismatch (migration failure? see state/last-migrate.log)"
+  fi
+
+  log "start frontend + caddy"
+  compose up -d frontend caddy
+  wait_frontend || die "frontend did not come up"
+
+  log "staging deploy complete @ $ref"
+  notify default "staging deployed @ $ref"
+}
+
+main() {
+  case "${1:-}" in
+    --rollback) die "staging has no rollback (disposable) — rebuild from scratch (see docs/runbooks/deploy.md)" ;;
+    "")         die "usage: deploy.sh <ref>" ;;
+    *)          do_deploy "$1" ;;
+  esac
+}
+main "$@"

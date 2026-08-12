@@ -1,0 +1,16 @@
+# Routing to the BLUE color (ADR-0015 §3/§5). Imported into the prod site block
+# when active.caddy -> blue.caddy. /api/* (REST + SSE at /api/events + console
+# WS at /api/console/ws/*) goes to the backend with buffering off and HTTP/1.1
+# pinned so the Upgrade handshake survives; everything else to the frontend.
+@api path /api/*
+handle @api {
+	reverse_proxy proxcloud-blue-backend:8080 {
+		flush_interval -1                 # SSE: flush events immediately, no buffering
+		transport http {
+			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
+		}
+	}
+}
+handle {
+	reverse_proxy proxcloud-blue-frontend:3000
+}

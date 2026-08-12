@@ -1,0 +1,38 @@
+# Proxcloud STAGING edge (ADR-0015). Single upstream (no blue/green). Same
+# SSE/WS passthrough as prod: /api/* -> backend with buffering off and HTTP/1.1
+# pinned; everything else -> frontend.
+#
+# DEFAULT: Caddy internal CA on staging.proxcloud.lab (LAN). Alternatives are
+# documented below; pick one and keep FRONTEND_ORIGIN in .env in sync.
+
+{
+	admin localhost:2019
+}
+
+staging.proxcloud.lab {
+	tls internal
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy proxcloud-staging-backend:8080 {
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+	handle {
+		reverse_proxy proxcloud-staging-frontend:3000
+	}
+}
+
+# ── Alt: plain HTTP behind cloudflared (TLS at Cloudflare) ──
+# :80 {
+# 	@api path /api/*
+# 	handle @api { reverse_proxy proxcloud-staging-backend:8080 { flush_interval -1
+# 		transport http { versions 1.1 } } }
+# 	handle { reverse_proxy proxcloud-staging-frontend:3000 }
+# }
+
+# ── Alt: public domain, Caddy ACME ──
+# staging.proxcloud.example.com { ... same handle blocks ... }

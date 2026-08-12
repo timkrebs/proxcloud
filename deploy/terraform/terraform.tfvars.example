@@ -1,0 +1,52 @@
+# Copy to terraform.tfvars and adjust. NO SECRETS HERE — the Proxmox API token
+# is supplied at apply time via the PROXMOX_VE_API_TOKEN environment variable:
+#
+#   export PROXMOX_VE_API_TOKEN='proxcloud@pve!tf=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+#   terraform plan
+#
+# Everything below is NON-secret infrastructure config.
+
+# ── Proxmox node / provider ──
+proxmox_endpoint     = "https://pve01:8006"
+proxmox_tls_insecure = true
+proxmox_ssh_username = "root"   # bpg uploads the cloud-init snippet over SSH
+node                 = "pve01"
+
+# ── Storage / network ──
+storage           = "local-lvm"
+image_datastore   = "local"
+snippet_datastore = "local"
+bridge            = "vmbr0"
+# vlan_id         = 20          # omit / null for no VLAN
+ip_mode           = "dhcp"      # or "static" (then set the *_static_ipv4_cidr / *_gateway)
+domain            = "proxcloud.lab"
+dns_servers       = ["1.1.1.1", "9.9.9.9"]
+
+# Static-IP example (only when ip_mode = "static"):
+# staging_static_ipv4_cidr = "192.168.1.20/24"
+# staging_gateway          = "192.168.1.1"
+# prod_static_ipv4_cidr    = "192.168.1.21/24"
+# prod_gateway             = "192.168.1.1"
+
+# ── Guest sizing (defaults already match the approved sizes) ──
+# staging_cores = 2 ; staging_memory = 4096 ; staging_disk_gb = 32   (LXC)
+# prod_cores    = 4 ; prod_memory    = 8192 ; prod_disk_gb    = 64   (VM)
+vmid_staging = 8001
+vmid_prod    = 8002
+
+# ── SSH keys ──
+# Admin key(s) for the sudo user (VM) / root (LXC) — Terraform provisions with these.
+admin_ssh_public_keys = [
+  "ssh-ed25519 AAAA... tim@laptop",
+]
+# The CI deploy PUBLIC key (private half lives only in the GitHub env secret).
+ci_deploy_public_key = "ssh-ed25519 AAAA... proxcloud-ci-deploy"
+
+# ── Provisioner SSH targets ──
+# With DHCP + no DNS registration, set these to the leased IPs after first boot
+# (read prod's from the `prod_vm_ipv4_addresses` output), then re-apply.
+# staging_provision_host = "192.168.1.20"
+# prod_provision_host    = "192.168.1.21"
+
+# Set false to apply compute/network only and provision by hand later.
+run_provisioners = true

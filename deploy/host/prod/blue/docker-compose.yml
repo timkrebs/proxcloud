@@ -1,0 +1,60 @@
+# proxcloud-blue — one color of the blue/green pair (ADR-0015 §2). Deployed by
+# deploy.sh with `-p proxcloud-blue` and IMAGE_REF exported to the target SHA.
+# Backend+frontend attach to proxcloud-edge (Caddy reaches them by container
+# name) AND proxcloud-data-net (backend reaches Postgres). Each color also
+# publishes its ports on 127.0.0.1 ONLY, for pre-cutover health checks that
+# bypass Caddy: blue backend 18080, blue frontend 13000.
+services:
+  backend:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    container_name: proxcloud-blue-backend
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PROXCLOUD_ENV: production
+      LISTEN_ADDR: ":8080"
+      # DATABASE_URL / SECRETS_KEY / PROXMOX_* all come from ../.env
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      - edge
+      - data
+
+  frontend:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    container_name: proxcloud-blue-frontend
+    restart: unless-stopped
+    # NOTE: BACKEND_ORIGIN and NEXT_PUBLIC_BACKEND_WS_ORIGIN are baked at IMAGE
+    # BUILD time (publish.yml), not here — a Next standalone build inlines
+    # NEXT_PUBLIC_* at build. Behind Caddy the /api rewrite is unused (Caddy
+    # routes /api/* straight to the backend); the console WS origin must be
+    # baked to the public wss:// origin at build time (coordinate item).
+    ports:
+      - "127.0.0.1:13000:3000"
+    networks:
+      - edge
+      - data
+
+  # One-shot migrator (ADR ideal). Started ONLY via `docker compose run --rm
+  # migrator` and only when USE_MIGRATOR_SERVICE=1 — it REQUIRES a backend
+  # `migrate` subcommand that applies embedded migrations and exits (coordinate
+  # item, see deploy/README.md). Until that lands, deploy.sh migrates via the
+  # backend's boot-time RunMigrations and captures its log instead.
+  migrator:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    restart: "no"
+    profiles: ["migrate"]
+    env_file: ../.env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "migrate"]
+    networks:
+      - data
+
+networks:
+  edge:
+    name: proxcloud-edge
+    external: true
+  data:
+    name: proxcloud-data-net
+    external: true

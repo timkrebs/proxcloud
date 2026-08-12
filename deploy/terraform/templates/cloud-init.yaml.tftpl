@@ -1,0 +1,27 @@
+#cloud-config
+# Prod VM first-boot (minimal). Creates the sudo admin user Terraform connects
+# as, and installs qemu-guest-agent so bpg can report the VM's IP. Docker, the
+# deploy user, and unattended-upgrades are installed by first-boot.sh, which the
+# Terraform provisioner runs next.
+hostname: ${hostname}
+manage_etc_hosts: true
+
+users:
+  - name: ${admin_username}
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+%{ for key in admin_ssh_keys ~}
+      - ${key}
+%{ endfor ~}
+
+package_update: true
+packages:
+  - qemu-guest-agent
+  - ca-certificates
+  - curl
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]

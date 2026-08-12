@@ -1,0 +1,46 @@
+# proxcloud-green — the other color of the blue/green pair (ADR-0015 §2).
+# Identical to blue except container names and loopback ports: green backend
+# 28080, green frontend 23000. Deployed with `-p proxcloud-green`.
+services:
+  backend:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    container_name: proxcloud-green-backend
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      PROXCLOUD_ENV: production
+      LISTEN_ADDR: ":8080"
+    ports:
+      - "127.0.0.1:28080:8080"
+    networks:
+      - edge
+      - data
+
+  frontend:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    container_name: proxcloud-green-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:23000:3000"
+    networks:
+      - edge
+      - data
+
+  migrator:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    restart: "no"
+    profiles: ["migrate"]
+    env_file: ../.env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "migrate"]
+    networks:
+      - data
+
+networks:
+  edge:
+    name: proxcloud-edge
+    external: true
+  data:
+    name: proxcloud-data-net
+    external: true

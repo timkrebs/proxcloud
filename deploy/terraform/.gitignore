@@ -1,0 +1,16 @@
+# Terraform working artifacts — never commit these.
+.terraform/
+.terraform.lock.hcl          # single-platform when generated locally; re-init to regenerate
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Real variable files hold environment specifics (and must never hold the token,
+# which is passed via PROXMOX_VE_API_TOKEN). Keep only the example under version control.
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

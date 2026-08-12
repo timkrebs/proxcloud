@@ -1,0 +1,6 @@
+# state/ holds runtime markers written by deploy.sh (never committed):
+#   live-color        — current live color (blue|green); empty on a fresh guest
+#   last-cutover      — "<color> <RFC3339>" of the last successful switch
+#   last-migrate.log  — captured migrator / boot-migration output
+#   deploy-wrapper.log — audit trail of every forced-command invocation
+# bootstrap.sh seeds live-color; do not hand-edit during a deploy.

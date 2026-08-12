@@ -1,0 +1,32 @@
+# proxcloud-caddy — the single edge proxy (ADR-0015 §1). Attaches to
+# proxcloud-edge and resolves the live color's containers by name. The atomic
+# switch is a symlink flip of caddy/upstream/active.caddy (done by deploy.sh on
+# the host, visible in-container through the bind mount) + `caddy reload`.
+# Deployed with `-p proxcloud-caddy`.
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: proxcloud-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./upstream:/etc/caddy/upstream:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+
+volumes:
+  caddy-data:
+    name: proxcloud-caddy-data
+  caddy-config:
+    name: proxcloud-caddy-config
+
+networks:
+  edge:
+    name: proxcloud-edge
+    external: true

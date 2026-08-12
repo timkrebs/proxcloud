@@ -1,0 +1,30 @@
+# Proxcloud PROD edge (ADR-0015 §3). The whole switch is: `active.caddy` is a
+# symlink -> blue.caddy | green.caddy, flipped atomically by deploy.sh, then
+# `caddy reload` (graceful, zero-drop; in-flight SSE/WS on the old color drain).
+#
+# ── TLS MODE — pick exactly ONE site block below (ADR-0015 §6) ───────────────
+# pve01 sits behind a Cloudflare Tunnel, so Mode A (plain HTTP, TLS terminated
+# at Cloudflare) is the likely prod path and is the DEFAULT here. To use a LAN
+# internal CA or a public ACME cert instead, comment Mode A and uncomment B/C
+# and set FRONTEND_ORIGIN in .env to match the scheme+host.
+
+{
+	admin localhost:2019
+	# email you@example.com          # required for Mode C (ACME) only
+}
+
+# ── Mode A (DEFAULT): plain HTTP behind cloudflared; Cloudflare terminates TLS ─
+:80 {
+	import /etc/caddy/upstream/active.caddy
+}
+
+# ── Mode B: LAN, Caddy internal CA ──
+# proxcloud.lab {
+# 	tls internal
+# 	import /etc/caddy/upstream/active.caddy
+# }
+
+# ── Mode C: public domain, Caddy ACME (automatic Let's Encrypt) ──
+# proxcloud.example.com {
+# 	import /etc/caddy/upstream/active.caddy
+# }

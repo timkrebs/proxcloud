@@ -1,0 +1,45 @@
+# proxcloud-data — the SHARED Postgres (ADR-0015 §2). It does NOT blue/green:
+# both colors point DATABASE_URL at proxcloud-data-postgres:5432. Cross-color
+# schema compatibility is guaranteed by expand/contract migrations, not by
+# duplicating data. Project name is fixed by deploy.sh: `-p proxcloud-data`.
+#
+# TLS is on because config.go fails closed when PROXCLOUD_ENV=production and
+# DATABASE_URL is not TLS. The self-signed cert in ./tls is created by
+# bootstrap.sh (gen-postgres-cert.sh); the app uses sslmode=require.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: proxcloud-data-postgres
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-proxcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /opt/proxcloud/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-proxcloud}
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgres-tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgres-tls/server.key
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./tls:/etc/postgres-tls:ro
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proxcloud} -d ${POSTGRES_DB:-proxcloud}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+volumes:
+  pgdata:
+    name: proxcloud-data-pgdata
+
+networks:
+  data:
+    name: proxcloud-data-net
+    external: true

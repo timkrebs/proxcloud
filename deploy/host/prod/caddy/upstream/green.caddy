@@ -1,0 +1,14 @@
+# Routing to the GREEN color (ADR-0015 §3/§5). Imported into the prod site block
+# when active.caddy -> green.caddy. See blue.caddy for the SSE/WS rationale.
+@api path /api/*
+handle @api {
+	reverse_proxy proxcloud-green-backend:8080 {
+		flush_interval -1                 # SSE: flush events immediately, no buffering
+		transport http {
+			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
+		}
+	}
+}
+handle {
+	reverse_proxy proxcloud-green-frontend:3000
+}
