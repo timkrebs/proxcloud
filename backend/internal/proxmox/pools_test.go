@@ -85,10 +85,12 @@ func TestPoolMethods(t *testing.T) {
 			wantBody:   map[string]string{"poolid": "pc-acme-web"},
 		},
 		{
-			name:     "create pool other 500 surfaces mapped error",
-			respond:  func(w http.ResponseWriter) { writePVEStatus(w, "500 unable to create pool - backend failure") },
-			call:     func(ctx context.Context, g *GoPVE) error { return g.CreatePool(ctx, "pc-acme-web", "") },
-			wantReqs: 1,
+			name:    "create pool other 500 surfaces mapped error",
+			respond: func(w http.ResponseWriter) { writePVEStatus(w, "500 unable to create pool - backend failure") },
+			call:    func(ctx context.Context, g *GoPVE) error { return g.CreatePool(ctx, "pc-acme-web", "") },
+			// 2 requests: the POST fails, then the existence-check GET also fails
+			// (same error), so poolExists can't confirm and the create error surfaces.
+			wantReqs: 2,
 			wantErr:  true,
 			wantCode: "proxmox_error",
 		},
@@ -96,7 +98,7 @@ func TestPoolMethods(t *testing.T) {
 			name:     "create pool 403 maps to a clear error",
 			respond:  func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) },
 			call:     func(ctx context.Context, g *GoPVE) error { return g.CreatePool(ctx, "pc-acme-web", "") },
-			wantReqs: 1,
+			wantReqs: 2, // POST 403, then the existence-check GET also 403 → error surfaces
 			wantErr:  true,
 			// go-proxmox collapses 401/403 into ErrNotAuthorized (the body/message
 			// is lost); mapErr surfaces it as an auth failure. Still a clear error.
@@ -228,6 +230,81 @@ func assertBody(t *testing.T, raw []byte, want map[string]string) {
 			t.Errorf("body[%q] = %v, want %q", k, gv, v)
 		}
 	}
+}
+
+// TestCreatePoolIdempotentViaExistence covers the real-world failure that string
+// matching misses: go-proxmox surfaces a duplicate-pool create as a bare "500"
+// with no "already exists" text, so CreatePool must confirm existence via the
+// /pools index and treat a present pool as a benign no-op (else every guest
+// create in an existing project fails at ensure-pool).
+func TestCreatePoolIdempotentViaExistence(t *testing.T) {
+	poolList := func(ids ...string) string {
+		parts := make([]string, len(ids))
+		for i, id := range ids {
+			parts[i] = fmt.Sprintf(`{"poolid":%q}`, id)
+		}
+		return `{"data":[` + join(parts) + `]}`
+	}
+
+	// POST → bare 500 (no descriptive text); GET /pools → pool present ⇒ success.
+	t.Run("present pool is idempotent success despite bare 500", func(t *testing.T) {
+		var posts, gets int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				posts++
+				writePVEStatus(w, "500 Internal Server Error")
+			case http.MethodGet:
+				gets++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, poolList("pc-other", "pc-acme-web"))
+			default:
+				t.Fatalf("unexpected method %s", r.Method)
+			}
+		}))
+		defer srv.Close()
+
+		if err := newPoolTestClient(srv.URL).CreatePool(context.Background(), "pc-acme-web", ""); err != nil {
+			t.Fatalf("existing pool should be idempotent success, got %v", err)
+		}
+		if posts != 1 || gets != 1 {
+			t.Fatalf("requests = %d POST + %d GET, want 1 + 1", posts, gets)
+		}
+	})
+
+	// POST → bare 500; GET /pools → pool absent ⇒ the create error must surface.
+	t.Run("absent pool surfaces the create error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				writePVEStatus(w, "500 Internal Server Error")
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, poolList("pc-other"))
+			}
+		}))
+		defer srv.Close()
+
+		err := newPoolTestClient(srv.URL).CreatePool(context.Background(), "pc-acme-web", "")
+		if err == nil {
+			t.Fatal("a genuinely-absent pool must surface the create error, got nil")
+		}
+		var apiErr *types.APIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "proxmox_error" {
+			t.Fatalf("error = %v, want *types.APIError proxmox_error", err)
+		}
+	})
+}
+
+func join(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ","
+		}
+		out += p
+	}
+	return out
 }
 
 func TestPoolIdempotencyClassifiers(t *testing.T) {

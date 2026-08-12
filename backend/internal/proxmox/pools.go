@@ -37,11 +37,38 @@ func (g *GoPVE) CreatePool(ctx context.Context, poolID, comment string) error {
 	// out is nil: PVE returns no body for a pool create.
 	if err := g.c.Post(ctx, "/pools", body, nil); err != nil {
 		if isAlreadyExists(err) {
-			return nil // idempotent ensure: the pool is already there
+			return nil // idempotent ensure: the pool is already there (message surfaced)
+		}
+		// go-proxmox does not always surface PVE's descriptive message — a
+		// duplicate pool can come back as a bare "500" with no "already exists"
+		// text, which the string check above misses. Rather than depend on the
+		// error text, confirm existence directly: if the pool is present, the
+		// create was a benign no-op (or lost a create race). This keeps
+		// EnsureProjectPool idempotent regardless of the library's error text.
+		if exists, gerr := g.poolExists(ctx, poolID); gerr == nil && exists {
+			return nil
 		}
 		return mapErr("create pool "+poolID, err)
 	}
 	return nil
+}
+
+// poolExists reports whether poolID is present, using the cheap /pools index
+// (no per-pool detail fetch). Used to make CreatePool idempotent without relying
+// on PVE's error-message text.
+func (g *GoPVE) poolExists(ctx context.Context, poolID string) (bool, error) {
+	var rows []struct {
+		PoolID string `json:"poolid"`
+	}
+	if err := g.c.Get(ctx, "/pools", &rows); err != nil {
+		return false, err
+	}
+	for _, r := range rows {
+		if r.PoolID == poolID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // DeletePool implements Client: DELETE /pools/{poolid}. Synchronous, no body.
