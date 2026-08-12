@@ -11,8 +11,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox/proxmoxtest"
 )
 
-func iptr(v int) *int       { return &v }
-func i64ptr(v int64) *int64 { return &v }
+func iptr(v int) *int { return &v }
 
 // pveCreateCounter wires every Proxmox create/clone/pool method to a shared
 // atomic counter, so a test can prove the create path never reached Proxmox.

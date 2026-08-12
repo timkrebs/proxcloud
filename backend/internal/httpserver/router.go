@@ -64,6 +64,13 @@ type Deps struct {
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	// Proxcloud always runs behind a single trusted reverse proxy (Caddy, ADR-0015),
+	// itself behind a Cloudflare Tunnel — the backend is never directly reachable, so
+	// trusting the proxy's X-Forwarded-For to recover the real client IP (rate-limit
+	// keys + audit provenance) is correct here. SA1019 flags RealIP because it is
+	// unsafe when directly internet-exposed, which is not our topology. A trusted-
+	// proxy allowlist is the documented hardening path (security review notes).
+	//lint:ignore SA1019 safe behind the single trusted proxy described above
 	r.Use(middleware.RealIP)
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
