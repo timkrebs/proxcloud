@@ -21,6 +21,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
 
@@ -33,6 +34,10 @@ type Deps struct {
 	Registry *tasks.Registry
 	Broker   *events.Broker
 	Deploy   *deploy.Engine
+
+	// Store is the Postgres repository. Nil-safe and unused by handlers in
+	// Phase 1 — threaded here so later phases (tenancy, quotas, audit) have it.
+	Store store.Store
 
 	// Console — nil when PROXMOX_CONSOLE_USER/PASSWORD are unset.
 	ConsoleAuth     *console.TicketAuth

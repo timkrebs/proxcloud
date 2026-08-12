@@ -24,6 +24,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
 
@@ -42,6 +43,26 @@ func main() {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
 	}
+
+	// Datastore: open the pool and apply migrations before serving. Fail fast
+	// (fail-closed) if Postgres is unreachable or the schema can't be built —
+	// the server never serves on a half-built schema. The pool is closed on
+	// graceful shutdown below.
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	st, err := store.New(dbCtx, cfg.DatabaseURL)
+	if err != nil {
+		dbCancel()
+		log.Error("startup failed", "stage", "datastore", "err", err)
+		os.Exit(1)
+	}
+	dbCancel()
+	defer st.Close()
+	version, err := st.RunMigrations()
+	if err != nil {
+		log.Error("startup failed", "stage", "migrations", "err", err)
+		os.Exit(1)
+	}
+	log.Info("migrations applied", "version", version)
 
 	passwordHash, err := auth.ResolveHash(cfg.AdminPasswordHash, cfg.AdminPassword)
 	if err != nil {
@@ -65,7 +86,7 @@ func main() {
 	broker := events.NewBroker()
 	registry := tasks.NewRegistry()
 	engine := deploy.NewEngine(pve, registry, broker, log)
-	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine}
+	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {

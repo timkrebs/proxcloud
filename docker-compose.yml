@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-proxcloud}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-proxcloud}
+      - POSTGRES_DB=${POSTGRES_DB:-proxcloud}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proxcloud} -d ${POSTGRES_DB:-proxcloud}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
   backend:
     build:
       context: ./backend
@@ -10,8 +26,13 @@ services:
     environment:
       # Container always binds :8080; host port configurable (BACKEND_PORT).
       - LISTEN_ADDR=:8080
+      # Points at the postgres service (overrides any DATABASE_URL in .env).
+      - DATABASE_URL=postgres://${POSTGRES_USER:-proxcloud}:${POSTGRES_PASSWORD:-proxcloud}@postgres:5432/${POSTGRES_DB:-proxcloud}?sslmode=disable
     ports:
       - "${BACKEND_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
       interval: 10s
@@ -35,3 +56,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+volumes:
+  postgres-data:

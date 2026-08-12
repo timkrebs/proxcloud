@@ -64,6 +64,24 @@ docker-compose up --build
 - **Commits**: conventional commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`), one logical change per commit.
 - **Branches**: work on feature branches; `main` stays green (build + tests pass).
 
+## Tenancy iron rules
+
+The multi-tenancy build (Postgres system of record, Tenant → Project → Resource
+model) is security-critical. These four rules are non-negotiable for every
+tenant-aware change:
+
+1. **Every tenant-scoped query is tenant-filtered.** No cross-tenant read or
+   write path may exist — filter by the active tenant (and project scope) in the
+   query itself, never in post-fetch Go code.
+2. **No route ships without a permission-table entry.** Every mounted route must
+   have an entry in `internal/authz` — enforced by the completeness test
+   (`internal/authz/permissions_test.go`). Adding a route without an entry fails CI.
+3. **No mutation completes without an audit entry.** Every state-changing action
+   records an `audit_log` row at the structural choke-point (audit middleware on
+   the mutating tenant-scoped group) — enforced structurally and by test.
+4. **Cross-tenant access returns 404, never 403.** Accessing a VMID/project/tenant
+   the caller does not own returns 404 (no existence leak), never 403.
+
 ## Definition of done (any feature)
 
 - [ ] Works against a real Proxmox server (or the mocked client in tests — but the wiring is real)
