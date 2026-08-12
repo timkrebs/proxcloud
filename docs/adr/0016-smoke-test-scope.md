@@ -2,6 +2,19 @@
 
 Date: 2026-08-12 · Status: accepted · Delivery/CD
 
+> **Addendum (WS5 build, 2026-08-12):** the smoke binary authenticates by
+> **session login** (`POST /api/auth/login` with `SMOKE_EMAIL` + `SMOKE_PASSWORD`),
+> **not a PAT**. Proxcloud has no project-scoped PAT surface, and session login
+> exercises the exact browser auth path. The smoke tenant/project/user are
+> created by the backend `proxcloud seed-smoke` command (idempotent; reads the
+> same `SMOKE_EMAIL`/`SMOKE_PASSWORD`), run inside `deploy.sh` under `SMOKE_SEED`
+> before the smoke gate. Read "PAT" below as "seeded session user"; the secret
+> names are `SMOKE_EMAIL`/`SMOKE_PASSWORD` (per env), replacing `SMOKE_PAT_*`.
+> One more build-time correction: the least-privilege smoke user is **not** a
+> platform-admin, and node-`metrics` SSE frames are admin-only — so the SSE
+> assertion checks **≥1 SSE frame** (the immediate `retry:` preamble / heartbeat /
+> an owned deployment·task frame), which is what proves the proxy flush path.
+
 ## Context
 
 The CD wave gates on a Go smoke binary (`deploy/smoketest/`): blocking against
@@ -9,7 +22,7 @@ The CD wave gates on a Go smoke binary (`deploy/smoketest/`): blocking against
 cutover, against **prod through the public URL** (fail = automatic rollback +
 loud notify) — ADR-0014 §4. This ADR fixes exactly what the binary asserts, its
 failure semantics, what is deliberately **out** of scope, and how the smoke
-tenant/project/user/PAT are provisioned safely. It is a black-box **API contract +
+tenant/project/user are provisioned safely. It is a black-box **API contract +
 liveness** check, not a test suite — its only job is "is *this* build actually
 serving real traffic correctly end-to-end, against a real Proxmox path."
 
@@ -20,8 +33,9 @@ Run against a single `BASE_URL` (staging origin, or the public prod URL):
 1. **Version** — `GET /api/v1/version`; assert `.sha == $SMOKE_EXPECT_SHA` (the
    deployed SHA, passed by the wave). First and cheapest: proves the intended build
    is the one actually answering.
-2. **Login** — authenticate with the seeded, project-scoped test **PAT**
-   (`$SMOKE_PAT`); assert `200` and a usable session/token. Exercises the real auth
+2. **Login** — authenticate by **session login** (`POST /api/auth/login` with the
+   seeded `$SMOKE_EMAIL`/`$SMOKE_PASSWORD`); assert `200`, `totpRequired == false`,
+   and that a `proxcloud_session` cookie is set. Exercises the real browser auth
    path without interactive TOTP/invitation flows.
 3. **List resources** — `GET` the smoke tenant/project's resources; assert `200`
    and well-formed (may be empty). Exercises the tenant-scoped read path + authz.
@@ -31,9 +45,13 @@ Run against a single `BASE_URL` (staging origin, or the public prod URL):
    **reserved VMID range** (e.g. 99000–99009) and a smoke-only template/storage
    (`$SMOKE_TEMPLATE`, `$SMOKE_STORAGE`) so it can never collide with or exhaust
    real capacity. This is the one assertion that touches Proxmox for real.
-5. **SSE** — open `/api/events`; assert **≥1 metrics frame** arrives within N
-   seconds (e.g. 20s); close. Proves the proxy's buffering-off + streaming path
-   (ADR-0015 §5) works through the same edge users hit.
+5. **SSE** — open `/api/events`; assert **≥1 SSE frame** arrives within N
+   seconds (e.g. 20s); close. Any frame (the immediate `retry:` preamble, a
+   heartbeat, or an owned deployment·task frame) proves the proxy's
+   buffering-off + streaming path (ADR-0015 §5) works through the same edge
+   users hit. (Node-`metrics` frames are platform-admin-only, and the smoke user
+   is a least-privilege non-admin — so the assertion is "≥1 frame", not
+   specifically a metrics frame.)
 
 Cleanup (delete the throwaway LXC, incl. a **deferred** delete if a later step
 fails) always runs so neither environment is littered — even on partial failure.
@@ -57,23 +75,28 @@ fails) always runs so neither environment is littered — even on partial failur
 - **No load/perf, chaos, or multi-node theater** — homelab-honest, single node.
 - **No UI/render assertions** — that is frontend CI's job; smoke is API black-box.
 - **No TOTP/invitation/interactive-auth flows** — covered by unit/contract CI; the
-  PAT deliberately bypasses interactive login so smoke stays deterministic.
+  seeded smoke user has **no TOTP**, so plain session login stays deterministic.
 
-### 4. Safe provisioning of the smoke tenant/project/user/PAT
-- **Idempotent seed**, guarded by `$SMOKE_SEED=true` (staging + prod-with-smoke
-  only), run as/with the one-shot migrator step: **upserts** tenant `smoke`, project
-  `smoke`, and user `smoke@proxcloud.local` bound to a **least-privilege role scoped
-  to only the `smoke` project** — create/delete/list LXC there and nothing else (no
-  platform-admin, no node/infra endpoints, no other tenant). The tenant-iron-rule
-  404 boundary (CLAUDE.md) already prevents it from seeing anything else.
+### 4. Safe provisioning of the smoke tenant/project/user
+- **Idempotent seed** — the backend `proxcloud seed-smoke` command, guarded by
+  `$SMOKE_SEED=true` (staging + prod-with-smoke only) and run by `deploy.sh`
+  alongside the one-shot migrator: **upserts** tenant `smoke`, project `smoke`, and
+  user (`$SMOKE_EMAIL`, password `$SMOKE_PASSWORD`, **no TOTP**) bound to a
+  **least-privilege role scoped to only the `smoke` project** — create/delete/list
+  LXC there and nothing else (no platform-admin, no node/infra endpoints, no other
+  tenant). The tenant-iron-rule 404 boundary (CLAUDE.md) already prevents it from
+  seeing anything else.
 - The smoke tenant is **flagged as system/test** so it is excluded from normal
   tenant lists and given a **tiny dedicated quota** + the reserved VMID range +
   smoke-only storage/template, so a runaway smoke run cannot starve real tenants.
-- **PAT lives only as a GitHub Environment secret** (`SMOKE_PAT_STAGING`,
-  `SMOKE_PAT_PROD`, scoped to the protected `production` environment), injected into
-  the smoke job's env — **never in git/CI files**. The seed is idempotent and does
-  **not** rotate an existing PAT (so the secret stays valid); rotation is a manual
-  runbook step. Prod and staging use **separate** smoke PATs/tenants so a staging
+- **Credentials live only as GitHub Environment/repo secrets** (`SMOKE_EMAIL`,
+  `SMOKE_PASSWORD`; the **prod** values are `production`-environment secrets, the
+  **staging** values are repo/`staging` secrets), injected into the smoke job's env
+  — **never in git/CI files**. The **same** `SMOKE_EMAIL`/`SMOKE_PASSWORD` also live
+  in each guest's `/opt/proxcloud/.env` so `seed-smoke` creates a user whose
+  credentials match what the smoke job logs in with. The seed is idempotent and
+  does **not** rotate an existing user's password; rotation is a manual runbook
+  step. Prod and staging use **separate** smoke tenants/credentials so a staging
   credential can never act on prod.
 
 ## Consequences
@@ -89,9 +112,12 @@ fails) always runs so neither environment is littered — even on partial failur
   real tenants or real capacity.
 - **Needs Tim / coordinate:** the `smoke` template ID + storage pool must exist on
   `pve01` and the token needs the **Pool.Allocate** grant already noted as
-  outstanding; backend-engineer must ship `/api/v1/version` (SHA/semver/build-time)
-  and confirm PAT auth accepts a project-scoped token; the reserved VMID range must
-  be agreed so nothing else claims it.
+  outstanding; `/api/v1/version` (SHA/semver/build-time) already ships;
+  backend-engineer must add the **`proxcloud seed-smoke`** command (creates the
+  smoke tenant/project/no-TOTP user idempotently) and `deploy.sh` must invoke it
+  under `SMOKE_SEED`; `SMOKE_EMAIL`/`SMOKE_PASSWORD` must be set both as
+  environment/repo secrets and in each guest's `.env`; the reserved VMID range
+  must be agreed so nothing else claims it.
 
 ## Alternatives considered
 
@@ -101,10 +127,16 @@ fails) always runs so neither environment is littered — even on partial failur
 - **Skip the real LXC create; assert only health+version+list** — rejected: the
   create→UPID→poll path is the product's core promise (honest async task states);
   a smoke that never exercises Proxmox would pass while creates are broken.
-- **A shared smoke tenant across staging and prod** — rejected: a staging PAT could
-  then reach prod; separate tenants/PATs per environment keep the blast radius split.
-- **Admin/superuser PAT for smoke** — rejected: violates least privilege and could
-  let a smoke bug touch real resources; project-scoped is the safe minimum.
+- **A shared smoke tenant across staging and prod** — rejected: a staging
+  credential could then reach prod; separate tenants/credentials per environment
+  keep the blast radius split.
+- **Admin/superuser smoke user** — rejected: violates least privilege and could
+  let a smoke bug touch real resources; a project-scoped Contributor is the safe
+  minimum.
+- **A PAT instead of session login** — rejected for WS5: Proxcloud exposes no
+  project-scoped PAT surface, and session login exercises the exact browser auth
+  path (`POST /api/auth/login` → `proxcloud_session`). A non-TOTP seeded user keeps
+  it deterministic without an interactive second factor.
 - **Run smoke as a container inside the wave** — acceptable but unnecessary; a
   static Go binary run by the self-hosted runner (staging) and the wave (prod) has
   no runtime deps and is the simplest reproducible artifact.

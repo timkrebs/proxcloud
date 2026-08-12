@@ -36,9 +36,11 @@ or `deploy.yml`, which only fire on completed runs of the **base-repo** workflow
 (ADR-0014 §2). `latest` is never a deploy source; deploy resolves the exact
 `workflow_run.head_sha`, so what CI went green on is exactly what ships.
 
-**What exists today:** `ci.yml` and `publish.yml`. `deploy.yml` and `soak.yml`
-are the next workstreams (their behavior above is the accepted design, not yet
-wired). Until they land, staging/prod are deployed by the `deploy/` scripts.
+**What exists today:** `ci.yml`, `publish.yml`, and `deploy.yml` (the CD wave —
+staging → smoke → prod gate → blue/green cutover → prod smoke → auto-rollback,
+plus a `v*` release job and an ntfy summary). `soak.yml` (the 24h soak/prune
+sweep) is the remaining workstream. The `deploy/` on-guest scripts remain the
+manual path for a from-scratch bring-up or an out-of-band fix.
 
 ## Two rules that never bend
 
@@ -96,9 +98,15 @@ start, not less gated.
 `deploy-prod` runs in the GitHub **Environment `production`**, which requires a
 review from **timkrebs**. When the wave reaches it, GitHub shows a "Review
 pending" prompt on the run; approving it releases the environment's secrets
-(`PROD_SSH_KEY`, `SMOKE_PAT_PROD`) and lets the cutover proceed. There is no
-separate deploy button — **the approval is the deploy to prod.** The one-line
-ntfy summary records who approved.
+(`PROD_SSH_KEY`, `SMOKE_EMAIL`/`SMOKE_PASSWORD`) and lets the cutover proceed.
+There is no separate deploy button — **the approval is the deploy to prod.** The
+one-line ntfy summary records who approved.
+
+> **One prod job, one approval.** GitHub re-prompts the required reviewer for
+> *every* job that targets a protected environment. To keep "one approval = the
+> deploy", `deploy.yml` runs the cutover, the public-URL smoke, and the
+> auto-rollback as **one** `environment: production` job (`deploy-prod`) — the
+> ADR-0014 §4 gate/deploy/smoke stages are its ordered steps.
 
 ## What a prod cutover does
 
@@ -129,10 +137,17 @@ ntfy summary records who approved.
 
 ## Where secrets live (and where they never do)
 
-- **GitHub Environment `production` secrets:** `PROD_SSH_KEY`, `SMOKE_PAT_PROD`
-  — only readable by the protected `production` environment (i.e. only after the
-  reviewer approves). Staging equivalents (`STAGING_SSH_KEY`, `SMOKE_PAT_STAGING`)
-  and the ntfy topic/token live as repo or staging-environment secrets.
+- **GitHub Environment `production` secrets:** `PROD_SSH_KEY` and the prod
+  `SMOKE_EMAIL`/`SMOKE_PASSWORD` (session login, not a PAT) — only readable by the
+  protected `production` environment (i.e. only after the reviewer approves).
+  Staging uses repo-level `STAGING_SSH_KEY` + repo `SMOKE_EMAIL`/`SMOKE_PASSWORD`;
+  `SSH_KNOWN_HOSTS` and `NTFY_URL` are repo secrets. Because the prod smoke job
+  runs in the `production` environment, its `SMOKE_EMAIL`/`SMOKE_PASSWORD` (and the
+  `SMOKE_*` **variables**) resolve to the environment-scoped values, so a staging
+  credential can never act on prod. Non-secret deploy config (`STAGING_SSH_HOST`,
+  `PROD_SSH_HOST`, `STAGING_BASE_URL`, `PROD_BASE_URL`, `SMOKE_TENANT`,
+  `SMOKE_PROJECT`, `SMOKE_NODE`, `SMOKE_TEMPLATE`, `SMOKE_STORAGE`, `SMOKE_BRIDGE`,
+  `SMOKE_VMID`, `PROD_REVIEWER`) are repo/environment **variables**, not secrets.
 - **GHCR auth:** `publish.yml` uses only the built-in `GITHUB_TOKEN` (no PAT) via
   its `packages: write` scope; cosign uses the workflow's OIDC `id-token`.
 - **App secrets never touch git or CI.** `PROXMOX_TOKEN_SECRET`, `SECRETS_KEY`,
@@ -193,12 +208,27 @@ Settings → Environments → New environment → **`production`**:
 
 - [ ] **Required reviewers** → add **`timkrebs`**. This is the prod gate; the
       approval is the deploy.
-- [ ] Add environment secrets **`PROD_SSH_KEY`** and **`SMOKE_PAT_PROD`** here
-      (NOT as repo secrets) so they are only readable after approval.
+- [ ] Add environment **secrets** **`PROD_SSH_KEY`**, **`SMOKE_EMAIL`**,
+      **`SMOKE_PASSWORD`** here (NOT as repo secrets) so they are only readable
+      after approval — these are the **prod** smoke user's session credentials.
+- [ ] Add environment **variables** for anything prod-specific: at minimum
+      **`SMOKE_TENANT`**, **`SMOKE_PROJECT`**, **`SMOKE_VMID`** (a *separate* smoke
+      tenant + reserved VMID from staging — ADR-0016 §4). `PROD_SSH_HOST`,
+      `PROD_BASE_URL`, and the shared `SMOKE_NODE`/`SMOKE_TEMPLATE`/`SMOKE_STORAGE`/
+      `SMOKE_BRIDGE` may stay repo-level.
 - [ ] (Optional) Restrict deployment branches to `main` and `v*` tags.
 
-Staging secrets (`STAGING_SSH_KEY`, `SMOKE_PAT_STAGING`, ntfy topic/token) can be
-repo secrets or a separate `staging` environment — they are not prod-gated.
+Staging secrets (`STAGING_SSH_KEY`, staging `SMOKE_EMAIL`/`SMOKE_PASSWORD`),
+`SSH_KNOWN_HOSTS`, and `NTFY_URL` are repo secrets (or a separate `staging`
+environment) — they are not prod-gated. The staging `SMOKE_*` **variables**
+(`STAGING_SSH_HOST`, `STAGING_BASE_URL`, `SMOKE_TENANT`, `SMOKE_PROJECT`,
+`SMOKE_NODE`, `SMOKE_TEMPLATE`, `SMOKE_STORAGE`, `SMOKE_BRIDGE`, `SMOKE_VMID`,
+optional `PROD_REVIEWER`) are repo-level variables; the `production` environment
+overrides only the ones that must differ. `SSH_KNOWN_HOSTS` = the output of
+`ssh-keyscan <staging-host> <prod-host>` (one-time), so `StrictHostKeyChecking`
+stays on. **The same `SMOKE_EMAIL`/`SMOKE_PASSWORD` must also be placed in each
+guest's `/opt/proxcloud/.env`** so `proxcloud seed-smoke` creates a user whose
+credentials match what the smoke job logs in with.
 
 ### 3. GHCR package visibility + repo link
 
@@ -215,9 +245,18 @@ After the first successful `publish.yml` run creates the two packages
 
 ### 4. Coordinate (tracked in the ADRs, not blockers for publish)
 
-- ntfy topic URL/token for the deploy summary line (ADR-0014 §6).
+- ntfy topic URL/token for the deploy summary line (ADR-0014 §6). `NTFY_URL`
+  unset ⇒ the notify job no-ops gracefully.
 - Lab domain(s) and whether prod sits behind the Cloudflare Tunnel — sets Caddy's
   TLS mode (ADR-0015 §6).
 - `smoke` template ID + storage pool on `pve01`, the reserved VMID range, and the
   Proxmox token's `Pool.Allocate` grant for the smoke LXC create/delete
   (ADR-0016 §4).
+- **Backend `proxcloud seed-smoke` command** (like the migrator subcommand, does
+  not exist yet): creates the smoke tenant/project + a non-TOTP user from
+  `SMOKE_EMAIL`/`SMOKE_PASSWORD`, idempotently. `deploy.sh` must invoke it under
+  `SMOKE_SEED=true` before the smoke gate. Until it ships, `smoke-staging` fails
+  at the login assertion (the user does not exist) — the honest blocked state.
+- The self-hosted runner only needs to **run a static binary + `ssh`/`curl`** —
+  the smoke binary is built on a hosted runner and downloaded as an artifact, so
+  the runner LXC needs no Go toolchain.

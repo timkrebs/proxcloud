@@ -1,0 +1,529 @@
+# deploy — the CD wave (ADR-0014 §4): staging → smoke → prod gate → blue/green
+# cutover → prod smoke → auto-rollback. This is the ONLY workflow that runs on
+# the self-hosted homelab runner and reaches production; it never holds
+# GHCR/build credentials and only ever runs already-merged, already-published
+# code. See docs/adr/0014-cd-workflow-structure.md and RELEASING.md.
+#
+# TRUST BOUNDARY (ADR-0014 §2): fired via `workflow_run` on a *completed,
+# successful* publish.yml run of the BASE repo — a fork PR can never reach here.
+# Deploy resolves the IMMUTABLE ref (40-hex head_sha on main, or the vX.Y.Z tag)
+# and passes it to the ADR-0015 forced-command wrapper, which accepts EXACTLY
+# `deploy <40-hex|vX.Y.Z>` and `rollback` and re-validates server-side.
+#
+# SECURITY (ADR-0014 §7): no untrusted github.event.* is ever interpolated into
+# a run: body — event fields flow through env: and are regex-validated on the
+# runner before use. Every third-party action is pinned by commit SHA.
+#
+# The server-side deploy.sh (invoked via `deploy <ref>`) does the heavy lifting:
+# pull images, run the migrator (proxcloud migrate or boot-migrate) + the
+# idempotent proxcloud seed-smoke seed (SMOKE_SEED — ADR-0016 §4), compose up,
+# and the health+version gate; for prod it also snapshots Postgres (pg_dump) and
+# performs the loopback health-check + atomic Caddy symlink flip. The workflow
+# only triggers those verbs over SSH and runs the black-box smoke binary.
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [publish]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Immutable ref to deploy: a 40-char git SHA or a vMAJOR.MINOR.PATCH tag"
+        required: true
+        type: string
+
+# Least privilege by default; the release job elevates to contents:write and the
+# notify job adds actions:read for the approvals lookup, each job-scoped.
+permissions:
+  contents: read
+
+# Single serial wave (ADR-0014 §3): waves QUEUE, a cutover is never interrupted
+# (a cancelled caddy reload would leave the proxy half-switched). soak.yml shares
+# this group so cleanup never races a live wave.
+concurrency:
+  group: deploy-pve01
+  cancel-in-progress: false
+
+jobs:
+  # ── prepare: gate on the trigger, resolve + validate the immutable ref ───────
+  # Hosted, no secrets, no infra reach: just the guard and the ref math so the
+  # self-hosted jobs only ever see a pre-validated 40-hex SHA or vX.Y.Z tag.
+  prepare:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.head_branch == 'main' ||
+        startsWith(github.event.workflow_run.head_branch, 'v')))
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_ref: ${{ steps.coords.outputs.deploy_ref }}
+      is_tag: ${{ steps.coords.outputs.is_tag }}
+      semver: ${{ steps.coords.outputs.semver }}
+    steps:
+      - name: Resolve and validate the deploy ref
+        id: coords
+        # Untrusted event fields enter ONLY via env: (never inlined into the
+        # script body) and are regex-validated before they become a deploy arg.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RAW_INPUT_REF: ${{ github.event.inputs.ref }}
+          RAW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RAW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Hotfix: deploy exactly what the operator typed.
+            ref="$RAW_INPUT_REF"
+          elif printf '%s' "$RAW_HEAD_BRANCH" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            # A clean semver tag run: deploy by the semver tag (enables release).
+            ref="$RAW_HEAD_BRANCH"
+          else
+            # A main push (or a prerelease tag): deploy by the immutable commit.
+            ref="$RAW_HEAD_SHA"
+          fi
+
+          # The one non-negotiable: a deploy arg is EXACTLY a 40-hex SHA or
+          # vMAJOR.MINOR.PATCH — the exact grammar the forced-command wrapper
+          # accepts. Anything else is refused here, before it can reach SSH.
+          if ! printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$|^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::refusing to deploy: ref '$ref' is not a 40-char SHA or vX.Y.Z" >&2
+            exit 1
+          fi
+
+          if printf '%s' "$ref" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            is_tag=true
+            semver="$ref"
+          else
+            is_tag=false
+            semver=""
+          fi
+
+          {
+            echo "deploy_ref=$ref"
+            echo "is_tag=$is_tag"
+            echo "semver=$semver"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved deploy ref: $ref (tag=$is_tag)"
+
+      - name: Summary
+        env:
+          DEPLOY_REF: ${{ steps.coords.outputs.deploy_ref }}
+          IS_TAG: ${{ steps.coords.outputs.is_tag }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Deploy wave"
+            echo ""
+            echo "- ref: \`$DEPLOY_REF\`"
+            echo "- versioned release: \`$IS_TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── build-smoketest: compile the static smoke binary from the deployed tree ──
+  # Hosted, contents:read only. Building from the SAME ref keeps the smoke
+  # contract in lockstep with the deployed code. The artifact is consumed by
+  # both smoke gates (staging + prod) so the self-hosted runner needs no Go.
+  build-smoketest:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the deployed tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.deploy_ref }}
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@3041bf56c941b39c61721a86cd11f3bb1338122a # v5.2.0
+        with:
+          go-version-file: deploy/smoketest/go.mod
+          # stdlib-only module: no go.sum, nothing to cache.
+          cache: false
+      - name: Build (static, stdlib-only)
+        working-directory: deploy/smoketest
+        run: |
+          set -euo pipefail
+          go vet ./...
+          CGO_ENABLED=0 go build -trimpath -o smoketest .
+          ./smoketest -h 2>&1 | head -1 || true
+      - name: Upload smoketest binary
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: smoketest
+          path: deploy/smoketest/smoketest
+          if-no-files-found: error
+          retention-days: 5
+
+  # ── deploy-staging: SSH the forced-command wrapper → deploy.sh <ref> ─────────
+  # deploy.sh (server-side) pulls images, migrates, seeds smoke, composes up, and
+  # health+version gates. Staging is disposable — no rollback (ADR-0014 §4.1).
+  deploy-staging:
+    needs: prepare
+    runs-on: [self-hosted, homelab]
+    steps:
+      - name: Deploy to staging
+        env:
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          SSH_TARGET: ${{ vars.STAGING_SSH_HOST }}
+          SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          # Defense in depth: re-validate the ref on the runner before SSH even
+          # though prepare already did (the wrapper validates a THIRD time).
+          printf '%s' "$DEPLOY_REF" | grep -Eq '^[0-9a-f]{40}$|^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::bad deploy ref reached the runner"; exit 1; }
+          [ -n "$SSH_TARGET" ] || { echo "::error::vars.STAGING_SSH_HOST is not set"; exit 1; }
+          [ -n "$SSH_KEY" ] || { echo "::error::secrets.STAGING_SSH_KEY is not set"; exit 1; }
+          [ -n "$SSH_KNOWN_HOSTS" ] || { echo "::error::secrets.SSH_KNOWN_HOSTS is not set (ssh-keyscan the guests once)"; exit 1; }
+
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/deploy_key" && chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts" && chmod 600 "$HOME/.ssh/known_hosts"
+
+          # The forced command reads $SSH_ORIGINAL_COMMAND; the wrapper accepts
+          # EXACTLY `deploy <ref>`. Word-splitting is safe: DEPLOY_REF is a
+          # validated single token with no whitespace or globs.
+          echo "::group::deploy.sh <ref> (server-side migrate + seed + health gate)"
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o ConnectTimeout=20 \
+            "$SSH_TARGET" "deploy $DEPLOY_REF" 2>&1 | tee deploy-staging.log
+          echo "::endgroup::"
+
+      - name: Verify deployed version + summarize
+        if: ${{ always() && hashFiles('deploy-staging.log') != '' }}
+        env:
+          BASE_URL: ${{ vars.STAGING_BASE_URL }}
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Staging deploy — \`$DEPLOY_REF\`"
+            echo ""
+            echo "Migrator / health tail:"
+            echo '```'
+            grep -Ei 'migrat|commit|semver|healthy|cutover|deploy' deploy-staging.log | tail -n 20 || tail -n 20 deploy-staging.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${BASE_URL:-}" ]; then
+            echo "Deployed /api/v1/version:" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            curl -fsS --max-time 15 "$BASE_URL/api/v1/version" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo '{"error":"version fetch failed"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Scrub SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+
+  # ── smoke-staging: BLOCKING black-box smoke against staging (ADR-0016) ───────
+  # Any failure stops the wave BEFORE the production gate (ADR-0014 §4.2).
+  smoke-staging:
+    needs: [prepare, build-smoketest, deploy-staging]
+    runs-on: [self-hosted, homelab]
+    steps:
+      - name: Download smoketest binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: smoketest
+      - name: Run smoke against staging
+        env:
+          SMOKE_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+          SMOKE_EXPECT_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+          SMOKE_TENANT: ${{ vars.SMOKE_TENANT }}
+          SMOKE_PROJECT: ${{ vars.SMOKE_PROJECT }}
+          SMOKE_NODE: ${{ vars.SMOKE_NODE }}
+          SMOKE_TEMPLATE: ${{ vars.SMOKE_TEMPLATE }}
+          SMOKE_STORAGE: ${{ vars.SMOKE_STORAGE }}
+          SMOKE_BRIDGE: ${{ vars.SMOKE_BRIDGE }}
+          SMOKE_VMID: ${{ vars.SMOKE_VMID }}
+        run: |
+          set -euo pipefail
+          chmod +x ./smoketest
+          ./smoketest
+
+  # ── deploy-prod: the SINGLE production job — gate + cutover + smoke + rollback ─
+  #
+  # WHY ONE JOB (deviation from ADR-0014 §4's 3-job listing, same semantics):
+  # GitHub's required-reviewer gate is per JOB, and it re-prompts for EACH job
+  # that targets the environment. Splitting gate / deploy / smoke across separate
+  # `environment: production` jobs would demand THREE approvals for one release.
+  # Since deploy needs PROD_SSH_KEY and smoke needs the prod SMOKE_* — both
+  # environment-scoped secrets — everything that touches prod lives in this one
+  # gated job so "the approval IS the button-press to prod" stays literally true.
+  # The ADR's stages map to the clearly-delimited STEPS below.
+  deploy-prod:
+    needs: [prepare, build-smoketest, smoke-staging]
+    runs-on: [self-hosted, homelab]
+    # The environment gate: this job does not start until the required reviewer
+    # (timkrebs) approves. Approval releases the production-scoped secrets/vars.
+    environment: production
+    outputs:
+      prod_outcome: ${{ steps.outcome.outputs.value }}
+    steps:
+      - name: Download smoketest binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: smoketest
+
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [ -n "$SSH_KEY" ] || { echo "::error::secrets.PROD_SSH_KEY is not set (production environment secret)"; exit 1; }
+          [ -n "$SSH_KNOWN_HOSTS" ] || { echo "::error::secrets.SSH_KNOWN_HOSTS is not set (ssh-keyscan the guests once)"; exit 1; }
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/deploy_key" && chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts" && chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Deploy to prod (blue/green cutover)
+        id: deploy
+        env:
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          SSH_TARGET: ${{ vars.PROD_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$DEPLOY_REF" | grep -Eq '^[0-9a-f]{40}$|^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::bad deploy ref reached the runner"; exit 1; }
+          [ -n "$SSH_TARGET" ] || { echo "::error::vars.PROD_SSH_HOST is not set"; exit 1; }
+          # deploy.sh does: pg_dump snapshot -> pull idle color -> migrate
+          # (expand/contract) -> loopback health-check bypassing Caddy -> atomic
+          # symlink flip + caddy reload. Any failure BEFORE the flip aborts with
+          # the old color still live (no rollback needed).
+          echo "::group::prod deploy.sh <ref> (pg_dump + idle deploy + loopback health + atomic flip)"
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o ConnectTimeout=20 \
+            "$SSH_TARGET" "deploy $DEPLOY_REF" 2>&1 | tee deploy-prod.log
+          echo "::endgroup::"
+
+      - name: Summarize prod deploy
+        if: ${{ always() && hashFiles('deploy-prod.log') != '' }}
+        env:
+          BASE_URL: ${{ vars.PROD_BASE_URL }}
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+        run: |
+          set -euo pipefail
+          color="$(grep -Eio '(blue|green) now live' deploy-prod.log | tail -n1 || true)"
+          {
+            echo "### Prod cutover — \`$DEPLOY_REF\`"
+            echo ""
+            [ -n "$color" ] && echo "- cutover: \`$color\`"
+            echo ""
+            echo "Migrator / cutover tail:"
+            echo '```'
+            grep -Ei 'migrat|commit|semver|healthy|cutover|snapshot|pg_dump|live' deploy-prod.log | tail -n 25 || tail -n 25 deploy-prod.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${BASE_URL:-}" ]; then
+            echo "Deployed /api/v1/version (public):" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            curl -fsS --max-time 15 "$BASE_URL/api/v1/version" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo '{"error":"version fetch failed"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Prod smoke (through the public URL)
+        id: prodsmoke
+        env:
+          SMOKE_BASE_URL: ${{ vars.PROD_BASE_URL }}
+          SMOKE_EXPECT_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+          SMOKE_TENANT: ${{ vars.SMOKE_TENANT }}
+          SMOKE_PROJECT: ${{ vars.SMOKE_PROJECT }}
+          SMOKE_NODE: ${{ vars.SMOKE_NODE }}
+          SMOKE_TEMPLATE: ${{ vars.SMOKE_TEMPLATE }}
+          SMOKE_STORAGE: ${{ vars.SMOKE_STORAGE }}
+          SMOKE_BRIDGE: ${{ vars.SMOKE_BRIDGE }}
+          SMOKE_VMID: ${{ vars.SMOKE_VMID }}
+        run: |
+          set -euo pipefail
+          chmod +x ./smoketest
+          ./smoketest
+
+      # AUTO-ROLLBACK (ADR-0014 §4.5 / ADR-0016 §2): fires ONLY when the cutover
+      # succeeded but the LIVE-path smoke failed. Rollback is the same primitive
+      # in reverse — `rollback` flips the Caddy symlink back to the warm old
+      # color + reloads. A pre-flip deploy failure never reaches here.
+      - name: Auto-rollback on prod smoke failure
+        id: rollback
+        if: ${{ failure() && steps.deploy.outcome == 'success' && steps.prodsmoke.outcome == 'failure' }}
+        env:
+          SSH_TARGET: ${{ vars.PROD_SSH_HOST }}
+        run: |
+          set -euo pipefail
+          echo "::warning::prod smoke FAILED — rolling back to the warm previous color"
+          echo "::group::prod rollback (caddy symlink flip back + reload)"
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o ConnectTimeout=20 \
+            "$SSH_TARGET" "rollback" 2>&1 | tee rollback.log
+          echo "::endgroup::"
+          {
+            echo "### Prod AUTO-ROLLBACK executed"
+            echo '```'
+            tail -n 20 rollback.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record prod outcome
+        id: outcome
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.deploy.outcome }}" != "success" ]; then
+            value="deploy-failed"
+          elif [ "${{ steps.prodsmoke.outcome }}" = "success" ]; then
+            value="deployed"
+          elif [ "${{ steps.rollback.outcome }}" = "success" ]; then
+            value="rolled-back"
+          else
+            value="rollback-failed"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "prod outcome: $value"
+
+      - name: Scrub SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+
+  # ── release: on v* only, a GitHub Release with a conventional-commit changelog ─
+  release:
+    needs: [prepare, deploy-prod]
+    if: ${{ needs.prepare.outputs.is_tag == 'true' && needs.deploy-prod.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (full history for the changelog)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.semver }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Generate changelog + create the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEMVER: ${{ needs.prepare.outputs.semver }}
+        run: |
+          set -euo pipefail
+          # Validate the tag shape before it reaches gh (defense in depth).
+          printf '%s' "$SEMVER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::release semver '$SEMVER' is malformed"; exit 1; }
+
+          prev="$(git describe --tags --abbrev=0 "${SEMVER}^" 2>/dev/null || true)"
+          if [ -n "$prev" ]; then
+            range_args=("${prev}..${SEMVER}")
+          else
+            # First release: all commits reachable from the tag.
+            range_args=("$SEMVER")
+          fi
+          echo "Changelog range: ${range_args[*]}"
+
+          {
+            echo "## What changed"
+            echo ""
+            # Conventional-commit grouping; %s is the subject only (no injection
+            # into a shell — piped straight to the file).
+            for type in feat fix perf refactor docs test build ci chore revert; do
+              lines="$(git log --no-merges --pretty=format:'%s (%h)' "${range_args[@]}" 2>/dev/null | grep -E "^${type}(\(.+\))?!?: " || true)"
+              [ -z "$lines" ] && continue
+              printf '### %s\n\n' "$type"
+              printf '%s\n' "$lines" | sed -E 's/^[a-z]+(\([^)]*\))?!?: /- /'
+              echo ""
+            done
+            echo "---"
+            echo "_Deployed to prod via the CD wave. Images: \`ghcr.io/timkrebs/proxcloud-{backend,frontend}:${SEMVER}\`._"
+          } > changelog.md
+
+          if gh release view "$SEMVER" >/dev/null 2>&1; then
+            gh release edit "$SEMVER" --notes-file changelog.md
+          else
+            gh release create "$SEMVER" --title "$SEMVER" --notes-file changelog.md --verify-tag
+          fi
+
+  # ── notify: one ntfy line for the whole wave (ADR-0014 §6) ───────────────────
+  # Self-hosted so it can reach a homelab-internal ntfy; no-ops gracefully when
+  # NTFY_URL is unset. Composes env/version/color/smoke/approver from job
+  # results. Runs even when an earlier stage failed.
+  notify:
+    needs: [prepare, build-smoketest, deploy-staging, smoke-staging, deploy-prod, release]
+    if: ${{ always() && needs.prepare.result != 'skipped' }}
+    runs-on: [self-hosted, homelab]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Post wave summary to ntfy
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          GH_TOKEN: ${{ github.token }}
+          GH_API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          IS_TAG: ${{ needs.prepare.outputs.is_tag }}
+          R_DEPLOY_STAGING: ${{ needs.deploy-staging.result }}
+          R_SMOKE_STAGING: ${{ needs.smoke-staging.result }}
+          R_DEPLOY_PROD: ${{ needs.deploy-prod.result }}
+          PROD_OUTCOME: ${{ needs.deploy-prod.outputs.prod_outcome }}
+          REVIEWER_FALLBACK: ${{ vars.PROD_REVIEWER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NTFY_URL:-}" ]; then
+            echo "NTFY_URL not configured — skipping notification (no-op)."
+            exit 0
+          fi
+
+          # Best-effort approver from the run's environment approvals (needs
+          # actions:read). Parsed without jq (not guaranteed on the runner).
+          approver="${REVIEWER_FALLBACK:-timkrebs}"
+          if approvals="$(curl -fsS --max-time 15 -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$GH_API/repos/$REPO/actions/runs/$RUN_ID/approvals" 2>/dev/null)"; then
+            login="$(printf '%s' "$approvals" | grep -oE '"login":[[:space:]]*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)"$/\1/')"
+            [ -n "$login" ] && approver="$login"
+          fi
+
+          # Determine the headline stage + priority.
+          prio="default"
+          title="proxcloud deploy"
+          if [ "${R_DEPLOY_PROD}" = "success" ] && [ "${PROD_OUTCOME:-}" = "deployed" ]; then
+            headline="LIVE"
+          elif [ "${PROD_OUTCOME:-}" = "rolled-back" ]; then
+            headline="ROLLED BACK (prod smoke failed)"; prio="high"
+          elif [ "${PROD_OUTCOME:-}" = "rollback-failed" ]; then
+            headline="ROLLBACK FAILED — manual action needed"; prio="urgent"
+          elif [ "${R_SMOKE_STAGING}" = "failure" ]; then
+            headline="staging smoke FAILED — wave stopped before prod"; prio="high"
+          elif [ "${R_DEPLOY_STAGING}" = "failure" ]; then
+            headline="staging deploy FAILED"; prio="high"
+          elif [ "${R_DEPLOY_PROD}" = "skipped" ] || [ "${R_DEPLOY_PROD}" = "" ]; then
+            headline="pending prod approval / not reached"
+          else
+            headline="deploy FAILED"; prio="high"
+          fi
+
+          msg="$headline | ref=$DEPLOY_REF | staging-smoke=${R_SMOKE_STAGING:-n/a} | prod=${PROD_OUTCOME:-n/a} | approver=$approver | $RUN_URL"
+          echo "ntfy ($prio): $msg"
+          curl -fsS --max-time 15 \
+            -H "Title: $title" \
+            -H "Priority: $prio" \
+            -H "Tags: rocket" \
+            -d "$msg" \
+            "$NTFY_URL" >/dev/null || echo "::warning::ntfy post failed (non-fatal)"

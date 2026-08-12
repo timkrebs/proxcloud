@@ -1,0 +1,3 @@
+# The CD wave builds the binary as `smoketest` (build-smoketest job, `-o smoketest`)
+# and ships it as an artifact — it is never committed.
+/smoketest

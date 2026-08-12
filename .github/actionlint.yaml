@@ -1,0 +1,7 @@
+# actionlint config. Declares the custom self-hosted runner label used by the
+# CD wave (deploy.yml / soak.yml) so `runs-on: [self-hosted, homelab]` lints
+# clean. The runner lives in its own repo-scoped, ephemeral LXC on the homelab
+# (ADR-0014 §7) — it is NOT a GitHub-hosted label.
+self-hosted-runner:
+  labels:
+    - homelab
