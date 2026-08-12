@@ -5,7 +5,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useMutation } from "@tanstack/react-query";
 
 import {
   AdvancedTab,
@@ -19,14 +18,17 @@ import {
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusDot } from "@/components/ui/StatusDot";
-import { ApiError, apiFetch } from "@/lib/api/client";
-import type { CreateGuestResponse } from "@/lib/api/generated/types";
+import { Mi } from "@/components/ui/icons";
+import { ApiError } from "@/lib/api/client";
+import { isQuotaExceeded, useCreateGuest } from "@/lib/api/mutations";
+import { useProjectQuota } from "@/lib/api/quota";
 import { usePricing, useResources } from "@/lib/api/queries";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { pushToast } from "@/lib/stores/toastStore";
 import { CostRows } from "@/components/wizard/CostRows";
 import {
   TAB_NAMES,
+  effectiveRemaining,
   toCreateRequest,
   useWizardStore,
   validateWizard,
@@ -41,6 +43,9 @@ export default function WizardPage() {
   const pricing = usePricing();
   const tenantId = useActiveTenantId();
   const [submitted, setSubmitted] = useState(false);
+  // 409 quota_exceeded is surfaced inline (distinct from the generic conflict
+  // toast) — the backend names the tightest violated dimension/scope.
+  const [quotaError, setQuotaError] = useState<string | null>(null);
 
   useEffect(() => {
     s.init(kind);
@@ -48,36 +53,41 @@ export default function WizardPage() {
   }, [kind]);
 
   const existingVmids = useMemo(() => (resources.data ?? []).map((g) => g.vmid), [resources.data]);
-  const errs = validateWizard(s, existingVmids);
+  // Bind sizing validation on the tighter of project vs tenant remaining.
+  const projectQuota = useProjectQuota(s.projectId || null);
+  const remaining = projectQuota.data ? effectiveRemaining(projectQuota.data) : null;
+  const errs = validateWizard(s, existingVmids, remaining);
 
-  const create = useMutation({
-    mutationFn: () =>
-      apiFetch<CreateGuestResponse>(`/api/tenants/${tenantId}/guests`, {
-        method: "POST",
-        body: JSON.stringify(toCreateRequest(s)),
-      }),
-    onSuccess: (res) => {
-      setSubmitted(true);
-      router.push(`/deployments/${res.deploymentId}`);
-    },
-    onError: (err) => {
-      pushToast({
-        kind: "err",
-        title: "Could not start the deployment",
-        desc: err instanceof ApiError ? err.detail : String(err),
-      });
-    },
-  });
+  const create = useCreateGuest();
 
   const kindLabel = kind === "qemu" ? "virtual machine" : "LXC container";
   const onReview = s.tab === TAB_NAMES.length - 1;
 
   const submit = () => {
+    setQuotaError(null);
     if (errs.length > 0) {
       s.set({ tab: TAB_NAMES.length - 1, maxTab: TAB_NAMES.length - 1 });
       return;
     }
-    create.mutate();
+    create.mutate(toCreateRequest(s), {
+      onSuccess: (res) => {
+        setSubmitted(true);
+        router.push(`/deployments/${res.deploymentId}`);
+      },
+      onError: (err) => {
+        if (isQuotaExceeded(err)) {
+          // Send the user back to Size and show the sizing error inline.
+          setQuotaError(err instanceof ApiError ? err.message : "Over quota");
+          s.set({ tab: 2, maxTab: Math.max(s.maxTab, 2) });
+          return;
+        }
+        pushToast({
+          kind: "err",
+          title: "Could not start the deployment",
+          desc: err instanceof ApiError ? err.detail : String(err),
+        });
+      },
+    });
   };
 
   return (
@@ -120,6 +130,15 @@ export default function WizardPage() {
 
       <div className="flex items-start gap-7 pt-5">
         <div className="max-w-[720px] flex-1 pb-24">
+          {quotaError ? (
+            <div className="mb-4 flex items-start gap-2 rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5]">
+              <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 1 }} />
+              <div>
+                <div className="font-semibold text-err-text">Over quota</div>
+                {quotaError}
+              </div>
+            </div>
+          ) : null}
           {s.tab === 0 ? <BasicsTab errs={errs.filter((e) => e.tab === 0)} /> : null}
           {s.tab === 1 ? <ImageTab errs={errs.filter((e) => e.tab === 1)} /> : null}
           {s.tab === 2 ? <SizeTab errs={errs.filter((e) => e.tab === 2)} /> : null}

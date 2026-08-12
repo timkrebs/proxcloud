@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
@@ -197,25 +201,171 @@ func (m *Middleware) Enforce(next http.Handler) http.Handler {
 	})
 }
 
-// AuditOnMutation is the Phase-4 audit choke-point, wired now on the mutating
-// (non-GET) tenant subtree so the structural seam exists. Phase 3 is a
-// pass-through that reads the actor/tenant/project from context and logs at
-// debug; it does NOT write audit_log yet.
+// AuditOnMutation is the Phase-4 audit choke-point on the mutating (non-GET)
+// tenant subtree: it guarantees a durable audit_log row for every mutation, or a
+// 500 with nothing mutated (ADR-0012 §3). GET passes straight through (the
+// self-gate that makes this a single r.Use on the whole tenant group).
+//
+// Fail-closed, one row: it inserts an intent row (outcome "pending") BEFORE the
+// handler — a failed insert 500s and RETURNS without calling next, so nothing is
+// mutated; it then runs the handler behind a status-capturing wrapper and
+// finalizes the same row's outcome/detail AFTER — a failed finalize logs loudly
+// but does NOT 500, because the intent row is already a durable record (no
+// unlogged mutation). InsertAuditIntent + FinalizeAudit are the only audit
+// mutations, so who/what/when stays immutable.
 func (m *Middleware) AuditOnMutation(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			if id, ok := auth.IdentityFrom(r.Context()); ok {
-				m.logger().Debug("audit (stub)",
-					"actor", id.UserID,
-					"tenant", id.ActiveTenantID,
-					"project", id.ResolvedProjectID,
-					"method", r.Method,
-					"pattern", chi.RouteContext(r.Context()).RoutePattern(),
-				)
-			}
+		if r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
 		}
-		next.ServeHTTP(w, r)
+		id, ok := auth.IdentityFrom(r.Context())
+		if !ok {
+			writeErr(w, errUnauthenticated())
+			return
+		}
+		if m.Store == nil {
+			m.logger().Error("authz: AuditOnMutation has no store (fail-closed)")
+			writeErr(w, errInternal())
+			return
+		}
+
+		pattern := chi.RouteContext(r.Context()).RoutePattern()
+		urlParam := func(k string) string { return chi.URLParam(r, k) }
+		action := AuditAction(r.Method, pattern, urlParam)
+		if action == "" {
+			// A mutating route with no action-map entry: the completeness test
+			// prevents this shipping, but at runtime it is fail-closed.
+			m.logger().Error("authz: mutating route has no audit-action entry (add it to authz.auditActions)",
+				"method", r.Method, "pattern", pattern)
+			writeErr(w, errInternal())
+			return
+		}
+		targetType, targetID := auditTarget(urlParam)
+
+		intent := store.AuditIntent{
+			ActorUserID: nonEmpty(id.UserID),
+			TenantID:    nonEmpty(id.ActiveTenantID),
+			ProjectID:   nonEmpty(id.ResolvedProjectID),
+			Action:      action,
+			TargetType:  targetType,
+			TargetID:    targetID,
+			IP:          clientIP(r),
+		}
+		auditID, err := m.Store.InsertAuditIntent(r.Context(), intent)
+		if err != nil {
+			// True fail-closed: the mutation never runs, so there is nothing to log.
+			m.logger().Error("authz: audit intent insert failed — mutation refused",
+				"action", action, "pattern", pattern, "err", err)
+			writeErr(w, errInternal())
+			return
+		}
+
+		// Run the handler behind a status-capturing wrapper, with an annotation
+		// sink on the context so a handler (e.g. CreateGuest) may add vmid/name to
+		// the audit detail — best-effort, never load-bearing for the one row.
+		ann := newAnnotations()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r.WithContext(withAnnotations(r.Context(), ann)))
+
+		outcome := outcomeForStatus(ww.Status())
+		detail := ann.detail(ww.Status())
+		// Detach from request cancellation so a client disconnect can never leave a
+		// mutation's outcome unrecorded; the intent row is already durable regardless.
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), auditFinalizeTimeout)
+		defer cancel()
+		if err := m.Store.FinalizeAudit(fctx, auditID, outcome, detail); err != nil {
+			// The intent row remains durable ("pending") — a logged, non-silent gap.
+			m.logger().Error("authz: audit finalize failed (intent row is durable; not 500ing)",
+				"audit_id", auditID, "outcome", outcome, "err", err)
+		}
 	})
+}
+
+// auditFinalizeTimeout bounds the post-handler outcome write.
+const auditFinalizeTimeout = 5 * time.Second
+
+// outcomeForStatus maps an HTTP status to the audit outcome vocabulary: 2xx (and
+// an unwritten 0, which net/http renders as 200) is success, 4xx is a denied
+// attempt, everything else (5xx) is an error. Every attempt is recorded — a
+// denied or errored mutation is still an audit event.
+func outcomeForStatus(status int) string {
+	switch {
+	case status == 0 || (status >= 200 && status < 300):
+		return "success"
+	case status >= 400 && status < 500:
+		return "denied"
+	default:
+		return "error"
+	}
+}
+
+// clientIP extracts the caller's IP (middleware.RealIP has already normalized
+// r.RemoteAddr) for the audit row, or nil when unavailable.
+func clientIP(r *http.Request) *string {
+	addr := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		addr = host
+	}
+	if addr == "" {
+		return nil
+	}
+	return &addr
+}
+
+// nonEmpty returns &s when s is non-empty, else nil (for the nullable audit
+// actor/tenant/project columns).
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// --- audit detail annotation hook ---
+
+type annotationsCtxKey struct{}
+
+// annotations is a per-request sink the audit middleware attaches so handlers can
+// enrich the outcome detail (e.g. the resolved vmid). Mutex-guarded, though in
+// practice a handler writes it synchronously before returning.
+type annotations struct {
+	mu sync.Mutex
+	kv map[string]string
+}
+
+func newAnnotations() *annotations { return &annotations{kv: map[string]string{}} }
+
+func withAnnotations(ctx context.Context, a *annotations) context.Context {
+	return context.WithValue(ctx, annotationsCtxKey{}, a)
+}
+
+// Annotate adds a key/value to the current request's audit detail, if the audit
+// choke-point is active on this request (a no-op otherwise). It is best-effort
+// enrichment and never affects the one-row guarantee.
+func Annotate(ctx context.Context, key, value string) {
+	if a, ok := ctx.Value(annotationsCtxKey{}).(*annotations); ok {
+		a.mu.Lock()
+		a.kv[key] = value
+		a.mu.Unlock()
+	}
+}
+
+// detail marshals the audit row's jsonb detail: the captured HTTP status plus any
+// handler annotations. A marshal error yields nil (the row still finalizes).
+func (a *annotations) detail(status int) []byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m := make(map[string]any, len(a.kv)+1)
+	m["status"] = status
+	for k, v := range a.kv {
+		m[k] = v
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // RequirePlatformAdmin gates the /api/admin/* surface.

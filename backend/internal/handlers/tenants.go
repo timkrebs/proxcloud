@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -91,6 +92,31 @@ func notFound(msg string) *types.APIError {
 
 func badRequest(msg string) *types.APIError {
 	return &types.APIError{Code: "invalid_request", Message: msg, Status: http.StatusBadRequest}
+}
+
+// apiStatus mirrors httpserver.WriteError's status mapping: an *APIError's own
+// Status, else 500. Used to record the audited outcome for a handler-level
+// mutation on the same status the client will actually receive.
+func apiStatus(err error) int {
+	var ae *types.APIError
+	if errors.As(err, &ae) && ae.Status != 0 {
+		return ae.Status
+	}
+	return http.StatusInternalServerError
+}
+
+// remoteIP extracts the caller's IP (RealIP has normalized r.RemoteAddr) for an
+// audit row, or nil when unavailable — the handler-level counterpart to the audit
+// middleware's clientIP.
+func remoteIP(r *http.Request) *string {
+	addr := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		addr = host
+	}
+	if addr == "" {
+		return nil
+	}
+	return &addr
 }
 
 var slugStripRe = regexp.MustCompile(`[^a-z0-9]+`)

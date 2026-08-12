@@ -9,6 +9,7 @@ import {
   RecentResourcesCard,
   ServiceHealthCard,
   ServiceTiles,
+  TenantQuotaCard,
   TenantSummaryCard,
   UsageCard,
 } from "@/components/dashboard/DashboardCards";
@@ -76,6 +77,7 @@ function TenantDashboard({ tenantName }: { tenantName?: string }) {
         </div>
         <div className="flex flex-col gap-4">
           <TenantSummaryCard />
+          <TenantQuotaCard />
           <CostCard />
         </div>
       </div>

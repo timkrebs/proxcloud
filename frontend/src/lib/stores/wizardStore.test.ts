@@ -2,10 +2,13 @@
 // deploy.Validate, so every case here has a server-side twin.
 import { beforeEach, describe, expect, it } from "vitest";
 
+import type { ProjectQuotaResponse, QuotaLimits, QuotaUsage } from "@/lib/api/generated/types";
 import {
+  effectiveRemaining,
   toCreateRequest,
   useWizardStore,
   validateWizard,
+  type QuotaRemaining,
   type WizardState,
 } from "@/lib/stores/wizardStore";
 
@@ -160,6 +163,127 @@ describe("validateWizard", () => {
     validVm();
     useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, storage: "", bridge: "", diskGb: "" });
     expect(validateWizard(useWizardStore.getState())).toEqual([]);
+  });
+});
+
+describe("validateWizard — quota (over-quota client feedback)", () => {
+  const unlimited: QuotaRemaining = { vcpu: null, ramMb: null, diskGb: null, count: null };
+
+  it("passes when no remaining is supplied (quota check is opt-in)", () => {
+    validVm();
+    expect(validateWizard(useWizardStore.getState())).toEqual([]);
+  });
+
+  it("passes when remaining dimensions are unlimited (null)", () => {
+    validVm();
+    useWizardStore.getState().set({ cores: "64", memoryMb: "999999", diskGb: "9999" });
+    const quotaErrs = validateWizard(useWizardStore.getState(), [], unlimited).filter((e) => e.tab === 2 && e.field !== "cores");
+    // cores 64 is within the 1–128 base bound, so only quota (none here) matters.
+    expect(quotaErrs).toEqual([]);
+  });
+
+  it("flags cores over the remaining vCPU", () => {
+    validVm();
+    useWizardStore.getState().set({ cores: "8" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, vcpu: 4 });
+    expect(errs.some((e) => e.field === "cores" && e.tab === 2 && e.message.includes("4 vCPU remaining"))).toBe(true);
+  });
+
+  it("allows cores exactly at the remaining vCPU", () => {
+    validVm();
+    useWizardStore.getState().set({ cores: "4" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, vcpu: 4 });
+    expect(errs.some((e) => e.field === "cores")).toBe(false);
+  });
+
+  it("flags memory over the remaining RAM (MiB)", () => {
+    validVm();
+    useWizardStore.getState().set({ memoryMb: "4096" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, ramMb: 2048 });
+    expect(errs.some((e) => e.field === "memoryMb" && e.tab === 2)).toBe(true);
+  });
+
+  it("flags disk over the remaining disk for a non-clone", () => {
+    validVm();
+    useWizardStore.getState().set({ diskGb: "100" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, diskGb: 50 });
+    expect(errs.some((e) => e.field === "diskGb" && e.tab === 2)).toBe(true);
+  });
+
+  it("skips the disk quota check for clones (disk is template-derived)", () => {
+    validVm();
+    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, diskGb: "100", storage: "", bridge: "" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, diskGb: 1 });
+    expect(errs.some((e) => e.field === "diskGb")).toBe(false);
+  });
+
+  it("skips vCPU and RAM quota checks for clones (delta is template-derived)", () => {
+    validVm();
+    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, cores: "8", memoryMb: "8192", storage: "", bridge: "" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, vcpu: 1, ramMb: 1 });
+    expect(errs.some((e) => e.field === "cores")).toBe(false);
+    expect(errs.some((e) => e.field === "memoryMb")).toBe(false);
+  });
+
+  it("still flags an exhausted guest-count quota for clones", () => {
+    validVm();
+    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, storage: "", bridge: "" });
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, count: 0 });
+    expect(errs.some((e) => e.field === "quota" && e.tab === 2)).toBe(true);
+  });
+
+  it("flags an exhausted guest-count quota", () => {
+    validVm();
+    const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, count: 0 });
+    expect(errs.some((e) => e.field === "quota" && e.tab === 2)).toBe(true);
+  });
+
+  it("passes a config that fits inside every remaining dimension", () => {
+    validVm();
+    useWizardStore.getState().set({ cores: "2", memoryMb: "2048", diskGb: "32" });
+    const errs = validateWizard(useWizardStore.getState(), [], {
+      vcpu: 4,
+      ramMb: 4096,
+      diskGb: 64,
+      count: 3,
+    });
+    expect(errs).toEqual([]);
+  });
+});
+
+describe("effectiveRemaining", () => {
+  const usage: QuotaUsage = { vcpu: 0, ramMb: 0, diskGb: 0, count: 0 };
+  const mk = (limits: QuotaLimits, remaining: QuotaUsage): ProjectQuotaResponse["project"] => ({
+    scopeType: "project",
+    scopeId: "s",
+    limits,
+    usage,
+    remaining,
+  });
+
+  it("takes the tighter of project vs tenant per dimension", () => {
+    const resp: ProjectQuotaResponse = {
+      project: mk({ maxVcpu: 10 }, { ...usage, vcpu: 6 }),
+      tenant: mk({ maxVcpu: 8 }, { ...usage, vcpu: 3 }),
+    };
+    expect(effectiveRemaining(resp).vcpu).toBe(3);
+  });
+
+  it("uses the only scope that caps a dimension", () => {
+    const resp: ProjectQuotaResponse = {
+      project: mk({}, { ...usage, vcpu: 999 }),
+      tenant: mk({ maxVcpu: 8 }, { ...usage, vcpu: 5 }),
+    };
+    expect(effectiveRemaining(resp).vcpu).toBe(5);
+  });
+
+  it("is unlimited (null) where neither scope caps the dimension", () => {
+    const resp: ProjectQuotaResponse = {
+      project: mk({}, usage),
+      tenant: mk({}, usage),
+    };
+    const r = effectiveRemaining(resp);
+    expect(r).toEqual({ vcpu: null, ramMb: null, diskGb: null, count: null });
   });
 });
 

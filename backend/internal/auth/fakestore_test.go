@@ -558,6 +558,68 @@ func (f *fakeStore) ListActiveVMIDs(context.Context) (map[int]bool, error) {
 	return out, nil
 }
 
+func (f *fakeStore) ListStalePendingOwnership(_ context.Context, olderThan time.Time) ([]store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.ResourceOwnership{}
+	for _, o := range f.ownership {
+		if o.Status == "pending" && o.CreatedAt.Before(olderThan) {
+			out = append(out, *o)
+		}
+	}
+	return out, nil
+}
+
+// --- quotas + reservation + audit (Phase 4) ---
+//
+// The auth package never exercises quotas; these are minimal stubs so fakeStore
+// still satisfies store.Store. The real behavior is unit-tested via
+// storetest.Fake and the Postgres integration tests.
+
+func (f *fakeStore) GetQuota(context.Context, string, string) (*store.Quota, error) {
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) UpsertQuota(_ context.Context, p store.UpsertQuotaParams) (*store.Quota, error) {
+	return &store.Quota{
+		ID: f.nextID("quota"), ScopeType: p.ScopeType, ScopeID: p.ScopeID,
+		MaxVCPU: p.MaxVCPU, MaxRAMMB: p.MaxRAMMB, MaxDiskGB: p.MaxDiskGB, MaxCount: p.MaxCount,
+	}, nil
+}
+
+func (f *fakeStore) ComputeUsage(context.Context, string, map[int]store.Alloc) (store.QuotaUsage, map[string]store.QuotaUsage, error) {
+	return store.QuotaUsage{}, map[string]store.QuotaUsage{}, nil
+}
+
+func (f *fakeStore) ReserveOwnership(_ context.Context, p store.ReserveOwnershipParams) (*store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.ownership[p.VMID]; ok {
+		return nil, fmt.Errorf("reserve ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+	}
+	now := f.now()
+	rv, rr, rd := p.Reserved.VCPU, p.Reserved.RAMMB, p.Reserved.DiskGB
+	o := &store.ResourceOwnership{
+		ID: f.nextID("own"), TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID,
+		GuestType: p.GuestType, Node: p.Node, CreatedBy: p.CreatedBy, Status: "pending",
+		ReservedVCPU: &rv, ReservedRAMMB: &rr, ReservedDiskGB: &rd, CreatedAt: now, UpdatedAt: now,
+	}
+	f.ownership[p.VMID] = o
+	return cloneOwnership(o), nil
+}
+
+func (f *fakeStore) InsertAuditIntent(_ context.Context, _ store.AuditIntent) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nextID("audit"), nil
+}
+
+func (f *fakeStore) FinalizeAudit(context.Context, string, string, []byte) error { return nil }
+
+func (f *fakeStore) ListAudit(context.Context, store.AuditQuery) ([]store.AuditEntry, error) {
+	return nil, nil
+}
+
 // --- helpers ---
 
 // fakeRoleRank mirrors store.roleRank (unexported there) for the fake's

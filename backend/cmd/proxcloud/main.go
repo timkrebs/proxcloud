@@ -26,6 +26,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/reconciler"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
@@ -169,6 +170,14 @@ func main() {
 	defer bgCancel()
 	go (&events.MetricsPoller{PVE: pve, Broker: broker, Log: log}).Run(bgCtx)
 	go (&tasks.Watcher{PVE: pve, Registry: registry, Broker: broker, Log: log}).Run(bgCtx)
+	// Stale-pending reservation reclaim (ADR-0012 §2.3): frees quota leaked by a
+	// backend that died mid-create. Runs after backfill, stops with bgCtx on shutdown.
+	go (&reconciler.Reconciler{
+		Store:    st,
+		Log:      log,
+		Interval: cfg.ReconcilerInterval,
+		TTL:      cfg.ReservationTTL,
+	}).Run(bgCtx)
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,

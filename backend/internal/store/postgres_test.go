@@ -34,8 +34,8 @@ func TestRunMigrationsCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunMigrations (first): %v", err)
 	}
-	if v1 != 2 {
-		t.Fatalf("expected schema version 2, got %d", v1)
+	if v1 != 3 {
+		t.Fatalf("expected schema version 3, got %d", v1)
 	}
 
 	// Idempotency: a second run is a no-op landing on the same version.

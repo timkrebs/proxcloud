@@ -21,6 +21,13 @@ export interface TaskFilters {
   vmid?: number;
 }
 
+export interface ActivityFilters {
+  /** "audit" (Proxcloud actions) | "task" (raw Proxmox operations). */
+  source?: "audit" | "task";
+  projectId?: string;
+  outcome?: string;
+}
+
 export const qk = {
   me: ["me"] as const,
   sessions: ["sessions"] as const,
@@ -44,4 +51,15 @@ export const qk = {
   project: (tenantId?: string, projectId?: string) => ["project", tenantId, projectId] as const,
   members: (tenantId?: string) => ["members", tenantId] as const,
   tenantSummary: (tenantId?: string) => ["tenantSummary", tenantId] as const,
+
+  // ── Quotas + activity (Phase 4) ──────────────────────────────────────────
+  // Tenant-scoped: leading segment + tenant id, matching the pattern above so a
+  // tenant switch produces a distinct cache entry and mutations can prefix-
+  // invalidate ["quota"] / ["projectQuota"] regardless of the id.
+  quota: (tenantId?: string) => ["quota", tenantId] as const,
+  projectQuota: (tenantId?: string, projectId?: string) =>
+    ["projectQuota", tenantId, projectId] as const,
+  adminTenantQuota: (tenantId?: string) => ["adminTenantQuota", tenantId] as const,
+  activity: (tenantId?: string, filters: ActivityFilters = {}) =>
+    ["activity", tenantId, filters] as const,
 };

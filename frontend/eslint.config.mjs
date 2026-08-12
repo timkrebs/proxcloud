@@ -18,6 +18,9 @@ const eslintConfig = [
       "out/**",
       "build/**",
       "next-env.d.ts",
+      // tygo-generated from backend/api/types — never hand-edited, so linting
+      // its unavoidable `any` (json.RawMessage) here is noise, not signal.
+      "src/lib/api/generated/**",
     ],
   },
 ];

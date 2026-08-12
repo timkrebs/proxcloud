@@ -10,14 +10,17 @@ import { Select } from "@/components/ui/Select";
 import { Textarea } from "@/components/ui/Textarea";
 import { Toggle } from "@/components/ui/Toggle";
 import { Mi } from "@/components/ui/icons";
+import { useProjectQuota } from "@/lib/api/quota";
 import { useResources } from "@/lib/api/queries";
 import { useProjects } from "@/lib/api/tenant";
 import { useBridges, useCatalogNodes, useNextId, useNodeStorages, useStorageContent } from "@/lib/api/wizardQueries";
 import { formatBytes } from "@/lib/format";
 import {
   SIZE_PRESETS,
+  effectiveRemaining,
   useWizardStore,
   validateWizard,
+  type QuotaRemaining,
   type WizardError,
 } from "@/lib/stores/wizardStore";
 
@@ -27,11 +30,36 @@ function fieldError(errs: WizardError[], field: string): string | undefined {
 
 // ── Basics ───────────────────────────────────────────────────────────────────
 
+function RemainingQuota({ remaining }: { remaining: QuotaRemaining }) {
+  const fmt = (n: number | null, unit: (v: number) => string) =>
+    n == null ? "Unlimited" : `${unit(n)} remaining`;
+  const rows: [string, string][] = [
+    ["vCPU", fmt(remaining.vcpu, (n) => String(n))],
+    ["Memory", fmt(remaining.ramMb, (n) => formatBytes(n * 1024 * 1024))],
+    ["Disk", fmt(remaining.diskGb, (n) => formatBytes(n * 1024 ** 3))],
+    ["Guests", fmt(remaining.count, (n) => String(n))],
+  ];
+  return (
+    <div className="mt-2 max-w-[420px] rounded-fluent border border-line bg-hover px-3 py-[10px]">
+      <div className="mb-1 text-[12px] font-semibold text-ink">Remaining quota in this project</div>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[12px] text-ink-2">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between">
+            <span>{k}</span>
+            <span className="tabular-nums">{v}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function BasicsTab({ errs }: { errs: WizardError[] }) {
   const s = useWizardStore();
   const nodes = useCatalogNodes();
   const projects = useProjects();
   const nextId = useNextId();
+  const quota = useProjectQuota(s.projectId || null);
   const kindLabel = s.kind === "qemu" ? "virtual machine" : "container";
 
   // Auto-fill node (single-node cluster) and next free VMID once the data
@@ -122,6 +150,17 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
             ))}
           </Select>
         )}
+        {s.projectId ? (
+          quota.isPending ? (
+            <Skeleton className="mt-2 h-16 w-[420px]" />
+          ) : quota.isError ? (
+            <div className="mt-2">
+              <CardError err={quota.error} />
+            </div>
+          ) : quota.data ? (
+            <RemainingQuota remaining={effectiveRemaining(quota.data)} />
+          ) : null
+        ) : null}
       </FormRow>
 
       <FormRow label="VMID" required help="Auto-suggested from the cluster's next free ID." error={fieldError(errs, "vmid")}>
@@ -287,11 +326,20 @@ export function SizeTab({ errs }: { errs: WizardError[] }) {
   const clone = s.sourceMode === "clone";
   const active = SIZE_PRESETS.find((p) => String(p.cores) === s.cores && String(p.ramGiB * 1024) === s.memoryMb);
 
+  const quotaErr = errs.find((e) => e.field === "quota")?.message;
+
   return (
     <div>
       <SectionHeading caption="T-shirt sizes prefill cores and RAM — adjust the exact values below. You can resize later.">
         Size
       </SectionHeading>
+
+      {quotaErr ? (
+        <div className="mb-4 flex items-start gap-2 rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5] text-err-text">
+          <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 1 }} />
+          {quotaErr}
+        </div>
+      ) : null}
 
       <div className="mb-5 grid max-w-[720px] grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-[10px]">
         {SIZE_PRESETS.map((p) => {

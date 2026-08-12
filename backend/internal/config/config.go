@@ -42,6 +42,10 @@ type Config struct {
 	SessionIdleTTL     time.Duration
 	SessionAbsoluteTTL time.Duration
 	ReconcilerInterval time.Duration
+	// ReservationTTL bounds how long a pending create reservation may sit before
+	// the reconciler reclaims it (frees the quota a backend that died mid-create
+	// leaked). Default 45m > the 30m clone stepTimeout + margin (ADR-0012 §2.3).
+	ReservationTTL time.Duration
 
 	// Optional flat-rate pricing; all cost UI is hidden when unset.
 	PricingCurrency    string
@@ -128,6 +132,7 @@ func Load() (*Config, error) {
 	cfg.SessionIdleTTL = parseDuration("SESSION_IDLE_TTL", 12*time.Hour, &problems)
 	cfg.SessionAbsoluteTTL = parseDuration("SESSION_ABSOLUTE_TTL", 720*time.Hour, &problems)
 	cfg.ReconcilerInterval = parseDuration("RECONCILER_INTERVAL", 5*time.Minute, &problems)
+	cfg.ReservationTTL = parseDuration("RESERVATION_TTL", 45*time.Minute, &problems)
 	if cfg.InsecureCookies && !cfg.Dev {
 		problems = append(problems, "PROXCLOUD_INSECURE_COOKIES must not be set in production")
 	}

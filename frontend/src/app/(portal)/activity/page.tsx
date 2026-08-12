@@ -1,69 +1,92 @@
 "use client";
-// Activity log — design §3.7: the real cluster task list with live status;
-// clicking a row opens the task-log flyout with the verbatim Proxmox log.
+// Activity log (Phase 4) — the merged timeline: Proxcloud's own audit feed
+// (who did what, with intent+outcome) overlaid with the raw Proxmox task feed.
+// Keyset "Load more" walks older audit rows via ?before=nextBefore. Filters by
+// source (Proxcloud vs Proxmox), project, and outcome. Every value is the
+// backend's — loading / empty / error+retry per DoD.
 import { useState } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { Flyout } from "@/components/ui/Flyout";
-import { StatusDot } from "@/components/ui/StatusDot";
-import { apiFetch } from "@/lib/api/client";
-import type { TaskLog, TaskSummary } from "@/lib/api/generated/types";
-import { useTasks } from "@/lib/api/queries";
-import { useActiveTenantId } from "@/lib/stores/uiStore";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Select } from "@/components/ui/Select";
+import { Mi } from "@/components/ui/icons";
+import type { ActivityEntry } from "@/lib/api/generated/types";
+import { useActivity } from "@/lib/api/quota";
+import { useProjects } from "@/lib/api/tenant";
+import type { ActivityFilters } from "@/lib/api/queryKeys";
+import { actionLabel, sourceLabel, targetLabel } from "@/lib/activity";
 import { formatDateTime, relativeTime } from "@/lib/format";
-import { statusLabel } from "@/lib/status";
 
-function TaskLogFlyout({ task, onClose }: { task: TaskSummary; onClose: () => void }) {
-  const tenantId = useActiveTenantId();
-  const log = useQuery({
-    queryKey: ["task", task.upid, "log"],
-    queryFn: () =>
-      apiFetch<TaskLog>(`/api/tenants/${tenantId}/tasks/${encodeURIComponent(task.upid)}/log?limit=200`),
-    refetchInterval: task.status === "running" ? 2000 : false,
-    enabled: tenantId !== null,
-  });
+// Outcome → dot color, keyed to design status tokens (referenced as CSS vars,
+// not raw hex). audit: pending|success|denied|error · task: running|succeeded|failed
+const OUTCOME_TONE: Record<string, string> = {
+  success: "var(--color-ok)",
+  succeeded: "var(--color-ok)",
+  error: "var(--color-err)",
+  failed: "var(--color-err)",
+  denied: "var(--color-warn)",
+  pending: "var(--color-ink-3)",
+  running: "var(--color-accent)",
+};
 
+function OutcomeChip({ outcome }: { outcome: string }) {
+  const tone = OUTCOME_TONE[outcome] ?? "var(--color-ink-3)";
   return (
-    <Flyout title={task.action} width={440} onClose={onClose}>
-      <div className="mb-3 text-[13px]">
-        <div className="flex py-[2px]">
-          <span className="w-[110px] flex-none text-ink-2">Status</span>
-          <StatusDot status={task.status} label={statusLabel(task.status)} />
-        </div>
-        <div className="flex py-[2px]">
-          <span className="w-[110px] flex-none text-ink-2">Started</span>
-          <span className="tabular-nums">{formatDateTime(task.startedAt)}</span>
-        </div>
-        {task.exitStatus ? (
-          <div className="flex py-[2px]">
-            <span className="w-[110px] flex-none text-ink-2">Exit status</span>
-            <span className={task.status === "failed" ? "text-err-text" : ""}>{task.exitStatus}</span>
-          </div>
-        ) : null}
-        <div className="flex py-[2px]">
-          <span className="w-[110px] flex-none text-ink-2">UPID</span>
-          <span className="font-mono text-[11px] break-all">{task.upid}</span>
-        </div>
-      </div>
-      {log.isPending ? (
-        <Skeleton className="h-40" />
-      ) : log.isError ? (
-        <CardError err={log.error} />
-      ) : (
-        <pre className="rounded-fluent border border-line bg-hover p-3 font-mono text-[12px] leading-[1.5] whitespace-pre-wrap">
-          {log.data.lines.length > 0 ? log.data.lines.map((l) => l.t).join("\n") : "(empty log)"}
-        </pre>
-      )}
-    </Flyout>
+    <span className="inline-flex items-center gap-[6px] rounded-fluent border border-line bg-card px-2 py-[2px] text-[12px] text-ink capitalize">
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: tone }} aria-hidden />
+      {outcome || "—"}
+    </span>
   );
 }
 
+function SourceBadge({ source }: { source: string }) {
+  const proxcloud = source === "audit";
+  return (
+    <span
+      className={`inline-flex items-center rounded-fluent border px-[6px] py-[1px] text-[11px] ${
+        proxcloud ? "border-accent bg-selected text-accent" : "border-line bg-hover text-ink-2"
+      }`}
+    >
+      {sourceLabel(source)}
+    </span>
+  );
+}
+
+function ActivityRow({ entry }: { entry: ActivityEntry }) {
+  return (
+    <tr className="border-b border-line-row last:border-b-0">
+      <td className="h-10 px-4">
+        <SourceBadge source={entry.source} />
+      </td>
+      <td className="px-4">{actionLabel(entry.action)}</td>
+      <td className="px-4 text-ink-2">
+        {targetLabel(entry.targetType, entry.targetId, entry.projectName)}
+      </td>
+      <td className="px-4 text-ink-2">{entry.projectName || "—"}</td>
+      <td className="px-4 text-ink-2">{entry.actor || "—"}</td>
+      <td className="px-4">
+        <OutcomeChip outcome={entry.outcome} />
+      </td>
+      <td className="px-4 text-ink-2 tabular-nums" title={formatDateTime(entry.ts)}>
+        {relativeTime(entry.ts)}
+      </td>
+    </tr>
+  );
+}
+
+const OUTCOMES = ["success", "denied", "error", "pending", "running", "succeeded", "failed"];
+
 export default function ActivityPage() {
-  const tasks = useTasks({});
-  const [open, setOpen] = useState<TaskSummary | null>(null);
+  const [filters, setFilters] = useState<ActivityFilters>({});
+  const activity = useActivity(filters);
+  const projects = useProjects();
+
+  const entries = (activity.data?.pages ?? []).flatMap((p) => p.entries);
+
+  const patch = (f: Partial<ActivityFilters>) => setFilters((prev) => ({ ...prev, ...f }));
 
   return (
     <div className="max-w-[1360px] px-8 pt-5 pb-10">
@@ -74,69 +97,122 @@ export default function ActivityPage() {
       </nav>
       <h1 className="mb-1 text-[24px] font-semibold">Activity log</h1>
       <p className="mb-3 text-[12px] text-ink-2">
-        Control-plane operations on your resources — Proxmox&apos;s own task history, live.
+        Every control-plane action on your resources — Proxcloud&apos;s own audit trail overlaid with
+        Proxmox&apos;s live task history.
       </p>
 
+      {/* Filters */}
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-[12px] text-ink-2">
+          Source
+          <Select
+            value={filters.source ?? ""}
+            aria-label="Filter by source"
+            onChange={(e) => patch({ source: (e.target.value || undefined) as ActivityFilters["source"] })}
+          >
+            <option value="">All</option>
+            <option value="audit">Proxcloud</option>
+            <option value="task">Proxmox</option>
+          </Select>
+        </label>
+
+        <label className="flex items-center gap-2 text-[12px] text-ink-2">
+          Project
+          <Select
+            value={filters.projectId ?? ""}
+            aria-label="Filter by project"
+            onChange={(e) => patch({ projectId: e.target.value || undefined })}
+            disabled={projects.isPending || projects.isError}
+          >
+            <option value="">All projects</option>
+            {(projects.data ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </Select>
+        </label>
+
+        <label className="flex items-center gap-2 text-[12px] text-ink-2">
+          Outcome
+          <Select
+            value={filters.outcome ?? ""}
+            aria-label="Filter by outcome"
+            onChange={(e) => patch({ outcome: e.target.value || undefined })}
+          >
+            <option value="">All</option>
+            {OUTCOMES.map((o) => (
+              <option key={o} value={o}>
+                {o.charAt(0).toUpperCase() + o.slice(1)}
+              </option>
+            ))}
+          </Select>
+        </label>
+
+        <button
+          type="button"
+          onClick={() => activity.refetch()}
+          className="flex h-8 cursor-pointer items-center gap-[6px] border-none bg-transparent px-[10px] text-[13px] text-ink hover:bg-hover"
+        >
+          <Mi name="restart" size={14} />
+          Refresh
+        </button>
+      </div>
+
       <Card>
-        {tasks.isPending ? (
+        {activity.isPending ? (
           <div className="space-y-2 p-4">
             <Skeleton className="h-8" />
             <Skeleton className="h-8" />
             <Skeleton className="h-8" />
           </div>
-        ) : tasks.isError ? (
+        ) : activity.isError ? (
           <div className="p-4">
-            <CardError err={tasks.error} />
+            <CardError err={activity.error} />
+            <div className="mt-3">
+              <Button variant="secondaryCompact" onClick={() => activity.refetch()}>
+                Retry
+              </Button>
+            </div>
           </div>
-        ) : (tasks.data ?? []).length === 0 ? (
-          <p className="p-6 text-[13px] text-ink-2">No recorded tasks.</p>
+        ) : entries.length === 0 ? (
+          <EmptyState
+            icon="clock"
+            title="No activity yet"
+            body="Actions on your resources — creating a guest, editing a quota, running Proxmox tasks — will appear here as they happen."
+          />
         ) : (
-          <table className="w-full border-collapse text-[13px]">
-            <thead>
-              <tr>
-                {["Operation", "Resource", "Initiated by", "Status", "Time"].map((h) => (
-                  <th key={h} className="border-b border-line bg-hover px-4 py-2 text-left font-semibold">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {(tasks.data ?? []).map((t) => (
-                <tr
-                  key={t.upid}
-                  className="cursor-pointer border-b border-line-row last:border-b-0 hover:bg-hover"
-                  onClick={() => setOpen(t)}
-                >
-                  <td className="h-10 px-4">{t.action}</td>
-                  <td className="px-4">
-                    {t.resource ? (
-                      <Link
-                        href={`/resources/${t.resource.node}/${t.resource.type}/${t.resource.vmid}`}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {t.resource.name || `VMID ${t.resource.vmid}`}
-                      </Link>
-                    ) : (
-                      <span className="text-ink-2">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 text-ink-2">{t.user}</td>
-                  <td className="px-4">
-                    <StatusDot
-                      status={t.status === "running" ? "in progress" : t.status}
-                      label={t.status === "running" ? "In progress" : statusLabel(t.status)}
-                    />
-                  </td>
-                  <td className="px-4 text-ink-2 tabular-nums">{relativeTime(t.startedAt)}</td>
+          <>
+            <table className="w-full border-collapse text-[13px]">
+              <thead>
+                <tr>
+                  {["Source", "Operation", "Target", "Project", "Actor", "Outcome", "Time"].map((h) => (
+                    <th key={h} className="border-b border-line bg-hover px-4 py-2 text-left font-semibold">
+                      {h}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {entries.map((e) => (
+                  <ActivityRow key={e.id} entry={e} />
+                ))}
+              </tbody>
+            </table>
+            {activity.hasNextPage ? (
+              <div className="flex justify-center border-t border-line px-4 py-3">
+                <Button
+                  variant="secondaryCompact"
+                  disabled={activity.isFetchingNextPage}
+                  onClick={() => activity.fetchNextPage()}
+                >
+                  {activity.isFetchingNextPage ? "Loading…" : "Load more"}
+                </Button>
+              </div>
+            ) : null}
+          </>
         )}
       </Card>
-
-      {open ? <TaskLogFlyout task={open} onClose={() => setOpen(null)} /> : null}
     </div>
   );
 }

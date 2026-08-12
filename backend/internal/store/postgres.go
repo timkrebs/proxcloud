@@ -514,12 +514,14 @@ func scanProject(row pgx.Row) (*Project, error) {
 
 // created_by is cast to text so a NULL creator scans cleanly into *string.
 const ownershipColumns = `id::text, tenant_id::text, project_id::text, vmid, guest_type,
-	node, created_by::text, status, pve_upid, created_at, updated_at`
+	node, created_by::text, status, pve_upid,
+	reserved_vcpu, reserved_ram_mb, reserved_disk_gb, created_at, updated_at`
 
 func scanOwnership(row pgx.Row) (*ResourceOwnership, error) {
 	var o ResourceOwnership
 	err := row.Scan(&o.ID, &o.TenantID, &o.ProjectID, &o.VMID, &o.GuestType,
-		&o.Node, &o.CreatedBy, &o.Status, &o.PVEUPID, &o.CreatedAt, &o.UpdatedAt)
+		&o.Node, &o.CreatedBy, &o.Status, &o.PVEUPID,
+		&o.ReservedVCPU, &o.ReservedRAMMB, &o.ReservedDiskGB, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -721,14 +723,17 @@ func (s *PgStore) GetOwnershipByVMID(ctx context.Context, vmid int) (*ResourceOw
 	return o, nil
 }
 
-// CreateOwnership implements OwnershipStore. A nil CreatedBy inserts NULL.
+// CreateOwnership implements OwnershipStore. A nil CreatedBy inserts NULL; nil
+// Reserved* columns insert NULL (an active/backfilled row carries no reservation).
 func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) (*ResourceOwnership, error) {
 	const q = `INSERT INTO resource_ownership
-	             (tenant_id, project_id, vmid, guest_type, node, created_by, status)
-	           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7)
+	             (tenant_id, project_id, vmid, guest_type, node, created_by, status,
+	              reserved_vcpu, reserved_ram_mb, reserved_disk_gb)
+	           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7, $8, $9, $10)
 	           RETURNING ` + ownershipColumns
 	o, err := scanOwnership(s.q.QueryRow(ctx, q,
-		p.TenantID, p.ProjectID, p.VMID, p.GuestType, p.Node, p.CreatedBy, p.Status))
+		p.TenantID, p.ProjectID, p.VMID, p.GuestType, p.Node, p.CreatedBy, p.Status,
+		p.ReservedVCPU, p.ReservedRAMMB, p.ReservedDiskGB))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("store: create ownership: %w", ErrConflict)
@@ -834,6 +839,31 @@ func (s *PgStore) ListActiveVMIDs(ctx context.Context) (map[int]bool, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list active vmids: %w", err)
+	}
+	return out, nil
+}
+
+// ListStalePendingOwnership implements OwnershipStore: pending reservations
+// created strictly before olderThan (the reconciler's stale-pending sweep set).
+// Backed by resource_ownership_pending_created_idx (partial index on pending).
+func (s *PgStore) ListStalePendingOwnership(ctx context.Context, olderThan time.Time) ([]ResourceOwnership, error) {
+	const q = `SELECT ` + ownershipColumns + ` FROM resource_ownership
+	           WHERE status = 'pending' AND created_at < $1 ORDER BY created_at`
+	rows, err := s.q.Query(ctx, q, olderThan)
+	if err != nil {
+		return nil, fmt.Errorf("store: list stale pending ownership: %w", err)
+	}
+	defer rows.Close()
+	out := []ResourceOwnership{}
+	for rows.Next() {
+		o, err := scanOwnership(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan ownership: %w", err)
+		}
+		out = append(out, *o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list stale pending ownership: %w", err)
 	}
 	return out, nil
 }

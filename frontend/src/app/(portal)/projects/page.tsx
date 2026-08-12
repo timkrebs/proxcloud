@@ -3,10 +3,12 @@
 // pools. Reader sees the list; Owner gets create / rename / delete. Delete is a
 // typed-name confirmation and is only allowed when the project is empty (the
 // backend re-checks and returns 409 otherwise).
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import Link from "next/link";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
+import { QuotaBars, QuotaBarsCard, allUnlimited } from "@/components/quota/QuotaBars";
+import { QuotaEditorFlyout } from "@/components/quota/QuotaEditorFlyout";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -14,7 +16,14 @@ import { Flyout } from "@/components/ui/Flyout";
 import { Input } from "@/components/ui/Input";
 import { Mi } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
-import type { Project } from "@/lib/api/generated/types";
+import type { Project, QuotaLimits } from "@/lib/api/generated/types";
+import {
+  useAdminTenantQuota,
+  useProjectQuota,
+  usePutAdminTenantQuota,
+  usePutProjectQuota,
+  useTenantQuota,
+} from "@/lib/api/quota";
 import { useMe, useResources } from "@/lib/api/queries";
 import { useCreateProject, useDeleteProject, useProjects, useRenameProject } from "@/lib/api/tenant";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
@@ -208,6 +217,156 @@ function DeleteProjectFlyout({
   );
 }
 
+// ── Quota: directory (tenant) ────────────────────────────────────────────────
+
+/** Platform-admin editor for the tenant-wide quota. */
+function TenantQuotaEditor({ onClose }: { onClose: () => void }) {
+  const q = useAdminTenantQuota();
+  const put = usePutAdminTenantQuota();
+  const [serverError, setServerError] = useState("");
+
+  if (q.isPending || q.isError || !q.data) {
+    return (
+      <Flyout title="Edit directory quota" onClose={onClose}>
+        {q.isError ? (
+          <>
+            <CardError err={q.error} />
+            <div className="mt-3">
+              <Button variant="secondaryCompact" onClick={() => q.refetch()}>
+                Retry
+              </Button>
+            </div>
+          </>
+        ) : (
+          <Skeleton className="h-40" />
+        )}
+      </Flyout>
+    );
+  }
+
+  return (
+    <QuotaEditorFlyout
+      title="Edit directory quota"
+      intro="Platform-admin only. Tenant-wide caps across all projects; leave a field blank for unlimited."
+      current={q.data.limits}
+      pending={put.isPending}
+      serverError={serverError}
+      onSubmit={(body) =>
+        put.mutate(body, { onSuccess: onClose, onError: (err) => setServerError(errText(err)) })
+      }
+      onClose={onClose}
+    />
+  );
+}
+
+function DirectoryQuotaSection({ isAdmin }: { isAdmin: boolean }) {
+  const quota = useTenantQuota();
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="mb-4 max-w-[560px]">
+      <QuotaBarsCard
+        title="Directory quota"
+        subtitle="Tenant-wide limits and live usage across all projects."
+        query={quota}
+        action={
+          isAdmin ? (
+            <Button variant="secondaryCompact" disabled={quota.isPending} onClick={() => setEditing(true)}>
+              Edit
+            </Button>
+          ) : undefined
+        }
+      />
+      {editing ? <TenantQuotaEditor onClose={() => setEditing(false)} /> : null}
+    </div>
+  );
+}
+
+// ── Quota: per-project ───────────────────────────────────────────────────────
+
+function ProjectQuotaEditor({
+  project,
+  current,
+  tenantLimits,
+  onClose,
+}: {
+  project: Project;
+  current: QuotaLimits;
+  tenantLimits: QuotaLimits;
+  onClose: () => void;
+}) {
+  const put = usePutProjectQuota();
+  const [serverError, setServerError] = useState("");
+  return (
+    <QuotaEditorFlyout
+      title={`Quota — ${project.name}`}
+      intro="Subdivide the directory's capacity for this project. Each limit must stay within the tenant limit; leave a field blank for unlimited."
+      current={current}
+      tenantLimits={tenantLimits}
+      pending={put.isPending}
+      serverError={serverError}
+      onSubmit={(body) =>
+        put.mutate(
+          { projectId: project.id, body },
+          { onSuccess: onClose, onError: (err) => setServerError(errText(err)) },
+        )
+      }
+      onClose={onClose}
+    />
+  );
+}
+
+/** Expanded-row body: the project's quota bars + Owner "Edit quota". */
+function ProjectQuotaPanel({ project, canManage }: { project: Project; canManage: boolean }) {
+  const quota = useProjectQuota(project.id);
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="bg-canvas px-4 py-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="w-full max-w-[560px]">
+          {quota.isPending ? (
+            <div className="space-y-3" aria-hidden>
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-6" />
+              ))}
+            </div>
+          ) : quota.isError ? (
+            <div>
+              <CardError err={quota.error} />
+              <div className="mt-2">
+                <Button variant="secondaryCompact" onClick={() => quota.refetch()}>
+                  Retry
+                </Button>
+              </div>
+            </div>
+          ) : quota.data ? (
+            <>
+              {allUnlimited(quota.data.project.limits) ? (
+                <p className="mb-2 text-[12px] text-ink-2">
+                  No project limits set — usage is bounded only by the directory quota.
+                </p>
+              ) : null}
+              <QuotaBars quota={quota.data.project} />
+            </>
+          ) : null}
+        </div>
+        {canManage ? (
+          <Button variant="secondaryCompact" disabled={!quota.data} onClick={() => setEditing(true)}>
+            Edit quota
+          </Button>
+        ) : null}
+      </div>
+      {editing && quota.data ? (
+        <ProjectQuotaEditor
+          project={project}
+          current={quota.data.project.limits}
+          tenantLimits={quota.data.tenant.limits}
+          onClose={() => setEditing(false)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 type Dialog =
@@ -222,9 +381,19 @@ export default function ProjectsPage() {
   const projects = useProjects();
   const resources = useResources();
   const [dialog, setDialog] = useState<Dialog>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
+  const isAdmin = !!me.data?.isPlatformAdmin;
   const tenantRole = me.data?.tenants.find((t) => t.id === activeTenantId)?.role;
-  const canManage = !!me.data?.isPlatformAdmin || tenantRole === "owner";
+  const canManage = isAdmin || tenantRole === "owner";
+
+  const toggleExpanded = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // Per-project active-resource count, used to gate deletion (empty-only).
   const countKnown = !resources.isPending && !resources.isError;
@@ -248,6 +417,8 @@ export default function ProjectsPage() {
         Resource groups in your directory — each backed by a Proxmox pool. Resources are created into
         a project from the wizard.
       </p>
+
+      <DirectoryQuotaSection isAdmin={isAdmin} />
 
       <div className="mb-3 flex items-center border-b border-line">
         <button
@@ -301,11 +472,11 @@ export default function ProjectsPage() {
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr>
-                {["Name", "Slug", "Pool", "Resources", "Created", ""].map((h, i) => (
+                {["", "Name", "Slug", "Pool", "Resources", "Created", ""].map((h, i) => (
                   <th
                     key={h || `col-${i}`}
                     className={`border-b border-line bg-hover px-4 py-2 font-semibold ${
-                      i === 5 ? "text-right" : "text-left"
+                      i === 6 ? "text-right" : "text-left"
                     }`}
                   >
                     {h}
@@ -316,31 +487,52 @@ export default function ProjectsPage() {
             <tbody>
               {(projects.data ?? []).map((p) => {
                 const count = countByProject[p.id] ?? 0;
+                const open = expanded.has(p.id);
                 return (
-                  <tr key={p.id} className="border-b border-line-row last:border-b-0">
-                    <td className="h-10 px-4 font-semibold">{p.name}</td>
-                    <td className="px-4 font-mono text-ink-2">{p.slug}</td>
-                    <td className="px-4 font-mono text-ink-2">{p.poolId}</td>
-                    <td className="px-4 text-ink-2 tabular-nums">{countKnown ? count : "…"}</td>
-                    <td className="px-4 text-ink-2 tabular-nums">{relativeTime(p.createdAt)}</td>
-                    <td className="px-4 text-right">
-                      {canManage ? (
-                        <span className="inline-flex gap-1">
-                          <Button variant="link" onClick={() => setDialog({ mode: "rename", project: p })}>
-                            Rename
-                          </Button>
-                          <span className="text-line" aria-hidden>
-                            ·
+                  <Fragment key={p.id}>
+                    <tr className="border-b border-line-row last:border-b-0">
+                      <td className="w-8 px-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(p.id)}
+                          aria-expanded={open}
+                          aria-label={open ? `Hide quota for ${p.name}` : `Show quota for ${p.name}`}
+                          className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-fluent text-ink-2 hover:bg-hover"
+                        >
+                          <Mi name={open ? "chevronDown" : "chevronLeft"} size={14} color="currentColor" />
+                        </button>
+                      </td>
+                      <td className="h-10 px-4 font-semibold">{p.name}</td>
+                      <td className="px-4 font-mono text-ink-2">{p.slug}</td>
+                      <td className="px-4 font-mono text-ink-2">{p.poolId}</td>
+                      <td className="px-4 text-ink-2 tabular-nums">{countKnown ? count : "…"}</td>
+                      <td className="px-4 text-ink-2 tabular-nums">{relativeTime(p.createdAt)}</td>
+                      <td className="px-4 text-right">
+                        {canManage ? (
+                          <span className="inline-flex gap-1">
+                            <Button variant="link" onClick={() => setDialog({ mode: "rename", project: p })}>
+                              Rename
+                            </Button>
+                            <span className="text-line" aria-hidden>
+                              ·
+                            </span>
+                            <Button variant="link" onClick={() => setDialog({ mode: "delete", project: p })}>
+                              Delete
+                            </Button>
                           </span>
-                          <Button variant="link" onClick={() => setDialog({ mode: "delete", project: p })}>
-                            Delete
-                          </Button>
-                        </span>
-                      ) : (
-                        <span className="text-ink-3">—</span>
-                      )}
-                    </td>
-                  </tr>
+                        ) : (
+                          <span className="text-ink-3">—</span>
+                        )}
+                      </td>
+                    </tr>
+                    {open ? (
+                      <tr className="border-b border-line-row last:border-b-0">
+                        <td colSpan={7} className="p-0">
+                          <ProjectQuotaPanel project={p} canManage={canManage} />
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 );
               })}
             </tbody>

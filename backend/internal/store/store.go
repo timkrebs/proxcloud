@@ -50,6 +50,7 @@ type Store interface {
 	TenantStore
 	ProjectStore
 	OwnershipStore
+	QuotaStore
 }
 
 // UserStore is the users aggregate.
@@ -130,6 +131,48 @@ type OwnershipStore interface {
 	// or pending; tombstoned excluded). Drives the backfill/reconciler's
 	// "already owned?" check in one query.
 	ListActiveVMIDs(ctx context.Context) (map[int]bool, error)
+	// ListStalePendingOwnership returns pending reservation rows created strictly
+	// before olderThan — the Phase-4 reconciler's stale-pending sweep set (a
+	// backend that died mid-create leaves a pending row that leaks quota forever
+	// without this). Parameterized on the cutoff; ordered by created_at.
+	ListStalePendingOwnership(ctx context.Context, olderThan time.Time) ([]ResourceOwnership, error)
+}
+
+// QuotaStore is the quotas + reservation + audit aggregate (ADR-0009/0010/0012).
+// Usage is a Go aggregation over one tenant-filtered ownership SELECT joined to
+// a caller-supplied ClusterResources snapshot — there is no drift-prone counter.
+type QuotaStore interface {
+	// GetQuota returns the stored limits for a scope ("tenant"|"project"), or
+	// ErrNotFound — which the caller treats as all-unlimited (no cap on any
+	// dimension), never as an error.
+	GetQuota(ctx context.Context, scopeType, scopeID string) (*Quota, error)
+	// UpsertQuota inserts or replaces a scope's limits (INSERT … ON CONFLICT
+	// (scope_type, scope_id) DO UPDATE) and returns the stored row. A nil limit
+	// field clears that dimension (→ unlimited).
+	UpsertQuota(ctx context.Context, p UpsertQuotaParams) (*Quota, error)
+	// ComputeUsage aggregates a tenant's live usage from one tenant-filtered
+	// SELECT of active+pending ownership rows joined to snapshot: an active row
+	// reads snapshot[vmid] (absent ⇒ 0, no count); a pending row reads its
+	// reserved_* columns (always counted). Returns the tenant total plus a
+	// per-project breakdown (ADR-0012 §1.3).
+	ComputeUsage(ctx context.Context, tenantID string, snapshot map[int]Alloc) (tenant QuotaUsage, byProject map[string]QuotaUsage, err error)
+	// ReserveOwnership is the concurrency-safe create reservation (ADR-0012 §2).
+	// It runs its own WithTx + AdvisoryLock(AdvisoryKeyTenant(tenantID)), re-reads
+	// active+pending usage under the lock, checks each non-null dimension of the
+	// project AND tenant quota (usage+delta ≤ limit) — first violation →
+	// ErrQuotaExceeded — then inserts the pending row with reserved_* set
+	// (duplicate VMID → ErrConflict). Commit releases the lock.
+	ReserveOwnership(ctx context.Context, p ReserveOwnershipParams) (*ResourceOwnership, error)
+	// InsertAuditIntent writes a fail-closed intent row (outcome "pending") at the
+	// audit choke-point and returns its id (ADR-0012 §3). It is one of the only
+	// two permitted audit mutations.
+	InsertAuditIntent(ctx context.Context, a AuditIntent) (id string, err error)
+	// FinalizeAudit performs the one-way outcome/detail finalize on the middleware's
+	// own intent row — the only other permitted audit mutation. No general
+	// UPDATE/DELETE is exposed, so who/what/when stays immutable.
+	FinalizeAudit(ctx context.Context, id, outcome string, detail []byte) error
+	// ListAudit returns a tenant's audit rows, keyset-paginated by (ts, id) DESC.
+	ListAudit(ctx context.Context, q AuditQuery) ([]AuditEntry, error)
 }
 
 // SessionStore is the server-side sessions aggregate.
@@ -222,15 +265,89 @@ type CreateProjectParams struct {
 
 // CreateOwnershipParams are the inputs to CreateOwnership. Status is "pending"
 // (a create reservation) or "active" (backfill of an existing guest); CreatedBy
-// is nil for backfilled/system-claimed rows.
+// is nil for backfilled/system-claimed rows. The Reserved* fields are the
+// provisioned allocation of a pending reservation (ADR-0012 §2); nil for
+// backfilled/active rows whose usage reads the live snapshot instead.
 type CreateOwnershipParams struct {
+	TenantID       string
+	ProjectID      string
+	VMID           int
+	GuestType      string // "qemu" | "lxc"
+	Node           string
+	CreatedBy      *string
+	Status         string // "pending" | "active"
+	ReservedVCPU   *int
+	ReservedRAMMB  *int64
+	ReservedDiskGB *int64
+}
+
+// Alloc is a single guest's resource allocation, in quota units and PVE-free:
+// the handler fills it from a ClusterResources snapshot (MaxCPU cores, MaxMem→MB,
+// MaxDisk→GB provisioned) so the store aggregates without importing proxmox.
+type Alloc struct {
+	VCPU   int
+	RAMMB  int64
+	DiskGB int64
+}
+
+// QuotaUsage is aggregated live usage for a scope. Sums PROVISIONED allocations
+// (ADR-0012 §4): active guests from the snapshot, pending reservations from
+// reserved_*.
+type QuotaUsage struct {
+	VCPU   int
+	RAMMB  int64
+	DiskGB int64
+	Count  int
+}
+
+// UpsertQuotaParams are the inputs to UpsertQuota. A nil limit clears that
+// dimension (→ unlimited).
+type UpsertQuotaParams struct {
+	ScopeType string // "tenant" | "project"
+	ScopeID   string
+	MaxVCPU   *int
+	MaxRAMMB  *int64
+	MaxDiskGB *int64
+	MaxCount  *int
+}
+
+// ReserveOwnershipParams are the inputs to ReserveOwnership. Reserved is the
+// requested delta for this create; Snapshot is the active-guest allocation map
+// fetched from ClusterResources BEFORE the lock (so no PVE round-trip is ever
+// held under the advisory lock — ADR-0009).
+type ReserveOwnershipParams struct {
 	TenantID  string
 	ProjectID string
 	VMID      int
 	GuestType string // "qemu" | "lxc"
 	Node      string
 	CreatedBy *string
-	Status    string // "pending" | "active"
+	Reserved  Alloc
+	Snapshot  map[int]Alloc
+}
+
+// AuditIntent is the fail-closed intent row written before a mutation runs
+// (outcome defaults to "pending"). ProjectID is nil at tenant level; TargetType/
+// TargetID are nil for creates whose id is not yet known.
+type AuditIntent struct {
+	ActorUserID *string
+	TenantID    *string
+	ProjectID   *string
+	Action      string
+	TargetType  *string
+	TargetID    *string
+	IP          *string
+}
+
+// AuditQuery filters the audit spine. TenantID is required (tenant filter in SQL);
+// Before is the keyset cursor (rows strictly older than it); ProjectID/Outcome are
+// optional narrowing filters; Limit is clamped by the caller.
+type AuditQuery struct {
+	TenantID  string
+	Before    *time.Time
+	Limit     int
+	ProjectID string // "" = no project filter
+	Outcome   string // "" = no outcome filter
 }
 
 // TenantWithRole is a tenant plus the requesting user's highest role anywhere
@@ -297,8 +414,13 @@ type ResourceOwnership struct {
 	CreatedBy *string
 	Status    string // "pending" | "active" | "tombstoned"
 	PVEUPID   *string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// Provisioned allocation of a pending reservation (ADR-0012 §2). Nil for
+	// active/backfilled rows, whose usage is read from the live snapshot.
+	ReservedVCPU   *int
+	ReservedRAMMB  *int64
+	ReservedDiskGB *int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Quota holds per-scope limits; a nil field means unlimited.

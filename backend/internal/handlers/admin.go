@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/auditz"
 	"github.com/timkrebs9/proxcloud/backend/internal/bootstrap"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
@@ -35,7 +36,8 @@ func (d *Deps) ListTenantsAdmin(w http.ResponseWriter, r *http.Request) {
 // it also creates a "default" project + its Proxmox pool so the tenant is usable
 // immediately.
 func (d *Deps) CreateTenantAdmin(w http.ResponseWriter, r *http.Request) {
-	if !d.requireStore(w) {
+	id, ok := requireIdentity(w, r)
+	if !ok || !d.requireStore(w) {
 		return
 	}
 	var req types.CreateTenantRequest
@@ -73,10 +75,29 @@ func (d *Deps) CreateTenantAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This route is mounted under MountAdmin (no AuditOnMutation), so the create is
+	// audited here (`tenant.create`). Fail-closed intent BEFORE the create: an
+	// intent-insert failure refuses the create, so a tenant is never created
+	// unlogged. The tenant does not exist yet and audit_log.tenant_id FKs tenants,
+	// so tenant_id/target_id stay NULL on the intent — the created tenant is
+	// identified by the (unique) slug in the finalize detail, mirroring how
+	// guest.create records its vmid in detail rather than a pre-known column.
+	pending, err := d.auditz().Begin(r.Context(), auditz.Intent{
+		Action:      "tenant.create",
+		ActorUserID: id.UserID,
+		TargetType:  "tenant",
+		IP:          remoteIP(r),
+	})
+	if err != nil {
+		d.logger().Error("audit intent for tenant.create failed — mutation refused", "slug", slug, "err", err)
+		httpserver.WriteError(w, &types.APIError{Code: "internal", Message: "internal server error", Status: http.StatusInternalServerError})
+		return
+	}
+
 	// Tenant + its default project commit atomically: a project failure can never
 	// orphan a committed tenant.
 	var tenant *store.Tenant
-	err := d.Store.WithTx(r.Context(), func(tx store.Store) error {
+	err = d.Store.WithTx(r.Context(), func(tx store.Store) error {
 		t, err := tx.CreateTenant(r.Context(), store.CreateTenantParams{Name: name, Slug: slug})
 		if err != nil {
 			return err
@@ -89,12 +110,15 @@ func (d *Deps) CreateTenantAdmin(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
+			pending.Finalize(r.Context(), "denied", map[string]any{"status": http.StatusConflict, "slug": slug})
 			httpserver.WriteError(w, &types.APIError{Code: "conflict", Message: "A tenant with that name already exists.", Status: http.StatusConflict})
 			return
 		}
 		d.logger().Error("create tenant", "slug", slug, "err", err)
+		pending.Finalize(r.Context(), "error", map[string]any{"status": http.StatusInternalServerError, "slug": slug})
 		httpserver.WriteError(w, &types.APIError{Code: "internal", Message: "Failed to create the tenant.", Status: http.StatusInternalServerError})
 		return
 	}
+	pending.Finalize(r.Context(), "success", map[string]any{"status": http.StatusCreated, "slug": slug})
 	httpserver.WriteJSON(w, http.StatusCreated, toTenant(tenant))
 }

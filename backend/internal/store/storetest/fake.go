@@ -8,6 +8,7 @@ package storetest
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,8 @@ type Fake struct {
 	tenants     map[string]*store.Tenant         // by id
 	projects    map[string]*store.Project        // by id
 	ownership   map[int]*store.ResourceOwnership // by vmid
+	quotas      map[string]*store.Quota          // by scopeType+"|"+scopeID
+	audit       []*store.AuditEntry              // append-only; newest last
 }
 
 var _ store.Store = (*Fake)(nil)
@@ -44,6 +47,8 @@ func New() *Fake {
 		tenants:     map[string]*store.Tenant{},
 		projects:    map[string]*store.Project{},
 		ownership:   map[int]*store.ResourceOwnership{},
+		quotas:      map[string]*store.Quota{},
+		audit:       []*store.AuditEntry{},
 	}
 }
 
@@ -112,6 +117,34 @@ func (f *Fake) AddOwnership(tenantID, projectID string, vmid int, guestType, nod
 	return id
 }
 
+// AddPendingReservation seeds a pending ownership row carrying a reserved
+// allocation (what ReserveOwnership would have inserted) and returns its id — a
+// convenience for ComputeUsage/quota tests.
+func (f *Fake) AddPendingReservation(tenantID, projectID string, vmid int, guestType, node string, vcpu int, ramMB, diskGB int64) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.next("own")
+	rv, rr, rd := vcpu, ramMB, diskGB
+	f.ownership[vmid] = &store.ResourceOwnership{
+		ID: id, TenantID: tenantID, ProjectID: projectID, VMID: vmid, GuestType: guestType,
+		Node: node, Status: "pending", ReservedVCPU: &rv, ReservedRAMMB: &rr, ReservedDiskGB: &rd,
+		CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	return id
+}
+
+// AddQuota seeds (or replaces) a scope's stored limits. Nil pointers leave that
+// dimension unlimited.
+func (f *Fake) AddQuota(scopeType, scopeID string, maxVCPU *int, maxRAMMB, maxDiskGB *int64, maxCount *int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quotas[scopeType+"|"+scopeID] = &store.Quota{
+		ID: f.next("quota"), ScopeType: scopeType, ScopeID: scopeID,
+		MaxVCPU: maxVCPU, MaxRAMMB: maxRAMMB, MaxDiskGB: maxDiskGB, MaxCount: maxCount,
+		CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+}
+
 // AddSession seeds a live session for userID with the given raw token and active
 // tenant, and returns the session id.
 func (f *Fake) AddSession(userID, tokenHash string, activeTenant *string) string {
@@ -140,7 +173,7 @@ func (f *Fake) OwnershipStatus(vmid int) string {
 // --- base ---
 
 func (f *Fake) Ping(context.Context) error                { return nil }
-func (f *Fake) RunMigrations() (uint, error)              { return 2, nil }
+func (f *Fake) RunMigrations() (uint, error)              { return 3, nil }
 func (f *Fake) AdvisoryLock(context.Context, int64) error { return nil }
 
 // WithTx snapshots the aggregates the Create* helpers mutate (additively) and
@@ -673,6 +706,260 @@ func (f *Fake) ListActiveVMIDs(context.Context) (map[int]bool, error) {
 			out[vmid] = true
 		}
 	}
+	return out, nil
+}
+
+func (f *Fake) ListStalePendingOwnership(_ context.Context, olderThan time.Time) ([]store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListStalePendingOwnership"); err != nil {
+		return nil, err
+	}
+	out := []store.ResourceOwnership{}
+	for _, o := range f.ownership {
+		if o.Status == "pending" && o.CreatedAt.Before(olderThan) {
+			out = append(out, *o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+// --- quotas + reservation + audit (Phase 4) ---
+
+func (f *Fake) GetQuota(_ context.Context, scopeType, scopeID string) (*store.Quota, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetQuota"); err != nil {
+		return nil, err
+	}
+	if q, ok := f.quotas[scopeType+"|"+scopeID]; ok {
+		c := *q
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) UpsertQuota(_ context.Context, p store.UpsertQuotaParams) (*store.Quota, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertQuota"); err != nil {
+		return nil, err
+	}
+	key := p.ScopeType + "|" + p.ScopeID
+	q, ok := f.quotas[key]
+	if !ok {
+		q = &store.Quota{ID: f.next("quota"), ScopeType: p.ScopeType, ScopeID: p.ScopeID, CreatedAt: f.Now()}
+		f.quotas[key] = q
+	}
+	q.MaxVCPU, q.MaxRAMMB, q.MaxDiskGB, q.MaxCount = p.MaxVCPU, p.MaxRAMMB, p.MaxDiskGB, p.MaxCount
+	q.UpdatedAt = f.Now()
+	c := *q
+	return &c, nil
+}
+
+// computeUsageLocked mirrors PgStore.ComputeUsage in memory. Caller holds f.mu.
+func (f *Fake) computeUsageLocked(tenantID string, snapshot map[int]store.Alloc) (store.QuotaUsage, map[string]store.QuotaUsage) {
+	byProject := map[string]store.QuotaUsage{}
+	var tenant store.QuotaUsage
+	for vmid, o := range f.ownership {
+		if o.TenantID != tenantID {
+			continue
+		}
+		var a store.Alloc
+		switch o.Status {
+		case "active":
+			al, ok := snapshot[vmid]
+			if !ok {
+				continue
+			}
+			a = al
+		case "pending":
+			if o.ReservedVCPU != nil {
+				a.VCPU = *o.ReservedVCPU
+			}
+			if o.ReservedRAMMB != nil {
+				a.RAMMB = *o.ReservedRAMMB
+			}
+			if o.ReservedDiskGB != nil {
+				a.DiskGB = *o.ReservedDiskGB
+			}
+		default:
+			continue
+		}
+		pu := byProject[o.ProjectID]
+		pu.VCPU += a.VCPU
+		pu.RAMMB += a.RAMMB
+		pu.DiskGB += a.DiskGB
+		pu.Count++
+		byProject[o.ProjectID] = pu
+		tenant.VCPU += a.VCPU
+		tenant.RAMMB += a.RAMMB
+		tenant.DiskGB += a.DiskGB
+		tenant.Count++
+	}
+	return tenant, byProject
+}
+
+func (f *Fake) ComputeUsage(_ context.Context, tenantID string, snapshot map[int]store.Alloc) (store.QuotaUsage, map[string]store.QuotaUsage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ComputeUsage"); err != nil {
+		return store.QuotaUsage{}, nil, err
+	}
+	tenant, byProject := f.computeUsageLocked(tenantID, snapshot)
+	return tenant, byProject, nil
+}
+
+// checkQuotaFake mirrors store.checkQuota (unexported there) for the fake's
+// in-memory reservation path.
+func checkQuotaFake(scope string, q *store.Quota, usage store.QuotaUsage, delta store.Alloc) error {
+	if q == nil {
+		return nil
+	}
+	if q.MaxVCPU != nil && usage.VCPU+delta.VCPU > *q.MaxVCPU {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "vcpu", Limit: int64(*q.MaxVCPU), Used: int64(usage.VCPU), Requested: int64(delta.VCPU)}
+	}
+	if q.MaxRAMMB != nil && usage.RAMMB+delta.RAMMB > *q.MaxRAMMB {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "ram_mb", Limit: *q.MaxRAMMB, Used: usage.RAMMB, Requested: delta.RAMMB}
+	}
+	if q.MaxDiskGB != nil && usage.DiskGB+delta.DiskGB > *q.MaxDiskGB {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "disk_gb", Limit: *q.MaxDiskGB, Used: usage.DiskGB, Requested: delta.DiskGB}
+	}
+	if q.MaxCount != nil && usage.Count+1 > *q.MaxCount {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "count", Limit: int64(*q.MaxCount), Used: int64(usage.Count), Requested: 1}
+	}
+	return nil
+}
+
+// ReserveOwnership mirrors the real store's reservation semantics in memory (the
+// AdvisoryLock no-op means the true race guard is proven against Postgres, not
+// here). It computes usage in-memory, enforces the same project-then-tenant
+// checks, and inserts the pending row (duplicate VMID → ErrConflict).
+func (f *Fake) ReserveOwnership(_ context.Context, p store.ReserveOwnershipParams) (*store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ReserveOwnership"); err != nil {
+		return nil, err
+	}
+	tenantUsage, byProject := f.computeUsageLocked(p.TenantID, p.Snapshot)
+	if err := checkQuotaFake("project", f.quotas["project|"+p.ProjectID], byProject[p.ProjectID], p.Reserved); err != nil {
+		return nil, err
+	}
+	if err := checkQuotaFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, p.Reserved); err != nil {
+		return nil, err
+	}
+	if _, ok := f.ownership[p.VMID]; ok {
+		return nil, fmt.Errorf("reserve ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+	}
+	id := f.next("own")
+	rv, rr, rd := p.Reserved.VCPU, p.Reserved.RAMMB, p.Reserved.DiskGB
+	o := &store.ResourceOwnership{
+		ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID, GuestType: p.GuestType,
+		Node: p.Node, CreatedBy: p.CreatedBy, Status: "pending",
+		ReservedVCPU: &rv, ReservedRAMMB: &rr, ReservedDiskGB: &rd,
+		CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	f.ownership[p.VMID] = o
+	c := *o
+	return &c, nil
+}
+
+func (f *Fake) InsertAuditIntent(_ context.Context, a store.AuditIntent) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("InsertAuditIntent"); err != nil {
+		return "", err
+	}
+	id := f.next("audit")
+	f.audit = append(f.audit, &store.AuditEntry{
+		ID: id, TS: f.Now(), ActorUserID: a.ActorUserID, TenantID: a.TenantID, ProjectID: a.ProjectID,
+		Action: a.Action, TargetType: a.TargetType, TargetID: a.TargetID, Outcome: "pending", IP: a.IP,
+	})
+	return id, nil
+}
+
+func (f *Fake) FinalizeAudit(_ context.Context, id, outcome string, detail []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("FinalizeAudit"); err != nil {
+		return err
+	}
+	for _, e := range f.audit {
+		if e.ID == id {
+			e.Outcome = outcome
+			e.Detail = detail
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+// AllAudit returns a copy of every audit row (test convenience). Unlike ListAudit
+// it ignores the tenant filter, so rows with a nil tenant_id — e.g. tenant.create
+// intents written before the tenant exists — are visible for assertions.
+func (f *Fake) AllAudit() []store.AuditEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.AuditEntry, 0, len(f.audit))
+	for _, e := range f.audit {
+		out = append(out, *e)
+	}
+	return out
+}
+
+// AddAuditEntry seeds a finalized audit row directly (test convenience; bypasses
+// the intent/finalize flow). ts orders the row on the spine.
+func (f *Fake) AddAuditEntry(e store.AuditEntry) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e.ID == "" {
+		e.ID = f.next("audit")
+	}
+	c := e
+	f.audit = append(f.audit, &c)
+	return e.ID
+}
+
+func (f *Fake) ListAudit(_ context.Context, aq store.AuditQuery) ([]store.AuditEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListAudit"); err != nil {
+		return nil, err
+	}
+	// Copy matching rows, then sort ts DESC, id DESC, then apply limit — mirroring
+	// the SQL keyset order.
+	var matched []store.AuditEntry
+	for _, e := range f.audit {
+		if e.TenantID == nil || *e.TenantID != aq.TenantID {
+			continue
+		}
+		if aq.Before != nil && !e.TS.Before(*aq.Before) {
+			continue
+		}
+		if aq.ProjectID != "" && (e.ProjectID == nil || *e.ProjectID != aq.ProjectID) {
+			continue
+		}
+		if aq.Outcome != "" && e.Outcome != aq.Outcome {
+			continue
+		}
+		matched = append(matched, *e)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].TS.Equal(matched[j].TS) {
+			return matched[i].TS.After(matched[j].TS)
+		}
+		return matched[i].ID > matched[j].ID
+	})
+	limit := aq.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	out := []store.AuditEntry{}
+	out = append(out, matched...)
 	return out, nil
 }
 

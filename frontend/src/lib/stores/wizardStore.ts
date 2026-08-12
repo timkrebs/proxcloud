@@ -4,7 +4,7 @@
 // internal/deploy/params.go; the server re-validates everything.
 import { create } from "zustand";
 
-import type { CreateGuestRequest } from "@/lib/api/generated/types";
+import type { CreateGuestRequest, ProjectQuotaResponse } from "@/lib/api/generated/types";
 
 export type WizardKind = "qemu" | "lxc";
 export type SourceMode = "iso" | "vztmpl" | "clone";
@@ -130,8 +130,51 @@ export interface WizardError {
   message: string;
 }
 
-/** Full validation across tabs; mirrors backend deploy.Validate. */
-export function validateWizard(s: WizardState, existingVmids: number[] = []): WizardError[] {
+/**
+ * Effective remaining quota per dimension for the picked project. null = no cap
+ * on that dimension (unlimited). Wire units: ramMb is MiB, diskGb is GiB — the
+ * same units the wizard's memoryMb/diskGb fields use, so comparisons are direct.
+ */
+export interface QuotaRemaining {
+  vcpu: number | null;
+  ramMb: number | null;
+  diskGb: number | null;
+  count: number | null;
+}
+
+/**
+ * The wizard must respect the tighter of project vs tenant remaining. Remaining
+ * on a dimension is only meaningful where that scope actually sets a limit
+ * (QuotaWithUsage.remaining is 0 elsewhere), so we min only over scopes that
+ * have a non-null limit; if neither caps the dimension it stays unlimited.
+ */
+export function effectiveRemaining(resp: ProjectQuotaResponse): QuotaRemaining {
+  const dim = (projHas: boolean, projRem: number, tenHas: boolean, tenRem: number): number | null => {
+    const vals: number[] = [];
+    if (projHas) vals.push(projRem);
+    if (tenHas) vals.push(tenRem);
+    return vals.length === 0 ? null : Math.min(...vals);
+  };
+  const p = resp.project;
+  const t = resp.tenant;
+  return {
+    vcpu: dim(p.limits.maxVcpu != null, p.remaining.vcpu, t.limits.maxVcpu != null, t.remaining.vcpu),
+    ramMb: dim(p.limits.maxRamMb != null, p.remaining.ramMb, t.limits.maxRamMb != null, t.remaining.ramMb),
+    diskGb: dim(p.limits.maxDiskGb != null, p.remaining.diskGb, t.limits.maxDiskGb != null, t.remaining.diskGb),
+    count: dim(p.limits.maxCount != null, p.remaining.count, t.limits.maxCount != null, t.remaining.count),
+  };
+}
+
+/**
+ * Full validation across tabs; mirrors backend deploy.Validate. `remaining`, when
+ * supplied, adds fast client-side over-quota checks on the Size tab (the backend
+ * reservation still enforces authoritatively — this is just early feedback).
+ */
+export function validateWizard(
+  s: WizardState,
+  existingVmids: number[] = [],
+  remaining: QuotaRemaining | null = null,
+): WizardError[] {
   const errs: WizardError[] = [];
   const kindLabel = s.kind === "qemu" ? "Virtual machine" : "Container";
 
@@ -199,6 +242,50 @@ export function validateWizard(s: WizardState, existingVmids: number[] = []): Wi
       errs.push({ tab: 5, field: "tags", message: `Invalid tag "${t}" — lowercase letters, digits, . - _ only (Tags).` });
     }
   }
+
+  // Over-quota checks (Size tab) — client-side fast feedback; the backend
+  // reservation is authoritative. Each dimension is only checked where the
+  // project/tenant actually sets a cap (remaining non-null).
+  if (remaining) {
+    if (remaining.count != null && remaining.count < 1) {
+      errs.push({
+        tab: 2,
+        field: "quota",
+        message: "This project's guest-count quota is exhausted — free a guest or raise the quota (Size).",
+      });
+    }
+    // For clones the reservation delta is the SOURCE template's allocation
+    // (server-authoritative), not the wizard's cores/memory/disk — so skip the
+    // per-dimension client checks for clones and let the server's 409 speak.
+    // (The count check above still applies: a clone adds one guest.)
+    if (s.sourceMode !== "clone") {
+      const rc = Number(s.cores);
+      if (remaining.vcpu != null && Number.isInteger(rc) && rc > remaining.vcpu) {
+        errs.push({
+          tab: 2,
+          field: "cores",
+          message: `Only ${remaining.vcpu} vCPU remaining in this project's quota (Size).`,
+        });
+      }
+      const rm = Number(s.memoryMb);
+      if (remaining.ramMb != null && Number.isInteger(rm) && rm > remaining.ramMb) {
+        errs.push({
+          tab: 2,
+          field: "memoryMb",
+          message: `Only ${remaining.ramMb} MiB of memory remaining in this project's quota (Size).`,
+        });
+      }
+      const rd = Number(s.diskGb);
+      if (remaining.diskGb != null && Number.isInteger(rd) && rd > remaining.diskGb) {
+        errs.push({
+          tab: 2,
+          field: "diskGb",
+          message: `Only ${remaining.diskGb} GiB of disk remaining in this project's quota (Size).`,
+        });
+      }
+    }
+  }
+
   return errs;
 }
 

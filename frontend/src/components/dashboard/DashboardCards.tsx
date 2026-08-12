@@ -6,11 +6,13 @@ import Link from "next/link";
 
 import { Card } from "@/components/ui/Card";
 import { ProgressBar } from "@/components/ui/ProgressBar";
+import { QuotaBarsCard } from "@/components/quota/QuotaBars";
 import { Sparkline } from "@/components/ui/Sparkline";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi, Svc, type SvcName } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
 import type { GuestSummary } from "@/lib/api/generated/types";
+import { useTenantQuota } from "@/lib/api/quota";
 import { useCluster, useHealth, useMe, useNodeMetrics, useNodes, usePricing, useResources } from "@/lib/api/queries";
 import { useTenantSummary } from "@/lib/api/tenant";
 import { formatBytesPair, formatMoney, formatPct, formatUptime, relativeTime } from "@/lib/format";
@@ -347,6 +349,19 @@ export function TenantSummaryCard() {
         </div>
       )}
     </Card>
+  );
+}
+
+// ── tenant quota bars (Phase 4; tenant dashboard, read-only) ─────────────────
+
+export function TenantQuotaCard() {
+  const quota = useTenantQuota();
+  return (
+    <QuotaBarsCard
+      title="Directory quota"
+      subtitle="Tenant-wide limits and live usage across all your projects."
+      query={quota}
+    />
   );
 }
 

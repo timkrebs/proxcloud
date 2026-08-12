@@ -3,6 +3,38 @@
 // Regenerate: cd backend && go run github.com/gzuidhof/tygo generate
 
 //////////
+// source: activity.go
+
+/**
+ * ActivityEntry is one row of the merged activity timeline: the audit intent feed
+ * (Proxcloud actions) overlaid with the PVE task feed (raw Proxmox operations),
+ * both normalized to a common shape.
+ */
+export interface ActivityEntry {
+  id: string; // audit uuid, or "task:"+upid
+  source: string; // "audit" | "task"
+  ts: string /* RFC3339 */;
+  actor: string; // display name/email; "system" for reconciler
+  action: string; // "guest.create", "project.rename", PVE label…
+  targetType: string; // "guest"|"project"|"tenant"|"member"|"quota"|""
+  targetId: string; // vmid / projectId / ""
+  outcome: string; // audit: pending|success|denied|error · task: running|succeeded|failed
+  projectId: string;
+  projectName: string;
+  upid?: string; // task rows only
+  detail?: any /* json.RawMessage */; // audit detail passthrough
+}
+/**
+ * ActivityPage is one keyset page of the activity timeline. NextBefore is passed
+ * back as ?before= to fetch the next (older) page; nil when no older audit rows
+ * remain.
+ */
+export interface ActivityPage {
+  entries: ActivityEntry[];
+  nextBefore?: string /* RFC3339 */;
+}
+
+//////////
 // source: auth.go
 
 /**
@@ -569,6 +601,60 @@ export interface Pricing {
   vcpuMonth: number /* float64 */;
   ramGbMonth: number /* float64 */;
   diskGbMonth: number /* float64 */;
+}
+
+//////////
+// source: quota.go
+
+/**
+ * QuotaLimits are a scope's per-dimension caps. A nil pointer means unlimited on
+ * that dimension (the frontend renders "Unlimited", no bar).
+ */
+export interface QuotaLimits {
+  maxVcpu?: number /* int */;
+  maxRamMb?: number /* int64 */;
+  maxDiskGb?: number /* int64 */;
+  maxCount?: number /* int */;
+}
+/**
+ * QuotaUsage is a scope's live usage. It sums PROVISIONED allocations (ADR-0012
+ * §4): active guests from ClusterResources (MaxCPU / MaxMem / MaxDisk) plus
+ * pending reservations from resource_ownership.reserved_*.
+ */
+export interface QuotaUsage {
+  vcpu: number /* int */;
+  ramMb: number /* int64 */;
+  diskGb: number /* int64 */;
+  count: number /* int */;
+}
+/**
+ * QuotaWithUsage is one scope's limits + live usage + remaining. Remaining on a
+ * dimension is meaningful only where the matching limit is non-null (0 elsewhere).
+ */
+export interface QuotaWithUsage {
+  scopeType: string; // "tenant" | "project"
+  scopeId: string;
+  limits: QuotaLimits;
+  usage: QuotaUsage;
+  remaining: QuotaUsage;
+}
+/**
+ * SetQuotaRequest is the PUT body for tenant/project quota. Each nil field clears
+ * that limit (→ unlimited).
+ */
+export interface SetQuotaRequest {
+  maxVcpu?: number /* int */;
+  maxRamMb?: number /* int64 */;
+  maxDiskGb?: number /* int64 */;
+  maxCount?: number /* int */;
+}
+/**
+ * ProjectQuotaResponse embeds the parent tenant rollup so the wizard binds on the
+ * tighter of the two — min(projectRemaining, tenantRemaining) — in one round-trip.
+ */
+export interface ProjectQuotaResponse {
+  project: QuotaWithUsage;
+  tenant: QuotaWithUsage;
 }
 
 //////////

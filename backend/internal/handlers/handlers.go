@@ -81,6 +81,9 @@ func (d *Deps) MountAdmin(r chi.Router) {
 	r.Get("/nodes/{node}/storages", d.GetNodeStorages)
 	r.Get("/nodes/{node}/storages/{storage}/content", d.GetStorageContent)
 
+	r.Get("/tenants/{tenantId}/quota", d.GetAdminTenantQuota)
+	r.Put("/tenants/{tenantId}/quota", d.PutAdminTenantQuota)
+
 	r.Get("/resources", d.ListResourcesAdmin)
 	r.Get("/pools", d.ListPools)
 	r.Get("/storage", d.ListStorage)
@@ -102,8 +105,11 @@ func (d *Deps) MountTenant(r chi.Router) {
 
 	// --- read surface (Reader/Contributor) ---
 	r.Get(p+"/summary", d.GetTenantSummary)
+	r.Get(p+"/quota", d.GetTenantQuota)
+	r.Get(p+"/activity", d.GetActivity)
 	r.Get(p+"/projects", d.ListProjects)
 	r.Get(p+"/projects/{projectId}", d.GetProject)
+	r.Get(p+"/projects/{projectId}/quota", d.GetProjectQuota)
 	r.Get(p+"/members", d.ListMembers)
 	r.Get(p+"/resources", d.ListTenantResources)
 
@@ -129,6 +135,7 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Post(p+"/projects", d.CreateProject)
 	r.Patch(p+"/projects/{projectId}", d.RenameProject)
 	r.Delete(p+"/projects/{projectId}", d.DeleteProject)
+	r.Put(p+"/projects/{projectId}/quota", d.PutProjectQuota)
 
 	r.Post(p+"/guests", d.CreateGuest)
 	r.Patch(p+"/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)

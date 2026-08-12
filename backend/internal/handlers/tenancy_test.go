@@ -39,8 +39,13 @@ type harness struct {
 }
 
 func newHarness(t *testing.T, mock *proxmoxtest.MockClient) *harness {
+	return newHarnessLog(t, mock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// newHarnessLog is newHarness with an injectable logger, so audit tests can
+// assert the middleware's loud-but-not-fatal FinalizeAudit failure log.
+func newHarnessLog(t *testing.T, mock *proxmoxtest.MockClient, log *slog.Logger) *harness {
 	t.Helper()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fake := storetest.New()
 	sessions := auth.NewSessions(fake, false, time.Hour, 24*time.Hour)
 	authH := &auth.Handler{Sessions: sessions, Store: fake, Hasher: auth.NewHasher(), Log: log}
@@ -393,8 +398,9 @@ func TestScopedResourcesFiltersByTenant(t *testing.T) {
 func TestCreateFinalizesOwnershipOnSuccess(t *testing.T) {
 	createUPID := proxmox.UPID("UPID:pve01:1:2:3:vzcreate:150:u@pam:")
 	mock := &proxmoxtest.MockClient{
-		OnCreatePool: func(context.Context, string, string) error { return nil },
-		OnCreateLXC:  func(context.Context, string, map[string]any) (proxmox.UPID, error) { return createUPID, nil },
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) { return nil, nil },
+		OnCreatePool:       func(context.Context, string, string) error { return nil },
+		OnCreateLXC:        func(context.Context, string, map[string]any) (proxmox.UPID, error) { return createUPID, nil },
 	}
 	hh := newHarness(t, mock)
 	tenantA := hh.fake.AddTenant("A", "a")
@@ -441,7 +447,8 @@ func waitTracked(t *testing.T, reg *tasks.Registry, upid proxmox.UPID) {
 
 func TestCreateReleasesOwnershipOnFailure(t *testing.T) {
 	mock := &proxmoxtest.MockClient{
-		OnCreatePool: func(context.Context, string, string) error { return nil },
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) { return nil, nil },
+		OnCreatePool:       func(context.Context, string, string) error { return nil },
 		OnCreateLXC: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
 			return "", &types.APIError{Code: "proxmox_error", Message: "no space left", Status: 502}
 		},
@@ -467,7 +474,10 @@ func TestCreateReleasesOwnershipOnFailure(t *testing.T) {
 // --- create: duplicate VMID reservation → 409 ---
 
 func TestCreateDuplicateVMIDConflict(t *testing.T) {
-	mock := &proxmoxtest.MockClient{OnCreatePool: func(context.Context, string, string) error { return nil }}
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) { return nil, nil },
+		OnCreatePool:       func(context.Context, string, string) error { return nil },
+	}
 	hh := newHarness(t, mock)
 	tenantA := hh.fake.AddTenant("A", "a")
 	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")

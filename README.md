@@ -111,6 +111,7 @@ Unset ⇒ all cost elements are hidden. Estimates are labeled as such.
 | `PROXMOX_CONSOLE_USER` / `_PASSWORD` | — | Enables the embedded console |
 | `PRICING_*` | — | Enables cost UI (see above) |
 | `SESSION_IDLE_TTL` / `SESSION_ABSOLUTE_TTL` | — | Session timeouts (default `12h` / `720h`) |
+| `RECONCILER_INTERVAL` / `RESERVATION_TTL` | — | Reconciler cadence + stale pending-reservation reclaim (default `5m` / `45m`) |
 | `LISTEN_ADDR` | — | Backend listen address (default `:8080`) |
 
 † Optional. If `ADMIN_USER` is set, one of `ADMIN_PASSWORD_HASH` / `ADMIN_PASSWORD`
