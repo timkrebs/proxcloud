@@ -62,25 +62,34 @@ func New(d Deps) http.Handler {
 		}
 		r.Get("/health", health)
 
+		// Public auth surface: first-run status/bootstrap and login. Everything
+		// else self-identifies via the session and lives in the group below.
+		r.Get("/auth/bootstrap-status", d.Auth.BootstrapStatus)
+		r.Post("/auth/bootstrap", d.Auth.Bootstrap)
 		r.Post("/auth/login", d.Auth.Login)
-		r.Post("/auth/logout", d.Auth.Logout)
-		r.Get("/auth/me", d.Auth.Me)
 
 		if d.ConsoleWS != nil {
 			r.Get("/console/ws/{sessionId}", d.ConsoleWS.ServeHTTP)
 		}
 
-		if d.Protected != nil || d.Events != nil {
-			r.Group(func(r chi.Router) {
-				r.Use(d.Auth.RequireSession)
-				if d.Events != nil {
-					r.Get("/events", d.Events)
-				}
-				if d.Protected != nil {
-					d.Protected(r)
-				}
-			})
-		}
+		// Authenticated group: Authenticate injects the *Identity into context
+		// and replaces the old stateless RequireSession.
+		r.Group(func(r chi.Router) {
+			r.Use(d.Auth.Authenticate)
+
+			r.Post("/auth/logout", d.Auth.Logout)
+			r.Get("/auth/me", d.Auth.Me)
+			r.Post("/auth/password", d.Auth.ChangePassword)
+			r.Get("/auth/sessions", d.Auth.ListSessions)
+			r.Delete("/auth/sessions/{id}", d.Auth.DeleteSession)
+
+			if d.Events != nil {
+				r.Get("/events", d.Events)
+			}
+			if d.Protected != nil {
+				d.Protected(r)
+			}
+		})
 	})
 
 	return r

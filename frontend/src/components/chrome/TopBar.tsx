@@ -11,13 +11,13 @@ import { useUiStore } from "@/lib/stores/uiStore";
 interface TopBarProps {
   /** Unread notification count — the bell badge renders only when > 0 (§2.2.5). */
   unread?: number;
-  /** Signed-in display name; the user chip renders only when both props are given. */
-  username?: string;
+  /** Signed-in display name (falls back to email); the user chip renders only when both props are given. */
+  displayName?: string;
   /** Avatar initials for the 26px circle, e.g. "AM". */
   initials?: string;
 }
 
-export default function TopBar({ unread = 0, username, initials }: TopBarProps) {
+export default function TopBar({ unread = 0, displayName, initials }: TopBarProps) {
   const toggleNav = useUiStore((s) => s.toggleNav);
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
   const setPane = useUiStore((s) => s.setPane);
@@ -86,14 +86,14 @@ export default function TopBar({ unread = 0, username, initials }: TopBarProps) 
         >
           <Mi name="help" size={16} color="currentColor" />
         </button>
-        {username && initials ? (
+        {displayName && initials ? (
           <button
             type="button"
             title="Switch tenant or project"
             onClick={() => setPane("tenant")}
             className="flex h-10 items-center gap-2 px-3 hover:bg-topbar-hover"
           >
-            <span className="text-right text-[12px] leading-tight font-semibold">{username}</span>
+            <span className="text-right text-[12px] leading-tight font-semibold">{displayName}</span>
             <span className="flex h-[26px] w-[26px] flex-none items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
               {initials}
             </span>

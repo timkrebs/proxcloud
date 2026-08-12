@@ -9,9 +9,9 @@ type ErrorEnvelope struct {
 // the failure originated in Proxmox — the verbatim Proxmox error message.
 type APIError struct {
 	// Code is one of: unauthenticated | forbidden | not_found | conflict |
-	// invalid_request | proxmox_auth_failed | proxmox_permission_denied |
-	// proxmox_unreachable | proxmox_error | agent_unavailable |
-	// console_disabled | timeout | internal
+	// invalid_request | rate_limited | proxmox_auth_failed |
+	// proxmox_permission_denied | proxmox_unreachable | proxmox_error |
+	// agent_unavailable | console_disabled | timeout | internal
 	Code       string `json:"code"`
 	Message    string `json:"message"`
 	PVEMessage string `json:"pveMessage,omitempty"`

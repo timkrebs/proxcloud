@@ -36,7 +36,7 @@ proxcloud/
 1. Create a Proxmox API token (next section) and configure the env:
 
    ```bash
-   cp .env.example .env    # fill in PROXMOX_*, SESSION_SECRET, ADMIN_*
+   cp .env.example .env    # fill in PROXMOX_*, DATABASE_URL, SECRETS_KEY (ADMIN_* optional)
    ```
 
 2. Start everything:
@@ -103,15 +103,33 @@ Unset ⇒ all cost elements are hidden. Estimates are labeled as such.
 | `PROXMOX_URL` | ✔ | Base URL, e.g. `https://pve01:8006` (no `/api2/json`) |
 | `PROXMOX_TOKEN_ID` / `PROXMOX_TOKEN_SECRET` | ✔ | API token (`user@realm!name`) |
 | `PROXMOX_TLS_INSECURE` | — | `true` for self-signed homelab certs |
-| `SESSION_SECRET` | ✔ | 32+ random chars (`openssl rand -base64 32`) |
-| `ADMIN_USER` | ✔ | Portal login user |
-| `ADMIN_PASSWORD_HASH` | ✔* | bcrypt hash (preferred) — `htpasswd -bnBC 10 "" 'pw' \| tr -d ':\n'` |
-| `ADMIN_PASSWORD` | ✔* | Dev alternative: plaintext, hashed at boot |
+| `DATABASE_URL` | ✔ | Postgres DSN (e.g. `postgres://proxcloud:proxcloud@postgres:5432/proxcloud?sslmode=disable`; TLS required in production) |
+| `SECRETS_KEY` | ✔ | 32 bytes, encrypts secrets at rest (`openssl rand -hex 32`) |
+| `ADMIN_USER` | —† | First-run seed only: platform admin on an empty database |
+| `ADMIN_PASSWORD_HASH` | —† | bcrypt hash (preferred) — `htpasswd -bnBC 10 "" 'pw' \| tr -d ':\n'` |
+| `ADMIN_PASSWORD` | —† | Plaintext alternative, hashed at boot |
 | `PROXMOX_CONSOLE_USER` / `_PASSWORD` | — | Enables the embedded console |
 | `PRICING_*` | — | Enables cost UI (see above) |
+| `SESSION_IDLE_TTL` / `SESSION_ABSOLUTE_TTL` | — | Session timeouts (default `12h` / `720h`) |
 | `LISTEN_ADDR` | — | Backend listen address (default `:8080`) |
 
-\* one of the two.
+† Optional. If `ADMIN_USER` is set, one of `ADMIN_PASSWORD_HASH` / `ADMIN_PASSWORD`
+is required. With no `ADMIN_*`, create the first admin via the first-run screen.
+
+### First run & the env-admin cutover
+
+On an **empty** database Proxcloud has no users. Create the first platform
+admin one of two ways:
+
+- **First-run screen** — visit the portal; `GET /api/auth/bootstrap-status`
+  reports `needsBootstrap: true`, and the sign-in page shows a one-time
+  "Create platform administrator" form (`POST /api/auth/bootstrap`).
+- **Env-admin cutover** — set `ADMIN_USER` + `ADMIN_PASSWORD` (or
+  `ADMIN_PASSWORD_HASH`) before first boot. The backend seeds a single admin
+  and logs a loud WARN. Sign in with the **email** `<ADMIN_USER>@proxcloud.local`
+  (or `ADMIN_USER` verbatim if it already contains `@`), then change the password
+  in **Settings** and remove `ADMIN_*` from the environment. The seed runs only
+  while the users table is empty; afterwards `ADMIN_*` is ignored.
 
 ## Development
 

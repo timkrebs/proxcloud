@@ -37,9 +37,10 @@ PROXMOX_URL=https://<host>:8006
 PROXMOX_TOKEN_ID=user@pam!tokenname
 PROXMOX_TOKEN_SECRET=<secret>
 PROXMOX_TLS_INSECURE=true|false      # homelab self-signed certs
-SESSION_SECRET=<random>
-ADMIN_USER=admin
-ADMIN_PASSWORD_HASH=<bcrypt>
+DATABASE_URL=postgres://proxcloud:proxcloud@postgres:5432/proxcloud?sslmode=disable
+SECRETS_KEY=<32 bytes hex>           # openssl rand -hex 32
+ADMIN_USER=admin                     # optional: first-run seed only
+ADMIN_PASSWORD=<plaintext>           # or ADMIN_PASSWORD_HASH=<bcrypt>
 ```
 
 ## Commands

@@ -9,14 +9,57 @@
  * LoginRequest is the POST /api/auth/login body.
  */
 export interface LoginRequest {
-  username: string;
+  email: string;
   password: string;
 }
 /**
- * Me is the GET /api/auth/me response.
+ * BootstrapStatus is the GET /api/auth/bootstrap-status response.
+ */
+export interface BootstrapStatus {
+  /**
+   * NeedsBootstrap is true iff zero users exist (first-run).
+   */
+  needsBootstrap: boolean;
+}
+/**
+ * BootstrapRequest is the POST /api/auth/bootstrap body (first-run only).
+ */
+export interface BootstrapRequest {
+  email: string;
+  password: string;
+  displayName: string;
+}
+/**
+ * ChangePasswordRequest is the POST /api/auth/password body.
+ */
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
+}
+/**
+ * Me is the GET /api/auth/me response — the signed-in principal.
  */
 export interface Me {
-  username: string;
+  id: string;
+  email: string;
+  displayName: string;
+  isPlatformAdmin: boolean;
+  totpEnabled: boolean;
+}
+/**
+ * SessionInfo is one entry in GET /api/auth/sessions — a live server-side
+ * session belonging to the caller.
+ */
+export interface SessionInfo {
+  id: string;
+  createdAt: string /* RFC3339 */;
+  lastSeenAt: string /* RFC3339 */;
+  ip: string;
+  userAgent: string;
+  /**
+   * Current marks the session backing the requesting cookie.
+   */
+  current: boolean;
 }
 
 //////////
@@ -174,9 +217,9 @@ export interface ErrorEnvelope {
 export interface APIError {
   /**
    * Code is one of: unauthenticated | forbidden | not_found | conflict |
-   * invalid_request | proxmox_auth_failed | proxmox_permission_denied |
-   * proxmox_unreachable | proxmox_error | agent_unavailable |
-   * console_disabled | timeout | internal
+   * invalid_request | rate_limited | proxmox_auth_failed |
+   * proxmox_permission_denied | proxmox_unreachable | proxmox_error |
+   * agent_unavailable | console_disabled | timeout | internal
    */
   code: string;
   message: string;

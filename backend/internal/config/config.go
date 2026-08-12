@@ -29,7 +29,6 @@ type Config struct {
 	ConsolePassword string
 
 	// Portal auth
-	SessionSecret     []byte
 	AdminUser         string
 	AdminPasswordHash string // bcrypt; if empty, AdminPassword is hashed at boot (dev convenience)
 	AdminPassword     string
@@ -100,16 +99,17 @@ func Load() (*Config, error) {
 	if cfg.ProxmoxTokenSecret == "" {
 		problems = append(problems, "PROXMOX_TOKEN_SECRET is required")
 	}
-	if s := os.Getenv("SESSION_SECRET"); len(s) >= 32 {
-		cfg.SessionSecret = []byte(s)
-	} else {
-		problems = append(problems, "SESSION_SECRET is required (32+ random characters)")
+	// ADMIN_* is now optional: since Phase 2, identities live in Postgres.
+	// When set on a fresh database it seeds a one-time platform admin (env-admin
+	// cutover); a fresh install with no ADMIN_* uses the first-run bootstrap
+	// endpoint instead. If configured it must be a complete pair, so a
+	// half-specified admin fails fast rather than silently not seeding.
+	adminPasswordSet := cfg.AdminPasswordHash != "" || cfg.AdminPassword != ""
+	if cfg.AdminUser != "" && !adminPasswordSet {
+		problems = append(problems, "ADMIN_PASSWORD_HASH (bcrypt) or ADMIN_PASSWORD is required when ADMIN_USER is set")
 	}
-	if cfg.AdminUser == "" {
-		problems = append(problems, "ADMIN_USER is required")
-	}
-	if cfg.AdminPasswordHash == "" && cfg.AdminPassword == "" {
-		problems = append(problems, "ADMIN_PASSWORD_HASH (bcrypt) or ADMIN_PASSWORD is required")
+	if adminPasswordSet && cfg.AdminUser == "" {
+		problems = append(problems, "ADMIN_USER is required when ADMIN_PASSWORD_HASH/ADMIN_PASSWORD is set")
 	}
 	if cfg.DatabaseURL == "" {
 		problems = append(problems, "DATABASE_URL is required (e.g. postgres://user:pass@host:5432/db?sslmode=disable)")

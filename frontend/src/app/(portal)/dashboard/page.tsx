@@ -25,7 +25,7 @@ export default function DashboardPage() {
     <div className="max-w-[1360px] px-8 pt-6 pb-10">
       <h1 className="text-[24px] font-semibold">
         {greeting(new Date().getHours())}
-        {me.data ? `, ${me.data.username}` : ""}
+        {me.data ? `, ${me.data.displayName || me.data.email}` : ""}
       </h1>
       <p className="mt-1 text-[13px] text-ink-2">
         {cluster.data ? (

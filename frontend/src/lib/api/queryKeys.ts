@@ -10,6 +10,7 @@ export interface ResourceFilters {
 
 export const qk = {
   me: ["me"] as const,
+  sessions: ["sessions"] as const,
   health: ["health"] as const,
   cluster: ["cluster"] as const,
   nodes: ["nodes"] as const,

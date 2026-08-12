@@ -64,17 +64,25 @@ func main() {
 	}
 	log.Info("migrations applied", "version", version)
 
-	passwordHash, err := auth.ResolveHash(cfg.AdminPasswordHash, cfg.AdminPassword)
-	if err != nil {
-		log.Error("startup failed", "err", err)
+	// Env-admin cutover (ADR-0006): on a fresh users table with ADMIN_* set,
+	// seed exactly one platform-admin DB user; thereafter ADMIN_* is inert and
+	// login is email+DB only. Idempotent; logs loudly at WARN.
+	seedCtx, seedCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := auth.SeedEnvAdmin(seedCtx, st, cfg.AdminUser, cfg.AdminPasswordHash, cfg.AdminPassword, log); err != nil {
+		seedCancel()
+		log.Error("startup failed", "stage", "env-admin-seed", "err", err)
 		os.Exit(1)
 	}
+	seedCancel()
+
+	hasher := auth.NewHasher()
+	sessions := auth.NewSessions(st, !cfg.InsecureCookies, cfg.SessionIdleTTL, cfg.SessionAbsoluteTTL)
 	authHandler := &auth.Handler{
-		Sessions:     auth.NewSessions(cfg.SessionSecret, !cfg.InsecureCookies),
-		AdminUser:    cfg.AdminUser,
-		PasswordHash: passwordHash,
-		Log:          log,
-		Limiter:      auth.NewLoginLimiter(),
+		Sessions: sessions,
+		Store:    st,
+		Hasher:   hasher,
+		Log:      log,
+		Limiter:  auth.NewLoginLimiter(),
 	}
 
 	pve, err := proxmox.New(cfg)
@@ -122,7 +130,7 @@ func main() {
 				if _, err := r.Cookie(auth.CookieName); err != nil {
 					return true // no portal cookie on this transport — rely on the one-shot id
 				}
-				_, err := authHandler.Sessions.Verify(r)
+				_, err := authHandler.Sessions.Verify(r.Context(), r)
 				return err == nil // a presented cookie must be genuine (rejects forged/stale)
 			},
 		}

@@ -1,64 +1,101 @@
-// Package auth implements the portal's single-admin login: bcrypt password
-// verification and a stateless HMAC-signed session cookie. The Proxmox
-// token is never involved — this guards the portal itself.
+// Package auth implements portal authentication: Argon2id/bcrypt password
+// verification and Postgres-backed server-side sessions (ADR-0006). The
+// browser holds an opaque 256-bit random token in the proxcloud_session
+// cookie; only its SHA-256 hash is stored, so a database leak does not expose
+// usable session tokens and logout/revocation are real server-side operations.
+// The Proxmox token is never involved — this guards the portal itself.
 package auth
 
 import (
-	"crypto/hmac"
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/timkrebs9/proxcloud/backend/internal/store"
 )
 
 const (
 	// CookieName is the session cookie the browser holds.
 	CookieName = "proxcloud_session"
-	// sessionTTL slides: RequireSession re-issues the cookie once it is
-	// past half its lifetime, so active users stay signed in and a stolen
-	// cookie dies within a day of inactivity. Stateless design: logout
-	// clears only the browser copy (documented limitation).
-	sessionTTL = 24 * time.Hour
+	// tokenBytes is the opaque session token length (256 bits of entropy).
+	tokenBytes = 32
+	// touchThrottle bounds how often an active session's last_seen_at is
+	// written, so a busy session does not issue an UPDATE on every request.
+	touchThrottle = time.Minute
 )
 
-type sessionPayload struct {
-	User string `json:"u"`
-	Exp  int64  `json:"exp"`
+// errInvalidSession is the single opaque failure for any bad/expired/revoked
+// cookie — callers map it to 401 without leaking which check failed.
+var errInvalidSession = errors.New("auth: invalid session")
+
+// Identity is the authenticated principal carried in the request context by
+// the Authenticate middleware.
+type Identity struct {
+	UserID          string
+	Email           string
+	IsPlatformAdmin bool
+	SessionID       string
 }
 
-// Sessions signs and verifies session cookies.
+// Sessions issues, verifies, and revokes Postgres-backed sessions.
 type Sessions struct {
-	secret []byte
-	secure bool
-	now    func() time.Time
+	store       store.Store
+	secure      bool // cookie Secure attribute (true behind TLS)
+	idleTTL     time.Duration
+	absoluteTTL time.Duration
+	now         func() time.Time
 }
 
-// NewSessions creates a session signer. secure controls the cookie's Secure
-// attribute (true behind TLS).
-func NewSessions(secret []byte, secure bool) *Sessions {
-	return &Sessions{secret: secret, secure: secure, now: time.Now}
+// NewSessions constructs a session manager. secure controls the cookie's
+// Secure attribute; idleTTL and absoluteTTL bound inactivity and total lifetime.
+func NewSessions(st store.Store, secure bool, idleTTL, absoluteTTL time.Duration) *Sessions {
+	return &Sessions{store: st, secure: secure, idleTTL: idleTTL, absoluteTTL: absoluteTTL, now: time.Now}
 }
 
-// Issue returns a Set-Cookie ready session cookie for user.
-func (s *Sessions) Issue(user string) *http.Cookie {
-	payload, _ := json.Marshal(sessionPayload{User: user, Exp: s.now().Add(sessionTTL).Unix()})
-	body := base64.RawURLEncoding.EncodeToString(payload)
+// hashToken returns the hex SHA-256 of a raw token; only this is persisted.
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// Issue mints a new session for userID, persists it, and returns the Set-Cookie
+// carrying the raw opaque token. Called on login (rotation is inherent — a
+// fresh token/row) and on bootstrap.
+func (s *Sessions) Issue(ctx context.Context, userID string, r *http.Request) (*http.Cookie, error) {
+	raw := make([]byte, tokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+
+	ip, ua := requestMeta(r)
+	if _, err := s.store.CreateSession(ctx, store.CreateSessionParams{
+		UserID:            userID,
+		TokenHash:         hashToken(token),
+		AbsoluteExpiresAt: s.now().Add(s.absoluteTTL),
+		IP:                ip,
+		UserAgent:         ua,
+	}); err != nil {
+		return nil, err
+	}
 	return &http.Cookie{
 		Name:     CookieName,
-		Value:    body + "." + s.sign(body),
+		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   s.secure,
-		MaxAge:   int(sessionTTL.Seconds()),
-	}
+		MaxAge:   int(s.absoluteTTL.Seconds()),
+	}, nil
 }
 
-// Clear returns an expired cookie that removes the session.
+// Clear returns an expired cookie that removes the session from the browser.
+// Server-side revocation is done separately (Revoke) so a stolen cookie dies.
 func (s *Sessions) Clear() *http.Cookie {
 	return &http.Cookie{
 		Name:     CookieName,
@@ -71,56 +108,67 @@ func (s *Sessions) Clear() *http.Cookie {
 	}
 }
 
-// Verify returns the authenticated username, or an error if the cookie is
-// missing, forged, or expired.
-func (s *Sessions) Verify(r *http.Request) (string, error) {
+// Verify resolves the request's cookie to an Identity, rejecting missing,
+// revoked, idle-expired, or absolute-expired sessions (and disabled users)
+// with errInvalidSession. last_seen_at is bumped, throttled to once per minute.
+func (s *Sessions) Verify(ctx context.Context, r *http.Request) (*Identity, error) {
 	c, err := r.Cookie(CookieName)
-	if err != nil {
-		return "", fmt.Errorf("no session cookie")
+	if err != nil || c.Value == "" {
+		return nil, errInvalidSession
 	}
-	user, _, err := s.verifyValue(c.Value)
-	return user, err
+	sess, err := s.store.GetSessionByTokenHash(ctx, hashToken(c.Value))
+	if err != nil {
+		return nil, errInvalidSession
+	}
+	now := s.now()
+	if sess.RevokedAt != nil ||
+		now.After(sess.AbsoluteExpiresAt) ||
+		now.After(sess.LastSeenAt.Add(s.idleTTL)) {
+		return nil, errInvalidSession
+	}
+	user, err := s.store.GetUserByID(ctx, sess.UserID)
+	if err != nil || user.Disabled {
+		return nil, errInvalidSession
+	}
+	if now.Sub(sess.LastSeenAt) >= touchThrottle {
+		// Best-effort; a failed touch never fails the request.
+		_ = s.store.TouchSession(ctx, sess.ID, now)
+	}
+	return &Identity{
+		UserID:          user.ID,
+		Email:           user.Email,
+		IsPlatformAdmin: user.IsPlatformAdmin,
+		SessionID:       sess.ID,
+	}, nil
 }
 
-func (s *Sessions) verifyValue(value string) (user string, exp int64, err error) {
-	body, sig, ok := strings.Cut(value, ".")
-	if !ok {
-		return "", 0, fmt.Errorf("malformed session cookie")
-	}
-	if !hmac.Equal([]byte(s.sign(body)), []byte(sig)) {
-		return "", 0, fmt.Errorf("invalid session signature")
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(body)
-	if err != nil {
-		return "", 0, fmt.Errorf("malformed session payload")
-	}
-	var p sessionPayload
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", 0, fmt.Errorf("malformed session payload")
-	}
-	if s.now().Unix() >= p.Exp {
-		return "", 0, fmt.Errorf("session expired")
-	}
-	return p.User, p.Exp, nil
+// Live reports whether a stored session is still usable right now — not
+// revoked, and past neither its absolute nor its idle deadline. It mirrors the
+// checks in Verify so the sessions list and single-session lookups never
+// surface a row whose cookie could no longer authenticate; the store cannot
+// apply the idle window itself, since idleTTL is an app-layer setting.
+func (s *Sessions) Live(sess store.Session) bool {
+	now := s.now()
+	return sess.RevokedAt == nil &&
+		now.Before(sess.AbsoluteExpiresAt) &&
+		now.Before(sess.LastSeenAt.Add(s.idleTTL))
 }
 
-// VerifyRefresh is Verify plus a signal that the cookie is past half its
-// lifetime and should be re-issued.
-func (s *Sessions) VerifyRefresh(r *http.Request) (user string, refresh bool, err error) {
-	c, err := r.Cookie(CookieName)
-	if err != nil {
-		return "", false, fmt.Errorf("no session cookie")
-	}
-	user, exp, err := s.verifyValue(c.Value)
-	if err != nil {
-		return "", false, err
-	}
-	refresh = time.Until(time.Unix(exp, 0)) < sessionTTL/2
-	return user, refresh, nil
+// Revoke marks a single session revoked server-side (logout).
+func (s *Sessions) Revoke(ctx context.Context, sessionID string) error {
+	return s.store.RevokeSession(ctx, sessionID)
 }
 
-func (s *Sessions) sign(body string) string {
-	mac := hmac.New(sha256.New, s.secret)
-	mac.Write([]byte(body))
-	return hex.EncodeToString(mac.Sum(nil))
+// requestMeta extracts the client IP and User-Agent for session provenance.
+func requestMeta(r *http.Request) (ip, ua *string) {
+	if r == nil {
+		return nil, nil
+	}
+	if host := clientIP(r); host != "" {
+		ip = &host
+	}
+	if v := r.UserAgent(); v != "" {
+		ua = &v
+	}
+	return ip, ua
 }

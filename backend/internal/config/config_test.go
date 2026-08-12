@@ -12,7 +12,6 @@ func baseEnv(t *testing.T) {
 	t.Setenv("PROXMOX_URL", "https://pve01:8006")
 	t.Setenv("PROXMOX_TOKEN_ID", "u@pam!t")
 	t.Setenv("PROXMOX_TOKEN_SECRET", "secret")
-	t.Setenv("SESSION_SECRET", strings.Repeat("s", 32))
 	t.Setenv("ADMIN_USER", "admin")
 	t.Setenv("ADMIN_PASSWORD_HASH", "$2a$10$abcdefghijklmnopqrstuv")
 	t.Setenv("SECRETS_KEY", strings.Repeat("ab", 32)) // 64 hex chars = 32 bytes

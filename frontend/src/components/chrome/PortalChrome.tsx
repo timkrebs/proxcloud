@@ -19,9 +19,9 @@ import { useEvents } from "@/lib/sse";
 import { useUiStore } from "@/lib/stores/uiStore";
 import { relativeTime } from "@/lib/format";
 
-function initialsOf(username: string): string {
-  const parts = username.split(/[\s._-]+/).filter(Boolean);
-  const chars = parts.length >= 2 ? [parts[0][0], parts[1][0]] : [username[0], username[1] ?? ""];
+function initialsOf(name: string): string {
+  const parts = name.split(/[\s._@-]+/).filter(Boolean);
+  const chars = parts.length >= 2 ? [parts[0][0], parts[1][0]] : [name[0] ?? "", name[1] ?? ""];
   return chars.join("").toUpperCase();
 }
 
@@ -89,8 +89,8 @@ export default function PortalChrome({ children }: { children: React.ReactNode }
       <div className="flex h-screen flex-col overflow-hidden">
         <TopBar
           unread={unread}
-          username={me.data?.username}
-          initials={me.data ? initialsOf(me.data.username) : undefined}
+          displayName={me.data ? me.data.displayName || me.data.email : undefined}
+          initials={me.data ? initialsOf(me.data.displayName || me.data.email) : undefined}
         />
         <div className="flex flex-1 overflow-x-auto overflow-y-hidden">
           <div className="flex min-w-[1280px] flex-1 overflow-hidden">

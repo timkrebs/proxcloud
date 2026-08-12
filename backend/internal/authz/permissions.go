@@ -76,14 +76,19 @@ func buildRegistry() map[routeKey]Rule {
 	perms := []Permission{
 		// --- public: no session required ---
 		{http.MethodGet, "/api/health", PublicRule},
+		{http.MethodGet, "/api/auth/bootstrap-status", PublicRule},
+		{http.MethodPost, "/api/auth/bootstrap", PublicRule}, // hard-guarded: 409 once any user exists
 		{http.MethodPost, "/api/auth/login", PublicRule},
-		{http.MethodPost, "/api/auth/logout", PublicRule},
-		{http.MethodGet, "/api/auth/me", PublicRule}, // self-verifies the cookie
 		// Console websocket authenticates via a one-shot, single-use session id
 		// in the path (not the cookie), so it is public at the router level.
 		{http.MethodGet, "/api/console/ws/{sessionId}", PublicRule},
 
 		// --- authenticated: valid session required ---
+		{http.MethodPost, "/api/auth/logout", AuthenticatedRule},
+		{http.MethodGet, "/api/auth/me", AuthenticatedRule},
+		{http.MethodPost, "/api/auth/password", AuthenticatedRule},
+		{http.MethodGet, "/api/auth/sessions", AuthenticatedRule},
+		{http.MethodDelete, "/api/auth/sessions/{id}", AuthenticatedRule},
 		{http.MethodGet, "/api/events", AuthenticatedRule},
 
 		// cluster / infra (become platform-admin in Phase 3)
