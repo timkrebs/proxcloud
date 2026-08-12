@@ -76,6 +76,10 @@ func buildRegistry() map[routeKey]Rule {
 	perms := []Permission{
 		// --- public: no session required ---
 		{http.MethodGet, "/api/health", PublicRule},
+		// Build metadata (WS3): git commit/semver/build time of the running
+		// binary. Public build info only — no secrets — so the CD smoke test and
+		// the frontend footer can read it without a session.
+		{http.MethodGet, "/api/v1/version", PublicRule},
 		{http.MethodGet, "/api/auth/bootstrap-status", PublicRule},
 		{http.MethodPost, "/api/auth/bootstrap", PublicRule}, // hard-guarded: 409 once any user exists
 		{http.MethodPost, "/api/auth/login", PublicRule},

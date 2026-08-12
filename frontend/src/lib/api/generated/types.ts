@@ -1020,3 +1020,19 @@ export interface LoginTOTPRequest {
 export interface RecoveryCodesResponse {
   recoveryCodes: string[]; // 10 × "XXXXX-XXXXX"
 }
+
+//////////
+// source: version.go
+
+/**
+ * VersionInfo is the GET /api/v1/version response: the running binary's build
+ * metadata, injected at build time via the Go linker's -ldflags -X flag. This
+ * is public build metadata only — it carries no secrets and needs no session.
+ * The CD smoke test asserts the deployed commit against the expected git SHA,
+ * and the frontend footer renders the semver + commit.
+ */
+export interface VersionInfo {
+  commit: string; // full git SHA, or "dev" when not injected
+  semver: string; // release tag (e.g. v1.2.3), or "0.0.0-dev"
+  buildTime: string; // RFC3339 build timestamp, or "unknown"
+}

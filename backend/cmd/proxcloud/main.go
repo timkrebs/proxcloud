@@ -32,6 +32,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/secrets"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
+	"github.com/timkrebs9/proxcloud/backend/internal/version"
 )
 
 func main() {
@@ -43,6 +44,11 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// Log the build metadata first thing so every boot line-item is attributable
+	// to a specific commit. Values are link-time (-ldflags); no secrets.
+	bi := version.Info()
+	log.Info("proxcloud starting", "commit", bi.Commit, "semver", bi.Semver, "buildTime", bi.BuildTime)
 
 	cfg, err := config.Load()
 	if err != nil {

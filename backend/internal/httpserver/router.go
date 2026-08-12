@@ -16,6 +16,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
+	"github.com/timkrebs9/proxcloud/backend/internal/version"
 )
 
 // Deps carries everything the router mounts. Fields are added per feature
@@ -77,6 +78,12 @@ func New(d Deps) http.Handler {
 			}
 		}
 		r.Get("/health", health)
+
+		// Public build metadata (WS3): the running binary's git commit, semver,
+		// and build time, injected at link time via -ldflags. No auth, no secrets
+		// — the CD health-check/smoke test and the frontend footer read it without
+		// a session. Versioned path (/api/v1) alongside the flat routes.
+		r.Get("/v1/version", versionHandler)
 
 		// Public auth surface: first-run status/bootstrap, login, and the invite
 		// accept flow (the opaque token is the credential — the caller may be signed
@@ -156,6 +163,19 @@ func New(d Deps) http.Handler {
 	})
 
 	return r
+}
+
+// versionHandler serves GET /api/v1/version: the running binary's build
+// metadata from the version package (link-time -ldflags). It needs no
+// dependencies and touches no secrets, so it is mounted directly in the public
+// group.
+func versionHandler(w http.ResponseWriter, _ *http.Request) {
+	info := version.Info()
+	WriteJSON(w, http.StatusOK, types.VersionInfo{
+		Commit:    info.Commit,
+		Semver:    info.Semver,
+		BuildTime: info.BuildTime,
+	})
 }
 
 // originCheck rejects state-changing requests whose Origin (or, absent
