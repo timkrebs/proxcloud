@@ -19,6 +19,10 @@ override.tf.json
 # Go
 backend/bin/
 backend/tmp/
+# Stray `go build` output: the binary defaults to the package-dir name, so
+# `go build ./cmd/proxcloud` from backend/ drops an executable here.
+backend/proxcloud
+backend/cmd/proxcloud/proxcloud
 
 # Node / Next.js
 node_modules/
