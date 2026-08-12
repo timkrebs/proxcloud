@@ -35,6 +35,11 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/version"
 )
 
+// main dispatches on the first argument so one binary serves three roles in the
+// delivery pipeline (ADR-0014): `proxcloud` (no args) runs the API server as it
+// always has; `proxcloud migrate` is the one-shot migrator service (apply +
+// exit, gating the cutover); `proxcloud seed-smoke` provisions the idempotent
+// least-privilege smoke fixture (ADR-0016). The serve path is unchanged.
 func main() {
 	// Native dev convenience: seed env from the repo-root .env if present.
 	// Real deployments (compose, systemd) pass env directly. Loaded
@@ -45,6 +50,35 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
+	// One-shot subcommands exit the process; the default (no/"serve" arg) runs
+	// the long-lived server. Unknown commands fail loudly (exit 2) rather than
+	// silently booting the server.
+	switch subcommand() {
+	case "migrate":
+		os.Exit(runMigrate(log))
+	case "seed-smoke":
+		os.Exit(runSeedSmoke(log))
+	case "", "serve":
+		runServe(log)
+	default:
+		log.Error("unknown command", "command", os.Args[1], "usage", "proxcloud [serve|migrate|seed-smoke]")
+		os.Exit(2)
+	}
+}
+
+// subcommand returns the first CLI argument, or "" when the binary is invoked
+// with none (the serve path).
+func subcommand() string {
+	if len(os.Args) < 2 {
+		return ""
+	}
+	return os.Args[1]
+}
+
+// runServe is the API server boot — byte-for-byte the previous main(): open the
+// store, migrate at boot, seed the env admin, wire dependencies, serve, and shut
+// down gracefully on a signal. It never returns; failures call os.Exit directly.
+func runServe(log *slog.Logger) {
 	// Log the build metadata first thing so every boot line-item is attributable
 	// to a specific commit. Values are link-time (-ldflags); no secrets.
 	bi := version.Info()
