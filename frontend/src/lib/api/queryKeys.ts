@@ -32,6 +32,7 @@ export const qk = {
   me: ["me"] as const,
   sessions: ["sessions"] as const,
   health: ["health"] as const,
+  version: ["version"] as const,
   cluster: ["cluster"] as const,
   nodes: ["nodes"] as const,
   node: (node: string) => ["node", node] as const,

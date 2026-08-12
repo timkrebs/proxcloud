@@ -21,6 +21,7 @@ import type {
   NodeSummary,
   Notification,
   TaskSummary,
+  VersionInfo,
 } from "@/lib/api/generated/types";
 import { qk, type ResourceFilters } from "@/lib/api/queryKeys";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
@@ -39,6 +40,19 @@ export function useHealth() {
     queryKey: qk.health,
     queryFn: () => apiFetch<Health>("/api/health"),
     refetchInterval: 30_000,
+  });
+}
+
+/**
+ * Running binary's build metadata (public, no session). The values are baked in
+ * at link time, so they never change while the tab is open — cache forever.
+ */
+export function useVersion() {
+  return useQuery({
+    queryKey: qk.version,
+    queryFn: () => apiFetch<VersionInfo>("/api/v1/version"),
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 }
 

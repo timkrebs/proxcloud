@@ -22,7 +22,7 @@ import {
   useVerifyEnrollTotp,
 } from "@/lib/api/security";
 import type { SessionInfo } from "@/lib/api/generated/types";
-import { useMe } from "@/lib/api/queries";
+import { useMe, useVersion } from "@/lib/api/queries";
 import { isValidPassword, PASSWORD_RULE } from "@/lib/auth/validation";
 import { relativeTime } from "@/lib/format";
 import { pushToast } from "@/lib/stores/toastStore";
@@ -709,7 +709,24 @@ export default function SettingsPage() {
             pricing configuration live in the backend environment — see the README.
           </p>
         </div>
+        <BuildLine />
       </Section>
     </div>
+  );
+}
+
+/**
+ * Subtle footer line showing the running backend build (semver + short commit),
+ * read from the public GET /api/v1/version. Renders nothing until it resolves —
+ * a stale or missing version line would be more confusing than none.
+ */
+function BuildLine() {
+  const { data } = useVersion();
+  if (!data) return null;
+  const short = data.commit && data.commit !== "dev" ? data.commit.slice(0, 7) : data.commit;
+  return (
+    <p className="mt-3 border-t border-line pt-3 font-mono text-[11px] text-ink-3">
+      Proxcloud {data.semver} · {short}
+    </p>
   );
 }
