@@ -6,7 +6,7 @@
 # bypass Caddy: blue backend 18080, blue frontend 13000.
 services:
   backend:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     container_name: proxcloud-blue-backend
     restart: unless-stopped
     env_file: ../.env
@@ -21,7 +21,7 @@ services:
       - data
 
   frontend:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     container_name: proxcloud-blue-frontend
     restart: unless-stopped
     # NOTE: BACKEND_ORIGIN and NEXT_PUBLIC_BACKEND_WS_ORIGIN are baked at IMAGE
@@ -41,7 +41,7 @@ services:
   # item, see deploy/README.md). Until that lands, deploy.sh migrates via the
   # backend's boot-time RunMigrations and captures its log instead.
   migrator:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     restart: "no"
     profiles: ["migrate"]
     env_file: ../.env
@@ -57,7 +57,7 @@ services:
   # proxcloud-data Postgres over proxcloud-data-net; either color's seed service
   # is equivalent since Postgres is outside the color pair.
   seed:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     restart: "no"
     profiles: ["seed"]
     env_file: ../.env

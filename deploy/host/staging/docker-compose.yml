@@ -34,7 +34,7 @@ services:
       retries: 6
 
   backend:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     container_name: proxcloud-staging-backend
     restart: unless-stopped
     env_file: .env
@@ -48,7 +48,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     container_name: proxcloud-staging-frontend
     restart: unless-stopped
     ports:
@@ -57,7 +57,7 @@ services:
       - backend
 
   migrator:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     restart: "no"
     profiles: ["migrate"]
     env_file: .env
@@ -74,7 +74,7 @@ services:
   # user from SMOKE_EMAIL/SMOKE_PASSWORD (both read from .env). Runs AFTER the
   # schema exists so seed-smoke's store writes land; safe to re-run every deploy.
   seed:
-    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     restart: "no"
     profiles: ["seed"]
     env_file: .env

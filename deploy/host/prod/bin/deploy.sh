@@ -27,7 +27,7 @@ set -a
 # shellcheck source=/dev/null
 . "$ROOT/.env"
 set +a
-REGISTRY="${REGISTRY:-ghcr.io/timkrebs9}"
+REGISTRY="${REGISTRY:-ghcr.io/timkrebs}"
 SNAPSHOT_RETAIN="${SNAPSHOT_RETAIN:-14}"
 MIGRATE_TIMEOUT="${MIGRATE_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"

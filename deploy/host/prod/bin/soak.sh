@@ -27,7 +27,7 @@ set -a
 # shellcheck source=/dev/null
 . "$ROOT/.env"
 set +a
-REGISTRY="${REGISTRY:-ghcr.io/timkrebs9}"
+REGISTRY="${REGISTRY:-ghcr.io/timkrebs}"
 SOAK_HOURS="${SOAK_HOURS:-24}"
 SOAK_KEEP_IMAGES="${SOAK_KEEP_IMAGES:-10}"
 export REGISTRY

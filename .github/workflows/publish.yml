@@ -46,9 +46,15 @@ jobs:
   # No checkout, no registry access — just the guard and the coordinate math, so
   # the credential-bearing publish job only ever runs on a validated SHA.
   prepare:
-    # Only a green ci.yml run on `main` or a `v*` ref may publish. PR ci runs
-    # (any other head_branch) and failed runs are dropped here.
+    # Only a green ci.yml run that was a PUSH to THIS repo's `main` or a `v*` ref
+    # may publish. The trust boundary (ADR-0014 §2) lives here: head_branch is
+    # attacker-controlled for a fork PR, so it is NEVER trusted alone — we first
+    # require the triggering run to be a base-repo push (event == 'push' AND
+    # head_repository == this repo), which no fork PR can satisfy. PR ci runs and
+    # failed runs are dropped here, before the credential-bearing publish job.
     if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.conclusion == 'success' &&
       (github.event.workflow_run.head_branch == 'main' ||
        startsWith(github.event.workflow_run.head_branch, 'v'))

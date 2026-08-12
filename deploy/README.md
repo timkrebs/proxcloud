@@ -167,7 +167,7 @@ holds no app secrets, and only invokes the deploy wrapper over SSH.
   guest.
 - Register it repo-scoped + ephemeral:
   ```bash
-  ./config.sh --url https://github.com/timkrebs9/proxcloud \
+  ./config.sh --url https://github.com/timkrebs/proxcloud \
     --token <REGISTRATION_TOKEN> --ephemeral --labels self-hosted,homelab
   ./run.sh   # or install as a service; --ephemeral means it deregisters after one job
   ```
