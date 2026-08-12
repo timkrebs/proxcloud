@@ -262,11 +262,13 @@ After the first successful `publish.yml` run creates the two packages
 - `smoke` template ID + storage pool on `pve01`, the reserved VMID range, and the
   Proxmox token's `Pool.Allocate` grant for the smoke LXC create/delete
   (ADR-0016 §4).
-- **Backend `proxcloud seed-smoke` command** (like the migrator subcommand, does
-  not exist yet): creates the smoke tenant/project + a non-TOTP user from
-  `SMOKE_EMAIL`/`SMOKE_PASSWORD`, idempotently. `deploy.sh` must invoke it under
-  `SMOKE_SEED=true` before the smoke gate. Until it ships, `smoke-staging` fails
-  at the login assertion (the user does not exist) — the honest blocked state.
+- **Backend `proxcloud seed-smoke` command** (shipped alongside `proxcloud
+  migrate`): creates the smoke tenant/project + a non-TOTP Contributor user from
+  `SMOKE_EMAIL`/`SMOKE_PASSWORD`, idempotently. `deploy.sh` invokes it under
+  `SMOKE_SEED=true` before the smoke gate (staging on; prod off by default). The
+  smoke `SMOKE_EMAIL`/`SMOKE_PASSWORD` in each guest's `/opt/proxcloud/.env` must
+  match the GitHub `SMOKE_EMAIL`/`SMOKE_PASSWORD` the smoke job logs in with, or
+  `smoke-staging` fails at the login assertion.
 - The self-hosted runner only needs to **run a static binary + `ssh`/`curl`** —
   the smoke binary is built on a hosted runner and downloaded as an artifact, so
   the runner LXC needs no Go toolchain.
