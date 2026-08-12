@@ -51,14 +51,19 @@ jobs:
   # self-hosted jobs only ever see a pre-validated 40-hex SHA or vX.Y.Z tag.
   prepare:
     # Trust boundary (ADR-0014 §2): a manual dispatch (only maintainers with repo
-    # write can trigger it), OR a green publish.yml run that was a PUSH to THIS
-    # repo. head_branch is attacker-controlled for a fork PR, so it is never
-    # trusted alone — event == 'push' AND head_repository == this repo gate out
-    # every fork PR before this workflow reaches the self-hosted runner.
+    # write can trigger it), OR a green publish run for THIS repo. Note: this
+    # workflow chains off `publish` (itself workflow_run-triggered off `ci`), so
+    # on the auto path github.event.workflow_run.event is 'workflow_run', NOT
+    # 'push' — the push-origin gate lives in publish.yml's OWN guard, and a
+    # publish run only ever proceeds for a base-repo push. Here the fork
+    # exclusion rides on head_repository, which is inherited from the original ci
+    # run's head repo: a fork PR can never make it equal this repo, so a
+    # fork-origin (or skipped) publish run is dropped before the self-hosted
+    # runner is ever reached. (Do NOT re-add event == 'push' here — it is always
+    # false on the auto path and silently disables auto-deploy-on-merge.)
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.conclusion == 'success' &&
        (github.event.workflow_run.head_branch == 'main' ||
         startsWith(github.event.workflow_run.head_branch, 'v')))
