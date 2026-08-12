@@ -50,10 +50,17 @@ type Phase = "idle" | "connecting" | "connected" | "closed" | "error";
 function VncConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
   const el = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<{ disconnect(): void } | null>(null);
+  const didInit = useRef(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<unknown>(null);
 
   const connect = useCallback(async () => {
+    // Tear down any prior client first so a reconnect never leaves two noVNC
+    // clients / two vncproxy sessions racing: each vncproxy resets the guest's
+    // one-time VNC password, and a stale client then fails RFB auth
+    // ("Security negotiation failed / Authentication failed").
+    rfbRef.current?.disconnect();
+    rfbRef.current = null;
     setPhase("connecting");
     setError(null);
     try {
@@ -75,6 +82,11 @@ function VncConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
   }, [g, tenantId]);
 
   useEffect(() => {
+    // React StrictMode (dev) runs mount effects twice; guard so we open exactly
+    // one console session (two vncproxy calls would race on the guest's VNC
+    // password and surface a spurious "Authentication failed").
+    if (didInit.current) return;
+    didInit.current = true;
     connect();
     return () => rfbRef.current?.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -107,10 +119,12 @@ function VncConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
 function TermConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
   const el = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const didInit = useRef(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<unknown>(null);
 
   const connect = useCallback(async () => {
+    wsRef.current?.close(); // drop any prior session before opening a new one
     setPhase("connecting");
     setError(null);
     try {
@@ -168,6 +182,9 @@ function TermConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
   }, [g, tenantId]);
 
   useEffect(() => {
+    // StrictMode (dev) runs mount effects twice; open exactly one term session.
+    if (didInit.current) return;
+    didInit.current = true;
     connect();
     return () => wsRef.current?.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
