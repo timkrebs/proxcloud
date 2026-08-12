@@ -37,6 +37,19 @@ services:
     networks:
       - data
 
+  # One-shot idempotent smoke seed (ADR-0016 §4) — see blue/docker-compose.yml.
+  # Writes to the SHARED proxcloud-data Postgres; SMOKE_SEED-gated in deploy.sh.
+  seed:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    restart: "no"
+    profiles: ["seed"]
+    env_file: ../.env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "seed-smoke"]
+    networks:
+      - data
+
 networks:
   edge:
     name: proxcloud-edge

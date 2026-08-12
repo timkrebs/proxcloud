@@ -31,6 +31,10 @@ REGISTRY="${REGISTRY:-ghcr.io/timkrebs9}"
 SNAPSHOT_RETAIN="${SNAPSHOT_RETAIN:-14}"
 MIGRATE_TIMEOUT="${MIGRATE_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
+# Prod defaults the smoke fixture OFF: a real user-facing environment does not
+# get a test tenant unless Tim explicitly wants prod smoke (set SMOKE_SEED=1 in
+# /opt/proxcloud/.env). Prod and staging use SEPARATE smoke creds (ADR-0016 §4).
+SMOKE_SEED="${SMOKE_SEED:-0}"
 export REGISTRY
 
 notify() { # notify <priority> <message…>
@@ -146,6 +150,29 @@ migrate_idle() { # migrate_idle <idle-color> <ref> <backend-port>
     | grep -Ei 'migrat|commit|semver' | tee "$STATE_DIR/last-migrate.log" >/dev/null || true
 }
 
+# seed_smoke: idempotent smoke fixture (ADR-0016 §4), mirroring migrate_idle's
+# migrator-service branch — a one-shot `seed` compose service run with
+# `run --rm` on the just-deployed idle color. SMOKE_SEED-gated (default OFF in
+# prod). Writes to the SHARED proxcloud-data Postgres, so it must run AFTER
+# migrate_idle (schema present) and BEFORE cutover. Reads SMOKE_EMAIL /
+# SMOKE_PASSWORD from /opt/proxcloud/.env via env_file; values never echoed.
+seed_smoke() { # seed_smoke <idle-color>
+  local idle="$1"
+  if [ "$SMOKE_SEED" != "1" ]; then
+    log "SMOKE_SEED=$SMOKE_SEED — skipping smoke seed (prod default)"
+    return 0
+  fi
+  if [ -z "${SMOKE_EMAIL:-}" ] || [ -z "${SMOKE_PASSWORD:-}" ]; then
+    die "SMOKE_SEED=1 but SMOKE_EMAIL/SMOKE_PASSWORD are unset in $ROOT/.env"
+  fi
+  log "seed-smoke (idempotent) on $idle — output captured to state/last-seed.log"
+  if ! timeout "$MIGRATE_TIMEOUT" \
+    docker compose --env-file "$ROOT/.env" -p "proxcloud-$idle" \
+      -f "$ROOT/$idle/docker-compose.yml" run --rm seed 2>&1 | tee "$STATE_DIR/last-seed.log"; then
+    die "seed-smoke failed/timed out (see state/last-seed.log) — old color still live"
+  fi
+}
+
 reload_caddy() {
   compose_caddy exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile \
     || die "caddy reload failed"
@@ -177,6 +204,8 @@ do_deploy() {
   compose_color "$idle" pull
 
   migrate_idle "$idle" "$ref" "$bport"          # brings up backend + health-gates
+
+  seed_smoke "$idle"                            # SMOKE_SEED-gated; no-op unless =1
 
   log "start $idle frontend"
   compose_color "$idle" up -d frontend

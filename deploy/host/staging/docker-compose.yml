@@ -68,6 +68,23 @@ services:
       postgres:
         condition: service_healthy
 
+  # One-shot idempotent smoke seed (ADR-0016 §4). Mirrors the migrator: same
+  # image, one-shot, started ONLY via `docker compose run --rm seed` from
+  # deploy.sh under SMOKE_SEED. Upserts the least-privilege smoke tenant/project/
+  # user from SMOKE_EMAIL/SMOKE_PASSWORD (both read from .env). Runs AFTER the
+  # schema exists so seed-smoke's store writes land; safe to re-run every deploy.
+  seed:
+    image: ${REGISTRY:-ghcr.io/timkrebs9}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    restart: "no"
+    profiles: ["seed"]
+    env_file: .env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "seed-smoke"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   caddy:
     image: caddy:2-alpine
     container_name: proxcloud-staging-caddy

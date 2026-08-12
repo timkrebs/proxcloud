@@ -13,8 +13,8 @@ deploy/
 │   ├── terraform.tfvars.example
 │   └── templates/cloud-init.yaml.tftpl
 └── host/                 # copied to /opt/proxcloud/ on each guest at provision time
-    ├── common/bin/       # deploy-wrapper.sh · first-boot.sh · gen-postgres-cert.sh
-    ├── prod/             # ADR-0015 layout: data/ blue/ green/ caddy/ state/ bin/deploy.sh
+    ├── common/bin/       # deploy-wrapper.sh · soak-wrapper.sh · first-boot.sh · gen-postgres-cert.sh
+    ├── prod/             # ADR-0015 layout: data/ blue/ green/ caddy/ state/ bin/{deploy,soak,up-infra}.sh
     └── staging/          # single stack: docker-compose.yml + caddy/ + bin/deploy.sh
 ```
 
@@ -173,7 +173,9 @@ holds no app secrets, and only invokes the deploy wrapper over SSH.
   ```
 - The runner needs the **deploy SSH private key** to reach the guests' `deploy`
   user. Provide it as a job-injected secret (`STAGING_SSH_KEY` / `PROD_SSH_KEY`
-  from the GitHub environments), never baked into the runner image.
+  from the GitHub environments), never baked into the runner image. The hourly
+  `soak.yml` uses the **separate** repo secret `SOAK_SSH_KEY` (soak-only,
+  §6) — also job-injected, never baked in.
 - **Updating:** ephemeral runners are single-use; keep the runner LXC's binary
   current with `./config.sh remove` + re-download, or bake a fresh LXC. Because
   it only ever runs already-merged, already-published code and only SSHes the
@@ -199,6 +201,23 @@ guests' `.env` (public packages need no pull auth).
   `rollback`, regex-validates `<ref>` (`^[0-9a-f]{40}$` or `^v\d+\.\d+\.\d+`),
   and `exec`s `deploy.sh` — never a shell, never `eval`. The CI key can do
   nothing else. Every attempt is logged to `state/deploy-wrapper.log`.
+  **`deploy-wrapper.sh` and its grammar are UNCHANGED by the soak work below.**
+- **Soak key (separate, MORE locked down):** the hourly `soak.yml` uses a
+  **dedicated** key (`ci-soak-key`, repo secret `SOAK_SSH_KEY`) whose
+  `authorized_keys` line pins a **second** forced command,
+  `command="/opt/proxcloud/bin/soak-wrapper.sh",…`. `soak-wrapper.sh` takes **no
+  ref and no verb**: it accepts only an empty command or the literal `soak` and
+  can do exactly one thing — `exec` the **read-only** `soak.sh`. It CANNOT
+  deploy, CANNOT rollback, CANNOT pass an argument, so it is strictly more
+  locked down than the deploy key. This is a **separate least-privilege
+  mechanism** (ADR-0014 §5) chosen over extending the deploy grammar so the
+  audited `deploy-wrapper.sh` is untouched and the unattended hourly sweep never
+  needs the prod-environment-gated deploy key (which would demand an approval
+  every hour). `soak.sh` never flips `active.caddy` nor rewrites `state/live-color`
+  — it only stops the already-retired color past `SOAK_HOURS` and prunes local
+  images keeping `SOAK_KEEP_IMAGES` per repo; every attempt is logged to
+  `state/soak-wrapper.log` / `state/soak.log`. **Any review of the SSH surface
+  must cover `soak-wrapper.sh`, `soak.sh`, and the new `authorized_keys` line.**
 - **`bin/` is root-owned** (`0755`) so the wrapper/deploy.sh cannot be rewritten
   from the deploy session; the deploy user owns only what it must write (state,
   snapshots, the caddy symlink) and `.env` (`600`).

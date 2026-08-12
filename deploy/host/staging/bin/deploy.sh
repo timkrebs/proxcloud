@@ -24,6 +24,8 @@ set +a
 REGISTRY="${REGISTRY:-ghcr.io/timkrebs9}"
 MIGRATE_TIMEOUT="${MIGRATE_TIMEOUT:-300}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-120}"
+# Staging always wants the smoke fixture so smoke-staging can log in (ADR-0016).
+SMOKE_SEED="${SMOKE_SEED:-1}"
 export REGISTRY
 
 notify() { local prio="$1"; shift; [ -n "${NTFY_URL:-}" ] || return 0
@@ -31,6 +33,28 @@ notify() { local prio="$1"; shift; [ -n "${NTFY_URL:-}" ] || return 0
 die() { printf '%s [deploy-staging][FATAL] %s\n' "$(now)" "$*" >&2; notify high "staging deploy FAILED: $*"; exit 1; }
 
 compose() { docker compose --env-file "$ROOT/.env" -p proxcloud-staging -f "$ROOT/docker-compose.yml" "$@"; }
+
+# seed_smoke: idempotent smoke fixture (ADR-0016 §4), mirroring the migrator —
+# a one-shot `seed` compose service (entrypoint proxcloud seed-smoke) run with
+# `run --rm`. SMOKE_SEED-gated (default ON in staging). Reads SMOKE_EMAIL /
+# SMOKE_PASSWORD from /opt/proxcloud/.env via the service's env_file; the values
+# are never echoed. Output captured. MUST run AFTER migrations so the schema
+# exists, and BEFORE the smoke gate so the smoke user can log in.
+seed_smoke() {
+  if [ "$SMOKE_SEED" != "1" ]; then
+    log "SMOKE_SEED=$SMOKE_SEED — skipping smoke seed"
+    return 0
+  fi
+  if [ -z "${SMOKE_EMAIL:-}" ] || [ -z "${SMOKE_PASSWORD:-}" ]; then
+    die "SMOKE_SEED=1 but SMOKE_EMAIL/SMOKE_PASSWORD are unset in $ROOT/.env"
+  fi
+  log "seed-smoke (idempotent) — output captured to state/last-seed.log"
+  if ! timeout "$MIGRATE_TIMEOUT" \
+    docker compose --env-file "$ROOT/.env" -p proxcloud-staging -f "$ROOT/docker-compose.yml" \
+      run --rm seed 2>&1 | tee "$STATE_DIR/last-seed.log"; then
+    die "seed-smoke failed/timed out (see state/last-seed.log)"
+  fi
+}
 
 ghcr_login() {
   [ -n "${GHCR_TOKEN:-}" ] || return 0
@@ -93,6 +117,10 @@ do_deploy() {
     compose logs --no-color --tail 200 backend | tee "$STATE_DIR/last-migrate.log" || true
     die "backend unhealthy or version mismatch (migration failure? see state/last-migrate.log)"
   fi
+
+  # Schema is present now (backend healthy => migrations applied). Seed the smoke
+  # fixture before the smoke gate so smoke-staging's login assertion can pass.
+  seed_smoke
 
   log "start frontend + caddy"
   compose up -d frontend caddy

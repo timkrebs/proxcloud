@@ -1,4 +1,4 @@
-.PHONY: dev backend frontend build test check gen-types compose
+.PHONY: dev backend frontend build test check gen-types compose restore-drill
 
 # Native dev: backend with hot reload + next dev (two processes).
 dev:
@@ -36,3 +36,8 @@ check:
 
 compose:
 	docker-compose up --build
+
+# Prove a pg_dump snapshot restores (release-engineer.md / disaster-recovery).
+# Spins its OWN throwaway Postgres and never touches a dev/prod `proxcloud` DB.
+restore-drill:
+	./deploy/restore-drill.sh

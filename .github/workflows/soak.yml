@@ -1,0 +1,79 @@
+# soak — the 24h soak / cleanup sweep (ADR-0014 §5). A scheduled housekeeping
+# pass that stops the retired blue/green color once it is past its soak window
+# and prunes old local images, keeping the last N per repo. It is NOT part of a
+# wave: the wave ends WARM (deploy-prod writes state/last-cutover) and this sweep
+# turns that 24h soak into a data marker rather than a pinned, idling job.
+#
+# SECURITY (ADR-0014 §5/§7): soak uses a DEDICATED, least-privilege SSH key
+# (secrets.SOAK_SSH_KEY) pinned server-side to soak-wrapper.sh — a forced command
+# that can do EXACTLY ONE thing, exec the read-only soak.sh. The soak key CANNOT
+# deploy, CANNOT rollback, CANNOT pass any argument; it is strictly more locked
+# down than the deploy key, and it is a REPO secret (not the prod-environment
+# PROD_SSH_KEY) so this unattended hourly run never needs a review approval.
+# soak.sh never flips the proxy nor rewrites live-color and echoes no secret.
+name: soak
+
+on:
+  schedule:
+    # Hourly, offset off the top of the hour to avoid the cron thundering herd.
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+# Least privilege: this workflow only SSHes a read-only sweep. No packages, no
+# contents:write, no environment.
+permissions:
+  contents: read
+
+# Share the wave's SERIAL group (ADR-0014 §3) so a soak NEVER races a live
+# cutover: a soak queued while a deploy-pve01 wave runs waits for it; it never
+# interrupts (and cancel-in-progress:false means a running soak is never aborted
+# mid-sweep either).
+concurrency:
+  group: deploy-pve01
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    runs-on: [self-hosted, homelab]
+    steps:
+      - name: Soak sweep (stop retired color past soak + prune images)
+        env:
+          SSH_TARGET: ${{ vars.PROD_SSH_HOST }}
+          SSH_KEY: ${{ secrets.SOAK_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [ -n "$SSH_TARGET" ] || { echo "::error::vars.PROD_SSH_HOST is not set"; exit 1; }
+          [ -n "$SSH_KEY" ] || { echo "::error::secrets.SOAK_SSH_KEY is not set (dedicated soak-only key; see docs/runbooks and deploy/README)"; exit 1; }
+          [ -n "$SSH_KNOWN_HOSTS" ] || { echo "::error::secrets.SSH_KNOWN_HOSTS is not set (ssh-keyscan the guests once)"; exit 1; }
+
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/soak_key" && chmod 600 "$HOME/.ssh/soak_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts" && chmod 600 "$HOME/.ssh/known_hosts"
+
+          # The forced-command soak-wrapper accepts EXACTLY `soak` (no args) and
+          # execs the read-only soak.sh server-side. soak.sh echoes no secret.
+          echo "::group::soak (server-side stop-retired + prune)"
+          ssh -i "$HOME/.ssh/soak_key" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o ConnectTimeout=20 \
+            "$SSH_TARGET" "soak" 2>&1 | tee soak.log
+          echo "::endgroup::"
+
+      - name: Summarize
+        if: ${{ always() && hashFiles('soak.log') != '' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Soak sweep"
+            echo ""
+            echo '```'
+            tail -n 30 soak.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scrub SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/soak_key" "$HOME/.ssh/known_hosts"

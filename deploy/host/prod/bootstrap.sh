@@ -31,15 +31,32 @@ mkdir -p "$ROOT/state" "$ROOT/data/snapshots" "$ROOT/data/tls" "$ROOT/caddy/upst
 # 4. active.caddy symlink -> blue.caddy (relative, idempotent)
 ln -sfn blue.caddy "$ROOT/caddy/upstream/active.caddy"
 
-# 5. deploy user's forced-command authorized_keys (public key => safe to handle)
+# 5. deploy user's forced-command authorized_keys (public keys => safe to handle)
+#    Two DISTINCT keys, two DISTINCT forced commands (ADR-0014 §5/§7):
+#      - ci-deploy-key -> deploy-wrapper.sh  (deploy <ref> | rollback)
+#      - ci-soak-key   -> soak-wrapper.sh    (soak-only; no ref, no rollback —
+#                         strictly MORE locked down than the deploy key)
+#    The soak key exists so the hourly, unattended soak.yml never needs the
+#    prod-environment-gated deploy key (which would demand approval every hour).
 if [ -f "$ROOT/ci-deploy-key.pub" ] && [ -s "$ROOT/ci-deploy-key.pub" ]; then
   install -d -m 700 -o "$DEPLOY_USER" -g "$DEPLOY_USER" "/home/$DEPLOY_USER/.ssh"
-  key="$(cat "$ROOT/ci-deploy-key.pub")"
-  opts='command="/opt/proxcloud/bin/deploy-wrapper.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty'
-  printf '%s %s\n' "$opts" "$key" >"/home/$DEPLOY_USER/.ssh/authorized_keys"
-  chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.ssh/authorized_keys"
-  chmod 600 "/home/$DEPLOY_USER/.ssh/authorized_keys"
-  echo "bootstrap: forced-command authorized_keys installed for $DEPLOY_USER"
+  ak="/home/$DEPLOY_USER/.ssh/authorized_keys"
+  no_pty='no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty'
+  deploy_key="$(cat "$ROOT/ci-deploy-key.pub")"
+  {
+    printf 'command="/opt/proxcloud/bin/deploy-wrapper.sh",%s %s\n' "$no_pty" "$deploy_key"
+    if [ -f "$ROOT/ci-soak-key.pub" ] && [ -s "$ROOT/ci-soak-key.pub" ]; then
+      soak_key="$(cat "$ROOT/ci-soak-key.pub")"
+      printf 'command="/opt/proxcloud/bin/soak-wrapper.sh",%s %s\n' "$no_pty" "$soak_key"
+    fi
+  } >"$ak"
+  chown "$DEPLOY_USER:$DEPLOY_USER" "$ak"
+  chmod 600 "$ak"
+  if [ -f "$ROOT/ci-soak-key.pub" ] && [ -s "$ROOT/ci-soak-key.pub" ]; then
+    echo "bootstrap: forced-command authorized_keys installed for $DEPLOY_USER (deploy + soak keys)"
+  else
+    echo "bootstrap: forced-command authorized_keys installed for $DEPLOY_USER (deploy key only — no ci-soak-key.pub yet; soak.yml will be denied until it is added)"
+  fi
 else
   echo "bootstrap: WARNING no ci-deploy-key.pub — deploy user has no CI key yet"
 fi

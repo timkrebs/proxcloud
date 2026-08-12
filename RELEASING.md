@@ -20,13 +20,13 @@ and **ADR-0016** (smoke scope); this file is the operator's map.
          SBOM (syft) → artifact   ·   cosign keyless sign (best-effort)   ·   NEVER : latest
               │ conclusion=success  ·  workflow_run
               ▼
-       deploy.yml          (runs-on: [self-hosted, homelab] · serial group deploy-pve01)   ◀── next WS
+       deploy.yml          (runs-on: [self-hosted, homelab] · serial group deploy-pve01)
          deploy-staging ─▶ smoke-staging ─▶ gate-production (reviewer: timkrebs)
               ─▶ deploy-prod (blue/green cutover) ─▶ smoke-prod ─▶ [auto-rollback on fail]
          writes state/last-cutover
               ▼
-       soak.yml            (schedule hourly · shares group deploy-pve01)                    ◀── next WS
-         stop retired color older than 24h · prune images keeping last 10
+       soak.yml            (schedule hourly · shares group deploy-pve01 · soak-only key)
+         stop retired color older than 24h · prune local images keeping last 10
 ```
 
 Each arrow between workflows is a `workflow_run` edge: a separate run with its
@@ -36,11 +36,14 @@ or `deploy.yml`, which only fire on completed runs of the **base-repo** workflow
 (ADR-0014 §2). `latest` is never a deploy source; deploy resolves the exact
 `workflow_run.head_sha`, so what CI went green on is exactly what ships.
 
-**What exists today:** `ci.yml`, `publish.yml`, and `deploy.yml` (the CD wave —
+**What exists today:** `ci.yml`, `publish.yml`, `deploy.yml` (the CD wave —
 staging → smoke → prod gate → blue/green cutover → prod smoke → auto-rollback,
-plus a `v*` release job and an ntfy summary). `soak.yml` (the 24h soak/prune
-sweep) is the remaining workstream. The `deploy/` on-guest scripts remain the
-manual path for a from-scratch bring-up or an out-of-band fix.
+plus a `v*` release job and an ntfy summary), and `soak.yml` (the hourly
+soak/prune sweep — stops the retired color past 24h and prunes local images
+keeping the last 10, via a dedicated soak-only SSH key). The `deploy/` on-guest
+scripts remain the manual path for a from-scratch bring-up or an out-of-band fix.
+Operator runbooks live in `docs/runbooks/` (release, hotfix, rollback,
+staging-rebuild, disaster-recovery, failure-drills).
 
 ## Two rules that never bend
 
@@ -219,8 +222,15 @@ Settings → Environments → New environment → **`production`**:
 - [ ] (Optional) Restrict deployment branches to `main` and `v*` tags.
 
 Staging secrets (`STAGING_SSH_KEY`, staging `SMOKE_EMAIL`/`SMOKE_PASSWORD`),
-`SSH_KNOWN_HOSTS`, and `NTFY_URL` are repo secrets (or a separate `staging`
-environment) — they are not prod-gated. The staging `SMOKE_*` **variables**
+`SSH_KNOWN_HOSTS`, `NTFY_URL`, and **`SOAK_SSH_KEY`** are repo secrets (or a
+separate `staging` environment) — they are not prod-gated. `SOAK_SSH_KEY` is the
+**dedicated soak-only** private key used by the unattended hourly `soak.yml`; its
+public half (`ci-soak-key.pub`) must be placed on the prod guest at
+`/opt/proxcloud/ci-soak-key.pub` before running `bootstrap.sh`, which installs it
+with the `soak-wrapper.sh` forced command (soak-only; cannot deploy/rollback —
+see `deploy/README.md` §6). Generate it like the deploy key:
+`ssh-keygen -t ed25519 -N '' -f ci-soak-key -C proxcloud-soak`; store the private
+key as `SOAK_SSH_KEY`, copy `ci-soak-key.pub` to the prod guest. The staging `SMOKE_*` **variables**
 (`STAGING_SSH_HOST`, `STAGING_BASE_URL`, `SMOKE_TENANT`, `SMOKE_PROJECT`,
 `SMOKE_NODE`, `SMOKE_TEMPLATE`, `SMOKE_STORAGE`, `SMOKE_BRIDGE`, `SMOKE_VMID`,
 optional `PROD_REVIEWER`) are repo-level variables; the `production` environment
