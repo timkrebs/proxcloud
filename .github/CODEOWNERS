@@ -1,0 +1,14 @@
+# Code owners for Proxcloud. Every PR requires review from the owner(s) of the
+# files it touches (enforced by branch protection's "require review from Code
+# Owners"). See RELEASING.md for the delivery process.
+
+# Default owner for everything.
+*                       @timkrebs
+
+# Security-sensitive surfaces — a change here alters what runs on the homelab or
+# how secrets flow. Called out separately as a reminder to review with extra
+# care (workflow injection, action pinning, deploy-key scope, secret handling).
+/.github/workflows/     @timkrebs
+/deploy/                @timkrebs
+/.gitleaks.toml         @timkrebs
+/.github/CODEOWNERS     @timkrebs

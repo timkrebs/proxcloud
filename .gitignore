@@ -1,7 +1,20 @@
-# Secrets — never commit
+# Secrets — never commit. Ignore every .env* variant; the placeholder-only
+# .env.example is the sole tracked exception.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Terraform (deploy/terraform) — state, provider cache, and real tfvars.
+# Example tfvars are tracked so the shape is documented.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
 
 # Go
 backend/bin/

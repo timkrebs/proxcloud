@@ -1,0 +1,23 @@
+# gitleaks configuration for Proxcloud.
+# Extends the full default ruleset and allowlists known false positives so the
+# CI secret-scan gate stays green without weakening real detection.
+title = "proxcloud"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known false positives (no real secret has ever been committed)"
+
+# The `generic-api-key` rule matches the literal string "Argon2id/bcrypt" — the
+# hashing-algorithm names in the internal/auth/session.go package doc comment,
+# not a credential. Scoped to that exact string so nothing else is masked.
+regexes = [
+  '''Argon2id/bcrypt''',
+]
+
+# .env.example carries placeholder values (e.g. SECRETS_KEY=<openssl rand -hex 32>)
+# that look secret-shaped but are documentation only.
+paths = [
+  '''(^|/)\.env\.example$''',
+]
