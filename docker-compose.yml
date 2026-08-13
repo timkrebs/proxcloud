@@ -23,6 +23,8 @@ services:
     volumes:
       - ./backend:/app
     env_file: .env
+    extra_hosts:
+      - "pve01.proxcloud.lab:192.168.1.128"
     environment:
       # Container always binds :8080; host port configurable (BACKEND_PORT).
       - LISTEN_ADDR=:8080
