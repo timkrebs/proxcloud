@@ -343,7 +343,7 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ch, err := h.Store.GetLoginChallengeByTokenHash(ctx, hashToken(c.Value))
 	if err != nil || ch.ConsumedAt != nil || h.Sessions.now().After(ch.ExpiresAt) {
-		http.SetCookie(w, h.Sessions.ClearChallengeCookie())
+		http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))
 		writeErr(w, challengeExpired())
 		return
 	}
@@ -399,7 +399,7 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if locked {
-			http.SetCookie(w, h.Sessions.ClearChallengeCookie())
+			http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))
 			pending.Finalize(ctx, "denied", map[string]any{"status": http.StatusUnauthorized, "locked": true})
 			writeErr(w, challengeExpired())
 			return
@@ -419,7 +419,7 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !won {
-		http.SetCookie(w, h.Sessions.ClearChallengeCookie())
+		http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))
 		pending.Finalize(ctx, "denied", map[string]any{"status": http.StatusUnauthorized})
 		writeErr(w, challengeExpired())
 		return
@@ -453,7 +453,7 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		h.Limiter.Reset(ip)
 	}
 	http.SetCookie(w, cookie)
-	http.SetCookie(w, h.Sessions.ClearChallengeCookie())
+	http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))
 	pending.Finalize(ctx, "success", map[string]any{"status": http.StatusNoContent, "user_id": ch.UserID})
 	h.logger().Info("login/totp ok", "user_id", ch.UserID)
 	w.WriteHeader(http.StatusNoContent)

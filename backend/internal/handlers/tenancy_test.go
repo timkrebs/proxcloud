@@ -49,7 +49,7 @@ func newHarness(t *testing.T, mock *proxmoxtest.MockClient) *harness {
 func newHarnessLog(t *testing.T, mock *proxmoxtest.MockClient, log *slog.Logger) *harness {
 	t.Helper()
 	fake := storetest.New()
-	sessions := auth.NewSessions(fake, false, time.Hour, 24*time.Hour)
+	sessions := auth.NewSessions(fake, false, false, time.Hour, 24*time.Hour)
 	authH := &auth.Handler{Sessions: sessions, Store: fake, Hasher: auth.NewHasher(), Log: log}
 	mw := &authz.Middleware{Store: fake, Log: log}
 	reg := tasks.NewRegistry()

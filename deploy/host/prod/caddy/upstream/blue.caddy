@@ -6,6 +6,11 @@
 handle @api {
 	reverse_proxy proxcloud-blue-backend:8080 {
 		flush_interval -1                 # SSE: flush events immediately, no buffering
+		# Mode A (ADR-0015 §6): Cloudflare terminates TLS and this hop is plain
+		# HTTP, so tell the backend the EXTERNAL scheme is HTTPS. header_up SETS
+		# (overwrites) the value, so a client cannot spoof it — the backend keys
+		# the session cookie's Secure attribute off this.
+		header_up X-Forwarded-Proto https
 		transport http {
 			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
 		}

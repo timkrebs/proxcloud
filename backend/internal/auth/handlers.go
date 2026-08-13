@@ -255,7 +255,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		if h.Limiter != nil {
 			h.Limiter.Reset(ip) // password was correct; free the window for step two
 		}
-		http.SetCookie(w, h.Sessions.IssueChallengeCookie(token, challengeTTL))
+		http.SetCookie(w, h.Sessions.IssueChallengeCookie(r, token, challengeTTL))
 		h.logger().Info("login: second factor required", "user_id", user.ID)
 		writeJSON(w, http.StatusOK, types.LoginResponse{TotpRequired: true})
 		return
@@ -297,7 +297,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 			h.logger().Warn("logout revoke", "err", err)
 		}
 	}
-	http.SetCookie(w, h.Sessions.Clear())
+	http.SetCookie(w, h.Sessions.Clear(r))
 	w.WriteHeader(http.StatusNoContent)
 }
 

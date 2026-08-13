@@ -4,6 +4,10 @@
 handle @api {
 	reverse_proxy proxcloud-green-backend:8080 {
 		flush_interval -1                 # SSE: flush events immediately, no buffering
+		# Mode A (ADR-0015 §6): external TLS at Cloudflare, plain-HTTP hop here.
+		# header_up SETS (overwrites) X-Forwarded-Proto so a client cannot spoof
+		# it; the backend keys the session cookie's Secure attribute off this.
+		header_up X-Forwarded-Proto https
 		transport http {
 			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
 		}

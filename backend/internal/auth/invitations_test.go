@@ -29,7 +29,7 @@ func newInviteHandler(t *testing.T) (*Handler, *storetest.Fake) {
 	fake := storetest.New()
 	log := slog.New(slog.NewTextHandler(testWriter{t}, nil))
 	h := &Handler{
-		Sessions:      NewSessions(fake, false, time.Hour, 24*time.Hour),
+		Sessions:      NewSessions(fake, false, false, time.Hour, 24*time.Hour),
 		Store:         fake,
 		Hasher:        NewHasher(),
 		Log:           log,

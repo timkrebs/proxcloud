@@ -27,7 +27,7 @@ func newTestHandler(t *testing.T) (*Handler, *fakeStore) {
 	t.Helper()
 	fs := newFakeStore()
 	return &Handler{
-		Sessions: NewSessions(fs, false, time.Hour, 24*time.Hour),
+		Sessions: NewSessions(fs, false, false, time.Hour, 24*time.Hour),
 		Store:    fs,
 		Hasher:   NewHasher(),
 		Log:      slog.New(slog.NewTextHandler(testWriter{t}, nil)),
@@ -166,6 +166,72 @@ func TestLogin(t *testing.T) {
 				if env.Error.Code != tt.wantCode {
 					t.Errorf("code = %q, want %q", env.Error.Code, tt.wantCode)
 				}
+			}
+		})
+	}
+}
+
+// TestLoginCookieSecureFromForwardedProto locks the prod Mode-A fix: behind a
+// trusted proxy on a plain-HTTP hop (Caddy :80, TLS at Cloudflare), login must
+// still set a Secure proxcloud_session because the EXTERNAL connection is HTTPS,
+// signalled by X-Forwarded-Proto. It also proves the trust is gated: with the
+// proxy trust OFF, a client-supplied X-Forwarded-Proto can NOT flip the cookie
+// (no spoofing the scheme up or down).
+func TestLoginCookieSecureFromForwardedProto(t *testing.T) {
+	loginReq := func(xfp string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "http://guest/api/auth/login",
+			strings.NewReader(`{"email":"user@b.com","password":"correct-horse-battery"}`))
+		r.Header.Set("Content-Type", "application/json")
+		if xfp != "" {
+			r.Header.Set("X-Forwarded-Proto", xfp)
+		}
+		return r // httptest.NewRequest with http:// => r.TLS == nil (the plain hop)
+	}
+	sessionCookie := func(rec *httptest.ResponseRecorder) *http.Cookie {
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == CookieName {
+				return c
+			}
+		}
+		return nil
+	}
+
+	cases := []struct {
+		name                   string
+		trustProxy, secureBase bool
+		xfp                    string
+		wantSecure             bool
+	}{
+		{"trusted proxy + XFP=https → Secure (Mode A HTTPS user)", true, false, "https", true},
+		{"trusted proxy + XFP=http → not Secure (smoke over http)", true, false, "http", false},
+		{"trusted proxy + XFP comma-list → first hop wins", true, false, "https, http", true},
+		{"trusted proxy + no XFP → base fallback (fail-safe Secure)", true, true, "", true},
+		{"UNtrusted proxy IGNORES XFP=https (no spoof-up)", false, false, "https", false},
+		{"UNtrusted proxy: base Secure holds despite XFP=http", false, true, "http", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeStore()
+			h := &Handler{
+				Sessions: NewSessions(fs, tc.secureBase, tc.trustProxy, time.Hour, 24*time.Hour),
+				Store:    fs,
+				Hasher:   NewHasher(),
+				Log:      slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+				Limiter:  NewLoginLimiter(),
+			}
+			seedUser(t, h, fs, "user@b.com", "correct-horse-battery", false)
+
+			rec := httptest.NewRecorder()
+			h.Login(rec, loginReq(tc.xfp))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("login status = %d, want 200 (%s)", rec.Code, rec.Body)
+			}
+			c := sessionCookie(rec)
+			if c == nil {
+				t.Fatal("login set no proxcloud_session cookie")
+			}
+			if c.Secure != tc.wantSecure {
+				t.Fatalf("cookie Secure = %v, want %v", c.Secure, tc.wantSecure)
 			}
 		})
 	}
@@ -438,7 +504,7 @@ func TestSessionVerify(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := newFakeStore()
 			fs.now = func() time.Time { return base }
-			s := NewSessions(fs, false, time.Hour, 24*time.Hour)
+			s := NewSessions(fs, false, false, time.Hour, 24*time.Hour)
 			s.now = func() time.Time { return base }
 			u, _ := fs.CreateUser(context.Background(), store.CreateUserParams{
 				Email: "u@b.com", PasswordHash: "x", PasswordAlgo: AlgoArgon2id,
@@ -454,7 +520,7 @@ func TestSessionVerify(t *testing.T) {
 
 func TestSessionTokenStoredHashedNeverRaw(t *testing.T) {
 	fs := newFakeStore()
-	s := NewSessions(fs, false, time.Hour, 24*time.Hour)
+	s := NewSessions(fs, false, false, time.Hour, 24*time.Hour)
 	u, _ := fs.CreateUser(context.Background(), store.CreateUserParams{Email: "u@b.com", PasswordHash: "x", PasswordAlgo: AlgoArgon2id})
 	c, err := s.Issue(context.Background(), u.ID, nil)
 	if err != nil {

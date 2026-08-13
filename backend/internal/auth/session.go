@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
@@ -60,16 +61,44 @@ type Identity struct {
 // Sessions issues, verifies, and revokes Postgres-backed sessions.
 type Sessions struct {
 	store       store.Store
-	secure      bool // cookie Secure attribute (true behind TLS)
+	secureBase  bool // default Secure when no trusted-proxy scheme signal
+	trustProxy  bool // honor X-Forwarded-Proto from the reverse proxy
 	idleTTL     time.Duration
 	absoluteTTL time.Duration
 	now         func() time.Time
 }
 
-// NewSessions constructs a session manager. secure controls the cookie's
-// Secure attribute; idleTTL and absoluteTTL bound inactivity and total lifetime.
-func NewSessions(st store.Store, secure bool, idleTTL, absoluteTTL time.Duration) *Sessions {
-	return &Sessions{store: st, secure: secure, idleTTL: idleTTL, absoluteTTL: absoluteTTL, now: time.Now}
+// NewSessions constructs a session manager. secure is the default cookie Secure
+// attribute; trustProxy makes the Secure attribute follow the reverse proxy's
+// X-Forwarded-Proto (production behind Caddy). idleTTL and absoluteTTL bound
+// inactivity and total lifetime.
+func NewSessions(st store.Store, secure, trustProxy bool, idleTTL, absoluteTTL time.Duration) *Sessions {
+	return &Sessions{store: st, secureBase: secure, trustProxy: trustProxy, idleTTL: idleTTL, absoluteTTL: absoluteTTL, now: time.Now}
+}
+
+// secureFor decides the Secure cookie attribute for THIS request. Behind a
+// trusted proxy (production Caddy, ADR-0015) the proxy sets X-Forwarded-Proto to
+// the true external scheme and OVERWRITES any client-supplied value, so the
+// cookie is Secure iff the user's connection is HTTPS — correct even though the
+// proxy→backend hop is plain HTTP (prod Mode A: Caddy :80 behind a Cloudflare
+// Tunnel). Without a trusted proxy it falls back to the real connection scheme
+// or the configured base (Secure unless InsecureCookies); a missing forwarded
+// scheme where one is expected therefore fails safe to Secure, never down.
+func (s *Sessions) secureFor(r *http.Request) bool {
+	if r == nil {
+		return s.secureBase
+	}
+	if s.trustProxy {
+		if xfp := r.Header.Get("X-Forwarded-Proto"); xfp != "" {
+			// A well-behaved proxy sets a single value; be robust to a comma-list
+			// ("https, http") by taking the first (client-facing) hop.
+			if i := strings.IndexByte(xfp, ','); i >= 0 {
+				xfp = xfp[:i]
+			}
+			return strings.EqualFold(strings.TrimSpace(xfp), "https")
+		}
+	}
+	return r.TLS != nil || s.secureBase
 }
 
 // hashToken returns the hex SHA-256 of a raw token; only this is persisted.
@@ -104,7 +133,7 @@ func (s *Sessions) Issue(ctx context.Context, userID string, r *http.Request) (*
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secure,
+		Secure:   s.secureFor(r),
 		MaxAge:   int(s.absoluteTTL.Seconds()),
 	}, nil
 }
@@ -114,42 +143,42 @@ func (s *Sessions) Issue(ctx context.Context, userID string, r *http.Request) (*
 // never rides along on non-auth requests, and its lifetime matches the stored
 // challenge (LOGIN_CHALLENGE_TTL). Verify/Authenticate never read this cookie —
 // holding it grants nothing but the right to attempt POST /api/auth/login/totp.
-func (s *Sessions) IssueChallengeCookie(token string, ttl time.Duration) *http.Cookie {
+func (s *Sessions) IssueChallengeCookie(r *http.Request, token string, ttl time.Duration) *http.Cookie {
 	return &http.Cookie{
 		Name:     ChallengeCookieName,
 		Value:    token,
 		Path:     "/api/auth",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secure,
+		Secure:   s.secureFor(r),
 		MaxAge:   int(ttl.Seconds()),
 	}
 }
 
 // ClearChallengeCookie returns an expired proxcloud_totp cookie that removes the
 // interim challenge from the browser (on success, lockout, or expiry).
-func (s *Sessions) ClearChallengeCookie() *http.Cookie {
+func (s *Sessions) ClearChallengeCookie(r *http.Request) *http.Cookie {
 	return &http.Cookie{
 		Name:     ChallengeCookieName,
 		Value:    "",
 		Path:     "/api/auth",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secure,
+		Secure:   s.secureFor(r),
 		MaxAge:   -1,
 	}
 }
 
 // Clear returns an expired cookie that removes the session from the browser.
 // Server-side revocation is done separately (Revoke) so a stolen cookie dies.
-func (s *Sessions) Clear() *http.Cookie {
+func (s *Sessions) Clear(r *http.Request) *http.Cookie {
 	return &http.Cookie{
 		Name:     CookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   s.secure,
+		Secure:   s.secureFor(r),
 		MaxAge:   -1,
 	}
 }

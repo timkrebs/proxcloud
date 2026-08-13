@@ -54,7 +54,7 @@ func TestAccessLogRedactsInviteToken(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	authHandler := &auth.Handler{
-		Sessions: auth.NewSessions(fake, false, time.Hour, 24*time.Hour),
+		Sessions: auth.NewSessions(fake, false, false, time.Hour, 24*time.Hour),
 		Store:    fake,
 		Hasher:   auth.NewHasher(),
 		Log:      log,

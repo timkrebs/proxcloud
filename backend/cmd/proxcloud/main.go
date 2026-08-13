@@ -156,7 +156,7 @@ func runServe(log *slog.Logger) {
 	}
 
 	hasher := auth.NewHasher()
-	sessions := auth.NewSessions(st, !cfg.InsecureCookies, cfg.SessionIdleTTL, cfg.SessionAbsoluteTTL)
+	sessions := auth.NewSessions(st, !cfg.InsecureCookies, cfg.TrustProxyHeaders, cfg.SessionIdleTTL, cfg.SessionAbsoluteTTL)
 	authHandler := &auth.Handler{
 		Sessions: sessions,
 		Store:    st,

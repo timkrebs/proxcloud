@@ -32,7 +32,7 @@ func newTOTPHandler(t *testing.T) (*Handler, *fakeStore) {
 	}
 	log := slog.New(slog.NewTextHandler(testWriter{t}, nil))
 	h := &Handler{
-		Sessions:          NewSessions(fs, false, time.Hour, 24*time.Hour),
+		Sessions:          NewSessions(fs, false, false, time.Hour, 24*time.Hour),
 		Store:             fs,
 		Hasher:            NewHasher(),
 		Log:               log,

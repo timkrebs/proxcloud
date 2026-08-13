@@ -30,7 +30,7 @@ func buildRealRouter(t *testing.T) chi.Routes {
 	deps := httpserver.Deps{
 		Cfg:       &config.Config{},
 		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Auth:      &auth.Handler{Sessions: auth.NewSessions(nil, false, time.Hour, 24*time.Hour)},
+		Auth:      &auth.Handler{Sessions: auth.NewSessions(nil, false, false, time.Hour, 24*time.Hour)},
 		Health:    noop,
 		Events:    noop,                   // mounts GET /api/events
 		ConsoleWS: http.HandlerFunc(noop), // mounts GET /api/console/ws/{sessionId}

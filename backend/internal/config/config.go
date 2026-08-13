@@ -77,6 +77,16 @@ type Config struct {
 	// opt-out (modern browsers accept Secure cookies on http://localhost).
 	InsecureCookies bool
 
+	// TrustProxyHeaders honors X-Forwarded-Proto from the reverse proxy when
+	// deciding the cookie Secure attribute. Production ALWAYS runs behind a
+	// single trusted proxy (Caddy, ADR-0015) that terminates/represents the
+	// external TLS and overwrites X-Forwarded-Proto (a client value cannot leak
+	// through), so the backend sees a plain-HTTP hop yet must set Secure when the
+	// external connection is HTTPS (prod Mode A: Caddy :80 behind a Cloudflare
+	// Tunnel). Defaults on in production, off in dev/direct. Same trust the
+	// RealIP middleware already places in the proxy's X-Forwarded-For.
+	TrustProxyHeaders bool
+
 	ListenAddr string
 	Dev        bool
 }
@@ -108,6 +118,9 @@ func Load() (*Config, error) {
 		SMTPStartTLS:       envBool("SMTP_STARTTLS", true),
 		TOTPIssuer:         envOr("TOTP_ISSUER", "Proxcloud"),
 	}
+	// Behind Caddy in production (ADR-0015), so trust the proxy's forwarded
+	// scheme by default there; explicit override via TRUST_PROXY_HEADERS.
+	cfg.TrustProxyHeaders = envBool("TRUST_PROXY_HEADERS", !cfg.Dev)
 	// Dev-only convenience default so `go run` works without a compose file;
 	// in production DATABASE_URL must be set explicitly (fail-closed below).
 	if cfg.DatabaseURL == "" && cfg.Dev {

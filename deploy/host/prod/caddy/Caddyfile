@@ -7,6 +7,12 @@
 # at Cloudflare) is the likely prod path and is the DEFAULT here. To use a LAN
 # internal CA or a public ACME cert instead, comment Mode A and uncomment B/C
 # and set FRONTEND_ORIGIN in .env to match the scheme+host.
+#
+# NOTE: upstream/*.caddy force `header_up X-Forwarded-Proto https` so the backend
+# marks the session cookie Secure. All three modes serve the site over HTTPS
+# externally, so this constant is correct for A/B/C alike. Only change it (to
+# `{http.request.scheme}`) if you deliberately serve the public site over plain
+# HTTP — an unsupported, insecure configuration.
 
 {
 	admin localhost:2019

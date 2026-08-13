@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,15 +28,58 @@ type apiClient struct {
 }
 
 func newAPIClient(base string, httpTimeout time.Duration) (*apiClient, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
+	jar := newPermissiveJar()
 	return &apiClient{
 		base:   strings.TrimRight(base, "/"),
 		hc:     &http.Client{Jar: jar, Timeout: httpTimeout},
 		stream: &http.Client{Jar: jar}, // Timeout 0: long-lived stream, ctx-bounded
 	}, nil
+}
+
+// permissiveJar is a minimal cookie jar for the smoke: it stores cookies per
+// host and returns them regardless of the Secure attribute or request scheme.
+// Prod (ADR-0015 Mode A) terminates TLS at Cloudflare, so the backend correctly
+// marks proxcloud_session Secure (via X-Forwarded-Proto: https) — but the
+// smoke's probe reaches the guest over a trusted, on-box PLAIN-HTTP hop, and a
+// standard cookiejar drops Secure cookies on http:// requests. This carries the
+// login session across the flow. Single-host, last-write-wins by name; the
+// Secure-attribute correctness itself is covered by the backend's unit test, not
+// relaxed here. It satisfies http.CookieJar.
+type permissiveJar struct {
+	mu      sync.Mutex
+	cookies map[string]map[string]string // host -> name -> value
+}
+
+func newPermissiveJar() *permissiveJar {
+	return &permissiveJar{cookies: map[string]map[string]string{}}
+}
+
+func (j *permissiveJar) SetCookies(u *url.URL, cs []*http.Cookie) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	host := u.Hostname()
+	m := j.cookies[host]
+	if m == nil {
+		m = map[string]string{}
+		j.cookies[host] = m
+	}
+	for _, c := range cs {
+		if c.MaxAge < 0 || (c.Value == "" && !c.Expires.IsZero()) {
+			delete(m, c.Name) // an expired/cleared cookie
+			continue
+		}
+		m[c.Name] = c.Value
+	}
+}
+
+func (j *permissiveJar) Cookies(u *url.URL) []*http.Cookie {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var out []*http.Cookie
+	for name, val := range j.cookies[u.Hostname()] {
+		out = append(out, &http.Cookie{Name: name, Value: val})
+	}
+	return out
 }
 
 // do sends an optional JSON body and returns the status code and raw response
