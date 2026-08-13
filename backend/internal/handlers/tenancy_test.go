@@ -497,6 +497,46 @@ func TestCreateDeleteCreateSameVMIDSucceeds(t *testing.T) {
 	waitOwnership(t, hh.fake, vmid, "active")
 }
 
+// --- a delete task stays pollable after its VMID's ownership is tombstoned ---
+//
+// Regression: releasing ownership on delete tombstones the VMID, but the caller
+// must still be able to poll the very delete task to completion (checkTaskOwnership
+// uses the task-read resolver, which accepts a tombstoned row for the owning
+// tenant). Otherwise the destroy task 404s the instant the tombstone lands.
+func TestDeleteTaskPollableAfterTombstone(t *testing.T) {
+	const vmid = 8010
+	taskUPID := "UPID:pve01:0001:0002:0003:vzdestroy:8010:root@pam:"
+	mock := &proxmoxtest.MockClient{
+		OnTaskStatus: func(_ context.Context, upid proxmox.UPID) (*proxmox.TaskInfo, error) {
+			return &proxmox.TaskInfo{UPID: upid, Node: "pve01", Type: "vzdestroy", ID: "8010", StartTime: 10, EndTime: 20, ExitStatus: "OK"}, nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	// The guest was deleted: the delete-release tombstoned its ownership row.
+	ownID := hh.fake.AddOwnership(tenantA, projA, vmid, "lxc", "pve01", "active", nil)
+	if err := hh.fake.TombstoneOwnership(context.Background(), ownID); err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+	up := url.PathEscape(taskUPID)
+
+	// The owning tenant polls the delete task to completion (was 404 before).
+	if rec := hh.req(t, hh.cookie(t, userA), http.MethodGet, "/api/tenants/"+tenantA+"/tasks/"+up, ""); rec.Code != http.StatusOK {
+		t.Fatalf("owner delete-task poll after tombstone = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// A different tenant still gets 404 — the tombstoned row keeps its owner.
+	tenantB := hh.fake.AddTenant("B", "b")
+	userB := hh.fake.AddUser("b@x.io", "Bo", false)
+	hh.fake.AddMembership(userB, "tenant", tenantB, "contributor")
+	if rec := hh.req(t, hh.cookie(t, userB), http.MethodGet, "/api/tenants/"+tenantB+"/tasks/"+up, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant delete-task poll = %d, want 404", rec.Code)
+	}
+}
+
 // waitTracked blocks until upid is a running tracked task (the engine goroutine
 // has submitted it) so a subsequent Complete is never lost to a race.
 func waitTracked(t *testing.T, reg *tasks.Registry, upid proxmox.UPID) {

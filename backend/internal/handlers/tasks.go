@@ -230,14 +230,17 @@ func (d *Deps) tenantOwnedVMIDs(ctx context.Context, tenantID string) (map[int]b
 }
 
 // checkTaskOwnership resolves a UPID's target VMID and verifies the active tenant
-// owns it, else 404 (never 403). A task whose target is not a VMID we can
-// attribute to the tenant is treated as not owned.
+// owns (or owned) it, else 404 (never 403). A task whose target is not a VMID we
+// can attribute to the tenant is treated as not owned. It uses the task-read
+// resolver, which also accepts a tombstoned row — a delete task tombstones its
+// own VMID on completion, and the caller must still be able to poll it to the
+// end (the tenant filter keeps this from leaking another tenant's tasks).
 func (d *Deps) checkTaskOwnership(ctx context.Context, upid proxmox.UPID, tenantID string) *types.APIError {
 	vmid, err := strconv.Atoi(upid.ID())
 	if err != nil || vmid < 1 {
 		return notFound("Task not found.")
 	}
-	if _, err := authz.ResolveOwnership(ctx, d.Store, vmid, tenantID); err != nil {
+	if _, err := authz.ResolveOwnershipForTask(ctx, d.Store, vmid, tenantID); err != nil {
 		return notFound("Task not found.")
 	}
 	return nil

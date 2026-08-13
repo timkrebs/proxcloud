@@ -35,3 +35,26 @@ func ResolveOwnership(ctx context.Context, s store.OwnershipStore, vmid int, ten
 	}
 	return o, nil
 }
+
+// ResolveOwnershipForTask is the ownership guard for READING a task or its log
+// by the VMID embedded in its UPID. Unlike ResolveOwnership it also accepts a
+// tombstoned row: a delete task tombstones its own VMID the instant the destroy
+// completes, yet the caller must still be able to poll that task to the end.
+// It returns the row when it exists and belongs to tenantID, regardless of
+// status; every other case is ErrNotOwned. This never widens cross-tenant
+// visibility — a tombstoned row keeps its owning tenant_id (and a later reuse of
+// the VMID revives the row under the NEW tenant), so a different tenant still
+// gets ErrNotOwned. Read-only: it must not be used to authorize a mutation.
+func ResolveOwnershipForTask(ctx context.Context, s store.OwnershipStore, vmid int, tenantID string) (*store.ResourceOwnership, error) {
+	o, err := s.GetOwnershipByVMID(ctx, vmid)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrNotOwned
+	}
+	if err != nil {
+		return nil, err
+	}
+	if o.TenantID != tenantID {
+		return nil, ErrNotOwned
+	}
+	return o, nil
+}
