@@ -14,7 +14,12 @@ vi.mock("next/link", () => ({
   ),
 }));
 vi.mock("@/lib/stores/toastStore", () => ({ pushToast: vi.fn() }));
-vi.mock("@/lib/api/queries", () => ({ useMe: vi.fn() }));
+vi.mock("@/lib/api/queries", () => ({
+  useMe: vi.fn(),
+  // BuildLine (Portal preferences) calls useVersion; return no data so it
+  // renders nothing and the assertions below are unaffected.
+  useVersion: vi.fn(() => ({ data: undefined })),
+}));
 vi.mock("@/lib/api/authMutations", () => ({
   useSessions: vi.fn(),
   useChangePassword: vi.fn(),
