@@ -197,12 +197,17 @@ jobs:
           # The forced command reads $SSH_ORIGINAL_COMMAND; the wrapper accepts
           # EXACTLY `deploy <ref>`. Word-splitting is safe: DEPLOY_REF is a
           # validated single token with no whitespace or globs.
+          # Always connect as the `deploy` user — the forced-command key lives in
+          # /home/deploy/.ssh/authorized_keys (first-boot.sh/bootstrap.sh pin
+          # DEPLOY_USER=deploy), NOT the runner's own account. `-l deploy` keeps
+          # STAGING_SSH_HOST/PROD_SSH_HOST as bare hosts.
           echo "::group::deploy.sh <ref> (server-side migrate + seed + health gate)"
           ssh -i "$HOME/.ssh/deploy_key" \
             -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             -o ConnectTimeout=20 \
+            -l deploy \
             "$SSH_TARGET" "deploy $DEPLOY_REF" 2>&1 | tee deploy-staging.log
           echo "::endgroup::"
 
@@ -317,6 +322,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             -o ConnectTimeout=20 \
+            -l deploy \
             "$SSH_TARGET" "deploy $DEPLOY_REF" 2>&1 | tee deploy-prod.log
           echo "::endgroup::"
 
@@ -383,6 +389,7 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             -o ConnectTimeout=20 \
+            -l deploy \
             "$SSH_TARGET" "rollback" 2>&1 | tee rollback.log
           echo "::endgroup::"
           {
