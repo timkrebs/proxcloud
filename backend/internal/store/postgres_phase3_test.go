@@ -230,6 +230,30 @@ func TestOwnershipLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reuse released vmid 103: %v", err)
 	}
+
+	// A TOMBSTONED VMID is free too: CreateOwnership revives the row in place
+	// (same id, fresh status) instead of colliding on the unique constraint —
+	// this is what lets a deleted guest's VMID be reused (create→delete→create).
+	// vmid 102 was tombstoned above.
+	revived, err := s.CreateOwnership(ctx, CreateOwnershipParams{
+		TenantID: ten.ID, ProjectID: proj.ID, VMID: 102, GuestType: "lxc",
+		Node: "pve01", CreatedBy: &creator.ID, Status: "pending",
+	})
+	if err != nil {
+		t.Fatalf("revive tombstoned vmid 102: %v", err)
+	}
+	if revived.ID != active.ID {
+		t.Fatalf("revive should reuse the tombstoned row id: got %s, want %s", revived.ID, active.ID)
+	}
+	if revived.Status != "pending" || revived.CreatedBy == nil || *revived.CreatedBy != creator.ID {
+		t.Fatalf("revived ownership = %+v, want pending with the new creator", revived)
+	}
+	// The revived row is live again, so a further create over it is a real conflict.
+	if _, err := s.CreateOwnership(ctx, CreateOwnershipParams{
+		TenantID: ten.ID, ProjectID: proj.ID, VMID: 102, GuestType: "lxc", Node: "pve01", Status: "active",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("create over a revived live row = %v, want ErrConflict", err)
+	}
 }
 
 // A duplicate slug (tenant or project) and a duplicate pool_id (globally, per

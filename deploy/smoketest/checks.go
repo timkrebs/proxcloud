@@ -237,7 +237,11 @@ func (r *Runner) checkCreateGuest(ctx context.Context) bool {
 		Bridge:           r.cfg.Bridge,
 		StartAfterCreate: false, // stopped => deletable
 	}
-	code, body, err := r.api.do(ctx, http.MethodPost, r.tenantPath("/guests"), req)
+	// A deleted VMID's ownership is released asynchronously (once the destroy
+	// task completes), so a create right after preCleanStaleVMID — or after a
+	// prior run's own delete — can briefly see a `conflict` 409 before the
+	// tombstone lands. Retry through that window; any other error fails at once.
+	code, body, err := r.createWithConflictRetry(ctx, req, 30*time.Second)
 	if err != nil {
 		r.fail(name, err.Error())
 		return false
@@ -264,6 +268,24 @@ func (r *Runner) checkCreateGuest(ctx context.Context) bool {
 	}
 	r.pass(name, fmt.Sprintf("LXC %d (%s) created via deployment %s", cr.VMID, r.guestName, short(cr.DeploymentID)))
 	return true
+}
+
+// createWithConflictRetry POSTs the create, retrying ONLY while the response is
+// a `conflict` 409 — the reserved VMID's ownership row has not been released yet
+// (the backend tombstones it asynchronously after a destroy completes) — up to
+// the budget. quota_exceeded and every other status return immediately.
+func (r *Runner) createWithConflictRetry(ctx context.Context, req createGuestRequest, budget time.Duration) (int, []byte, error) {
+	deadline := time.Now().Add(budget)
+	for {
+		code, body, err := r.api.do(ctx, http.MethodPost, r.tenantPath("/guests"), req)
+		if err != nil {
+			return 0, nil, err
+		}
+		if code != http.StatusConflict || errorCode(body) != "conflict" || time.Now().After(deadline) {
+			return code, body, nil
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // 5. sse — the stream flushes through the proxy (ADR-0015 §5). Any SSE frame

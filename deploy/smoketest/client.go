@@ -91,11 +91,33 @@ func (c *apiClient) getJSON(ctx context.Context, path string, out any) error {
 // httpErr renders a non-2xx response, preferring the backend's structured
 // {code,message} envelope over the raw body.
 func httpErr(method, path string, code int, body []byte) error {
-	var ae apiError
-	if json.Unmarshal(body, &ae) == nil && ae.Message != "" {
+	if ae, ok := parseAPIError(body); ok {
 		return fmt.Errorf("%s %s -> HTTP %d: %s (%s)", method, path, code, ae.Message, ae.Code)
 	}
 	return fmt.Errorf("%s %s -> HTTP %d: %s", method, path, code, snippet(body))
+}
+
+// parseAPIError extracts the backend error envelope, tolerating both the nested
+// {"error":{code,message}} shape and a flat {code,message} body.
+func parseAPIError(body []byte) (apiError, bool) {
+	var nested struct {
+		Error apiError `json:"error"`
+	}
+	if json.Unmarshal(body, &nested) == nil && nested.Error.Message != "" {
+		return nested.Error, true
+	}
+	var flat apiError
+	if json.Unmarshal(body, &flat) == nil && flat.Message != "" {
+		return flat, true
+	}
+	return apiError{}, false
+}
+
+// errorCode returns the machine-readable error code from a response body, or ""
+// when the body is not a recognizable error envelope.
+func errorCode(body []byte) string {
+	ae, _ := parseAPIError(body)
+	return ae.Code
 }
 
 func snippet(b []byte) string {

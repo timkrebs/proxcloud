@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/store"
 )
 
 // actionSpec maps a lifecycle action to its friendly label per guest type
@@ -133,7 +137,43 @@ func (d *Deps) DeleteGuest(w http.ResponseWriter, r *http.Request) {
 	}
 	res := types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: st.Name}
 	d.trackRes(upid, label, "deleting", res)
+	// Release the ownership reservation once the destroy actually completes: a
+	// successful vzdestroy/qmdestroy frees the VMID for reuse (a tombstoned row
+	// reads as un-owned and is revived by the next reservation). A failed destroy
+	// leaves the guest — and its ownership — intact.
+	if d.Store != nil && d.Registry != nil {
+		go d.tombstoneOwnershipAfterDestroy(ref.VMID, upid)
+	}
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
+}
+
+// tombstoneOwnershipAfterDestroy waits for a delete task to finish and, on
+// success, tombstones the guest's resource_ownership row so the VMID is freed
+// (reusable) and its reserved quota released. A failed or timed-out destroy
+// leaves the guest in place, so its ownership must stand — the reconciler stays
+// the backstop for any residual drift. Runs in its own goroutine: DeleteGuest
+// returns 202 and must not block on the Proxmox task.
+func (d *Deps) tombstoneOwnershipAfterDestroy(vmid int, upid proxmox.UPID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	outcome, err := d.Registry.AwaitCompletion(ctx, upid)
+	if err != nil {
+		d.logger().Warn("await destroy for ownership release", "vmid", vmid, "err", err)
+		return
+	}
+	if !outcome.Succeeded {
+		return // guest still exists — keep its ownership row intact
+	}
+	own, err := d.Store.GetOwnershipByVMID(ctx, vmid)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			d.logger().Warn("lookup ownership after destroy", "vmid", vmid, "err", err)
+		}
+		return
+	}
+	if err := d.Store.TombstoneOwnership(ctx, own.ID); err != nil {
+		d.logger().Warn("tombstone ownership after destroy", "vmid", vmid, "err", err)
+	}
 }
 
 // track registers the task and announces it on the event stream. Guest name

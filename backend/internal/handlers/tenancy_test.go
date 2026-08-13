@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -428,6 +429,72 @@ func TestCreateFinalizesOwnershipOnSuccess(t *testing.T) {
 	waitTracked(t, hh.registry, createUPID)
 	hh.registry.Complete(createUPID, true, "OK")
 	waitOwnership(t, hh.fake, 150, "active")
+}
+
+// --- delete releases ownership so a deleted VMID is reusable (regression) ---
+//
+// Bug: DELETE left resource_ownership at status=active, so the vmid UNIQUE
+// constraint made every future reservation of that VMID a phantom 409 "already
+// reserved or in use". This drives the full create→delete→create cycle on ONE
+// VMID and asserts the second create succeeds.
+func TestCreateDeleteCreateSameVMIDSucceeds(t *testing.T) {
+	const vmid = 250
+	createUPID1 := proxmox.UPID("UPID:pve01:1:2:3:vzcreate:250:u@pam:c1")
+	createUPID2 := proxmox.UPID("UPID:pve01:1:2:3:vzcreate:250:u@pam:c2")
+	deleteUPID := proxmox.UPID("UPID:pve01:1:2:3:vzdestroy:250:u@pam:")
+	var createCalls int32
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) { return nil, nil },
+		OnCreatePool:       func(context.Context, string, string) error { return nil },
+		OnCreateLXC: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			if atomic.AddInt32(&createCalls, 1) == 1 {
+				return createUPID1, nil
+			}
+			return createUPID2, nil
+		},
+		OnGuestStatus: func(context.Context, proxmox.GuestRef) (*proxmox.GuestStatusInfo, error) {
+			return &proxmox.GuestStatusInfo{Status: "stopped", Name: "cache-01"}, nil
+		},
+		OnDeleteGuest: func(context.Context, proxmox.GuestRef, bool) (proxmox.UPID, error) {
+			return deleteUPID, nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	c := hh.cookie(t, userA)
+
+	body := `{"type":"lxc","name":"cache-01","node":"pve01","vmid":250,"projectId":"` + projA + `",
+		"source":{"mode":"vztmpl","vztmplVolId":"local:vztmpl/x.tar.gz"},
+		"cores":1,"memoryMb":512,"diskGb":8,"storage":"local","bridge":"vmbr0"}`
+
+	// 1. Create the guest and finalize its reservation to active.
+	if rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantA+"/guests", body); rec.Code != http.StatusAccepted {
+		t.Fatalf("create #1 = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	waitTracked(t, hh.registry, createUPID1)
+	hh.registry.Complete(createUPID1, true, "OK")
+	waitOwnership(t, hh.fake, vmid, "active")
+
+	// 2. Delete it; on destroy completion the ownership row is tombstoned.
+	if rec := hh.req(t, c, http.MethodDelete, "/api/tenants/"+tenantA+"/guests/pve01/lxc/250", `{"confirmName":"cache-01"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("delete = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	waitTracked(t, hh.registry, deleteUPID)
+	hh.registry.Complete(deleteUPID, true, "OK")
+	waitOwnership(t, hh.fake, vmid, "tombstoned")
+
+	// 3. Re-create the SAME VMID: the tombstoned row must be revived, not 409.
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantA+"/guests", body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create #2 on the reused VMID = %d, want 202 — a deleted VMID must be reservable again (body %s)",
+			rec.Code, rec.Body.String())
+	}
+	waitTracked(t, hh.registry, createUPID2)
+	hh.registry.Complete(createUPID2, true, "OK")
+	waitOwnership(t, hh.fake, vmid, "active")
 }
 
 // waitTracked blocks until upid is a running tracked task (the engine goroutine

@@ -730,17 +730,40 @@ func (s *PgStore) GetOwnershipByVMID(ctx context.Context, vmid int) (*ResourceOw
 
 // CreateOwnership implements OwnershipStore. A nil CreatedBy inserts NULL; nil
 // Reserved* columns insert NULL (an active/backfilled row carries no reservation).
+//
+// A tombstoned VMID is free — ResolveOwnership (404), quota accounting, and
+// ListActiveVMIDs all treat it as gone — but the vmid UNIQUE constraint would
+// still block a plain INSERT and leak a phantom "already reserved" 409 after a
+// guest is deleted. ON CONFLICT (vmid) revives a tombstoned row in place (fresh
+// tenant/project/status, reservation reset, pve_upid cleared). A still-live
+// (active or pending) row is guarded out by the WHERE, so RETURNING yields no
+// row → ErrConflict — the genuine "that VMID is in use" case.
 func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) (*ResourceOwnership, error) {
 	const q = `INSERT INTO resource_ownership
 	             (tenant_id, project_id, vmid, guest_type, node, created_by, status,
 	              reserved_vcpu, reserved_ram_mb, reserved_disk_gb)
 	           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7, $8, $9, $10)
+	           ON CONFLICT (vmid) DO UPDATE SET
+	             tenant_id       = EXCLUDED.tenant_id,
+	             project_id      = EXCLUDED.project_id,
+	             guest_type      = EXCLUDED.guest_type,
+	             node            = EXCLUDED.node,
+	             created_by      = EXCLUDED.created_by,
+	             status          = EXCLUDED.status,
+	             reserved_vcpu   = EXCLUDED.reserved_vcpu,
+	             reserved_ram_mb = EXCLUDED.reserved_ram_mb,
+	             reserved_disk_gb = EXCLUDED.reserved_disk_gb,
+	             pve_upid        = NULL,
+	             updated_at      = now()
+	           WHERE resource_ownership.status = 'tombstoned'
 	           RETURNING ` + ownershipColumns
 	o, err := scanOwnership(s.q.QueryRow(ctx, q,
 		p.TenantID, p.ProjectID, p.VMID, p.GuestType, p.Node, p.CreatedBy, p.Status,
 		p.ReservedVCPU, p.ReservedRAMMB, p.ReservedDiskGB))
 	if err != nil {
-		if isUniqueViolation(err) {
+		// No row returned means ON CONFLICT matched a live (active/pending) row
+		// that the WHERE refused to revive — a real VMID collision.
+		if errors.Is(err, ErrNotFound) || isUniqueViolation(err) {
 			return nil, fmt.Errorf("store: create ownership: %w", ErrConflict)
 		}
 		return nil, fmt.Errorf("store: create ownership: %w", err)

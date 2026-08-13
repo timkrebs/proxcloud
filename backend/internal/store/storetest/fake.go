@@ -672,9 +672,22 @@ func (f *Fake) GetOwnershipByVMID(_ context.Context, vmid int) (*store.ResourceO
 func (f *Fake) CreateOwnership(_ context.Context, p store.CreateOwnershipParams) (*store.ResourceOwnership, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// Mirror the UNIQUE(vmid) constraint: a duplicate reservation is a conflict.
-	if _, ok := f.ownership[p.VMID]; ok {
-		return nil, fmt.Errorf("create ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+	// Mirror the postgres ON CONFLICT (vmid) revive: a live (active/pending) row
+	// is a conflict, but a tombstoned VMID is free — revive it in place (same id).
+	if existing, ok := f.ownership[p.VMID]; ok {
+		if existing.Status != "tombstoned" {
+			return nil, fmt.Errorf("create ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+		}
+		existing.TenantID = p.TenantID
+		existing.ProjectID = p.ProjectID
+		existing.GuestType = p.GuestType
+		existing.Node = p.Node
+		existing.CreatedBy = p.CreatedBy
+		existing.Status = p.Status
+		existing.PVEUPID = nil
+		existing.UpdatedAt = f.Now()
+		c := *existing
+		return &c, nil
 	}
 	id := f.next("own")
 	o := &store.ResourceOwnership{ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID, GuestType: p.GuestType, Node: p.Node, CreatedBy: p.CreatedBy, Status: p.Status, CreatedAt: f.Now(), UpdatedAt: f.Now()}
@@ -902,11 +915,22 @@ func (f *Fake) ReserveOwnership(_ context.Context, p store.ReserveOwnershipParam
 	if err := checkQuotaFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, p.Reserved); err != nil {
 		return nil, err
 	}
-	if _, ok := f.ownership[p.VMID]; ok {
-		return nil, fmt.Errorf("reserve ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+	rv, rr, rd := p.Reserved.VCPU, p.Reserved.RAMMB, p.Reserved.DiskGB
+	if existing, ok := f.ownership[p.VMID]; ok {
+		// A live (active/pending) row is a real conflict; a tombstoned VMID is
+		// free — revive it in place (mirrors postgres CreateOwnership ON CONFLICT).
+		if existing.Status != "tombstoned" {
+			return nil, fmt.Errorf("reserve ownership for vmid %d: %w", p.VMID, store.ErrConflict)
+		}
+		existing.TenantID, existing.ProjectID = p.TenantID, p.ProjectID
+		existing.GuestType, existing.Node, existing.CreatedBy = p.GuestType, p.Node, p.CreatedBy
+		existing.Status, existing.PVEUPID = "pending", nil
+		existing.ReservedVCPU, existing.ReservedRAMMB, existing.ReservedDiskGB = &rv, &rr, &rd
+		existing.UpdatedAt = f.Now()
+		c := *existing
+		return &c, nil
 	}
 	id := f.next("own")
-	rv, rr, rd := p.Reserved.VCPU, p.Reserved.RAMMB, p.Reserved.DiskGB
 	o := &store.ResourceOwnership{
 		ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID, GuestType: p.GuestType,
 		Node: p.Node, CreatedBy: p.CreatedBy, Status: "pending",
