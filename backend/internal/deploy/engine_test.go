@@ -19,6 +19,25 @@ func testEngine(mock *proxmoxtest.MockClient) (*Engine, *tasks.Registry) {
 	return NewEngine(mock, reg, events.NewBroker(), slog.New(slog.NewTextHandler(io.Discard, nil))), reg
 }
 
+// waitTracked blocks until upid is a running (tracked) task, so a subsequent
+// reg.Complete is never dropped by a Complete-before-Track race. Complete only
+// records tracked tasks (production's watcher only ever completes tasks it
+// already found in the running set); a test that completes before the engine's
+// Track would silently lose the outcome and hang. Poll like the handlers test.
+func waitTracked(t *testing.T, reg *tasks.Registry, upid proxmox.UPID) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, u := range reg.Running() {
+			if u == upid {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("task %s was never tracked", upid)
+}
+
 // awaitStatus polls Get until the deployment leaves "running" or times out.
 func awaitStatus(t *testing.T, e *Engine, id string) *types.Deployment {
 	t.Helper()
@@ -66,10 +85,13 @@ func TestEngineCreateAndStartSucceed(t *testing.T) {
 		t.Fatalf("initial deployment = %+v", dep)
 	}
 
-	// Simulate the watcher (the single PVE poller) completing each task.
+	// Simulate the watcher (the single PVE poller) completing each task. Wait
+	// until the engine has tracked the task before completing it — Complete on an
+	// untracked UPID is dropped, which would hang the engine (esp. under -race).
 	for i := 0; i < 2; i++ {
 		select {
 		case u := <-created:
+			waitTracked(t, reg, u)
 			reg.Complete(u, true, "OK")
 		case <-time.After(3 * time.Second):
 			t.Fatalf("task %d never submitted", i)
@@ -101,11 +123,11 @@ func TestEngineCreateTaskFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Watcher reports the real PVE failure.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		reg.Complete("UPID:pve01:3:3:3:qmcreate:106:u@pam:", false, "unable to create image: no space left")
-	}()
+	// Watcher reports the real PVE failure once the task is tracked (no timing
+	// race: wait for Track, then Complete).
+	upid := proxmox.UPID("UPID:pve01:3:3:3:qmcreate:106:u@pam:")
+	waitTracked(t, reg, upid)
+	reg.Complete(upid, false, "unable to create image: no space left")
 
 	final := awaitStatus(t, e, dep.ID)
 	if final.Status != "failed" {
