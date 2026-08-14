@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -429,5 +430,33 @@ func TestEngineCatalogReadinessNeverPasses(t *testing.T) {
 	// No connection is surfaced for a guest that never became reachable.
 	if final.Connection != "" {
 		t.Errorf("connection must be empty on readiness failure, got %q", final.Connection)
+	}
+}
+
+// TestPruneRunsEvictsOldFinished is the H3 regression: the in-memory run map is
+// bounded — old FINISHED runs are evicted past the cap, while running and recent
+// runs are preserved so a create spammer cannot grow it without limit.
+func TestPruneRunsEvictsOldFinished(t *testing.T) {
+	e, _ := testEngine(&proxmoxtest.MockClient{})
+	old := time.Now().Add(-2 * runRetention)
+	for i := 0; i < maxRuns+50; i++ {
+		id := fmt.Sprintf("dep_old_%d", i)
+		e.runs[id] = &types.Deployment{ID: id, Status: "succeeded", CreatedAt: old}
+	}
+	e.runs["dep_running"] = &types.Deployment{ID: "dep_running", Status: "running", CreatedAt: old}
+	e.runs["dep_recent"] = &types.Deployment{ID: "dep_recent", Status: "succeeded", CreatedAt: time.Now()}
+
+	e.mu.Lock()
+	e.pruneRunsLocked()
+	e.mu.Unlock()
+
+	if _, ok := e.runs["dep_running"]; !ok {
+		t.Fatal("a running deployment was evicted")
+	}
+	if _, ok := e.runs["dep_recent"]; !ok {
+		t.Fatal("a recently-finished deployment was evicted")
+	}
+	if len(e.runs) > maxRuns {
+		t.Fatalf("run map not bounded after prune: %d entries (> %d)", len(e.runs), maxRuns)
 	}
 }
