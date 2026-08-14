@@ -22,6 +22,10 @@ import (
 // change-password). Aligns with ADR-0006's move to real user credentials.
 const minPasswordLen = 12
 
+// maxPasswordBytes caps a user-chosen password so Argon2id never hashes an
+// attacker-sized input (CPU/RAM DoS). 1 KiB is far above any real passphrase.
+const maxPasswordBytes = 1024
+
 // defaultLoginChallengeTTL is the fallback interim-challenge lifetime when
 // Handler.LoginChallengeTTL is unset (tests and defensive; main.go always injects
 // cfg.LoginChallengeTTL, default 5m). Mirrors handlers' defaultInvitationTTL.
@@ -179,16 +183,19 @@ func (h *Handler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 // DB session. Unknown-email and bad-password return the same 401, and both run
 // a hash so timing does not reveal which emails exist.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	var req types.LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, &types.APIError{Code: "invalid_request", Message: "Request body must be JSON with email and password.", Status: http.StatusBadRequest})
-		return
-	}
-
+	// Rate-limit BEFORE decoding the body: the limiter must gate work (esp.
+	// Argon2id hashing) an attacker can drive, and the body is already capped by
+	// the server's limitBody middleware.
 	ip := clientIP(r)
 	if h.Limiter != nil && !h.Limiter.Allow(ip) {
 		h.logger().Warn("login rate limited", "ip", ip)
 		writeErr(w, rateLimited())
+		return
+	}
+
+	var req types.LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, &types.APIError{Code: "invalid_request", Message: "Request body must be JSON with email and password.", Status: http.StatusBadRequest})
 		return
 	}
 
@@ -581,6 +588,14 @@ func validatePasswordStrength(pw string) *types.APIError {
 		return &types.APIError{
 			Code:    "invalid_request",
 			Message: "Password must be at least 12 characters.",
+			Status:  http.StatusBadRequest,
+		}
+	}
+	// Cap the length: Argon2id over a multi-megabyte password is a CPU/RAM DoS.
+	if len(pw) > maxPasswordBytes {
+		return &types.APIError{
+			Code:    "invalid_request",
+			Message: "Password must be at most 1024 bytes.",
 			Status:  http.StatusBadRequest,
 		}
 	}

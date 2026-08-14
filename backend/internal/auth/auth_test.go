@@ -237,6 +237,20 @@ func TestLoginCookieSecureFromForwardedProto(t *testing.T) {
 	}
 }
 
+// TestPasswordLengthBounds is the H4 amplifier regression: passwords have both a
+// floor and a ceiling, so Argon2id never hashes an attacker-sized input.
+func TestPasswordLengthBounds(t *testing.T) {
+	if validatePasswordStrength("short") == nil {
+		t.Fatal("too-short password accepted")
+	}
+	if validatePasswordStrength(strings.Repeat("a", maxPasswordBytes+1)) == nil {
+		t.Fatal("over-long password accepted (Argon2id DoS amplifier)")
+	}
+	if err := validatePasswordStrength("correct-horse-battery"); err != nil {
+		t.Fatalf("valid password rejected: %v", err)
+	}
+}
+
 func TestLoginRateLimited(t *testing.T) {
 	h, fs := newTestHandler(t)
 	seedUser(t, h, fs, "user@b.com", "correct-horse-battery", false)

@@ -43,6 +43,39 @@ func TestRedactPath(t *testing.T) {
 	}
 }
 
+// TestLimitBodyRejectsOversize is the H4 regression: an over-declared request
+// body is rejected with 413 by the middleware BEFORE any handler decodes/hashes
+// it, so a public endpoint cannot be used to OOM the backend. A normal small
+// body is not affected.
+func TestLimitBodyRejectsOversize(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	fake := storetest.New()
+	authHandler := &auth.Handler{
+		Sessions: auth.NewSessions(fake, false, false, time.Hour, 24*time.Hour),
+		Store:    fake, Hasher: auth.NewHasher(), Log: log, Limiter: auth.NewLoginLimiter(),
+	}
+	router := New(Deps{Cfg: &config.Config{}, Log: log, Auth: authHandler})
+
+	// Oversize body → 413, never reaching the login handler.
+	big := strings.Repeat("a", maxRequestBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(big))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize body = %d, want 413 (%s)", rec.Code, rec.Body.String())
+	}
+
+	// A small (even malformed) body is NOT rejected as 413 — it reaches the handler.
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"bad"`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("small body wrongly rejected as 413")
+	}
+}
+
 // TestAccessLogRedactsInviteToken drives the real router end-to-end for both the
 // validate and accept invite routes and asserts the raw token never appears in
 // the emitted access-log line (while the redacted marker does). This is the

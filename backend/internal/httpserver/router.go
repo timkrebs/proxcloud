@@ -75,6 +75,7 @@ func New(d Deps) http.Handler {
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
 	r.Use(originCheck(d.Cfg))
+	r.Use(limitBody(maxRequestBodyBytes, "/api/events", "/api/console/ws/"))
 	r.Use(timeoutExcept(15*time.Second, "/api/events", "/api/console/ws/"))
 
 	r.Route("/api", func(r chi.Router) {
@@ -220,6 +221,41 @@ func originCheck(cfg *config.Config) func(http.Handler) http.Handler {
 					Status:  http.StatusForbidden,
 				})
 				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// maxRequestBodyBytes caps the request body the API reads on non-streaming
+// routes. Wrapping the body in http.MaxBytesReader before any handler decodes it
+// stops an unauthenticated attacker from OOM-ing the backend with a huge body on
+// a public endpoint (login/bootstrap/invite/TOTP) — the decode/hash never sees
+// more than the cap. JSON payloads here are tiny; 256 KiB is generous.
+const maxRequestBodyBytes = 256 << 10
+
+// limitBody rejects an over-declared body up front with 413 and otherwise caps
+// the readable body at maxBytes. The exempt paths are the streaming endpoints
+// (SSE, console WS), which carry no fixed request body.
+func limitBody(maxBytes int64, exempt ...string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			for _, p := range exempt {
+				if r.URL.Path == p || (strings.HasSuffix(p, "/") && strings.HasPrefix(r.URL.Path, p)) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			if r.ContentLength > maxBytes {
+				WriteError(w, &types.APIError{
+					Code:    "request_too_large",
+					Message: "Request body too large.",
+					Status:  http.StatusRequestEntityTooLarge,
+				})
+				return
+			}
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 			}
 			next.ServeHTTP(w, r)
 		})

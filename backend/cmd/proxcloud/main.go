@@ -280,6 +280,14 @@ func runServe(log *slog.Logger) {
 			Tenant:    api.MountTenant,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound slow-read request bodies and idle keep-alive connections
+		// (slow-loris / socket exhaustion). Deliberately NO global WriteTimeout:
+		// SSE (/api/events) and the console WebSocket stream for minutes and set
+		// their own write deadlines; ReadTimeout only bounds reading the request
+		// (headers+body), which is short even for those routes.
+		ReadTimeout:    20 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MiB
 	}
 
 	go func() {
