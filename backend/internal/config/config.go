@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -87,6 +88,16 @@ type Config struct {
 	// RealIP middleware already places in the proxy's X-Forwarded-For.
 	TrustProxyHeaders bool
 
+	// TrustedProxies are the CIDRs whose X-Forwarded-* headers the backend
+	// trusts (real client IP for rate-limit/audit keys; scheme for the cookie
+	// Secure decision). A request from ANY other peer has those headers stripped
+	// at the edge, so a client reaching the origin directly cannot spoof them.
+	// Set TRUSTED_PROXY_CIDRS to the Caddy / docker-edge-network CIDR in
+	// production; the default (loopback) fails safe — a mis-set list makes the
+	// per-IP limiter over-count (all traffic as the proxy), never under-count,
+	// and the per-account lockout is IP-independent regardless.
+	TrustedProxies []*net.IPNet
+
 	ListenAddr string
 	Dev        bool
 }
@@ -128,6 +139,7 @@ func Load() (*Config, error) {
 	}
 
 	var problems []string
+	cfg.TrustedProxies = parseCIDRList("TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128", &problems)
 	if cfg.ProxmoxURL == "" {
 		problems = append(problems, "PROXMOX_URL is required")
 	} else if u, err := url.Parse(cfg.ProxmoxURL); err != nil || u.Scheme == "" || u.Host == "" {
@@ -274,4 +286,28 @@ func parseDuration(key string, def time.Duration, problems *[]string) time.Durat
 		return def
 	}
 	return d
+}
+
+// parseCIDRList parses a comma-separated list of CIDRs (e.g.
+// "127.0.0.0/8,172.18.0.0/16"), falling back to def, and appends a problem on a
+// malformed entry rather than aborting.
+func parseCIDRList(key, def string, problems *[]string) []*net.IPNet {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		v = def
+	}
+	var out []*net.IPNet
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			*problems = append(*problems, key+" has an invalid CIDR: "+part)
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
