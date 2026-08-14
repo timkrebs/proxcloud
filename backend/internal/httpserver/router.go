@@ -74,6 +74,9 @@ func New(d Deps) http.Handler {
 	// the forwarded headers so a client reaching the origin directly cannot spoof
 	// the rate-limit key, audit provenance, or downgrade the Secure cookie.
 	r.Use(trustedProxyHeaders(d.Cfg))
+	// Global per-client request throttle (keyed on the now-trusted client IP);
+	// streaming routes are exempt (one long-lived request, own connection caps).
+	r.Use(rateLimit(newAPIRateLimiter(apiRateLimitPerMin, time.Minute), "/api/events", "/api/console/ws/"))
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
 	r.Use(originCheck(d.Cfg))
