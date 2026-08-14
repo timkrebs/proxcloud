@@ -108,6 +108,10 @@ func (hh *harness) req(t *testing.T, c *http.Cookie, method, target, body string
 	if c != nil {
 		r.AddCookie(c)
 	}
+	// Simulate a real browser: attach an Origin the harness's originCheck accepts
+	// (empty FrontendOrigin → localhost is allowed), so cookie-authenticated
+	// mutations aren't rejected by the fail-closed CSRF check (L1).
+	r.Header.Set("Origin", "http://localhost")
 	rec := httptest.NewRecorder()
 	hh.h.ServeHTTP(rec, r)
 	return rec
