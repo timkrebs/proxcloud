@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,6 +41,46 @@ func TestRedactPath(t *testing.T) {
 				t.Fatalf("redactPath(%q) leaked the token: %q", tt.in, got)
 			}
 		})
+	}
+}
+
+// TestTrustedProxyHeaders is the H2 regression: forwarded headers are honored
+// only from a configured trusted-proxy peer; from any other (direct) peer they
+// are stripped, so a client reaching the origin directly cannot spoof the
+// rate-limit key / audit IP or downgrade the Secure cookie via X-Forwarded-Proto.
+func TestTrustedProxyHeaders(t *testing.T) {
+	_, cidr, _ := net.ParseCIDR("10.0.0.0/8")
+	cfg := &config.Config{TrustProxyHeaders: true, TrustedProxies: []*net.IPNet{cidr}}
+
+	var remote, xfp, xff string
+	h := trustedProxyHeaders(cfg)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		remote, xfp, xff = r.RemoteAddr, r.Header.Get("X-Forwarded-Proto"), r.Header.Get("X-Forwarded-For")
+	}))
+
+	// Trusted peer (10.x): recover the real client IP; keep X-Forwarded-Proto.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.1.2.3:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if remote != "203.0.113.9" {
+		t.Fatalf("trusted RemoteAddr = %q, want recovered client 203.0.113.9", remote)
+	}
+	if xfp != "https" {
+		t.Fatalf("trusted X-Forwarded-Proto = %q, want https", xfp)
+	}
+
+	// Untrusted/direct peer: strip forwarded headers, leave RemoteAddr alone.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "198.51.100.7:4444"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if remote != "198.51.100.7:4444" {
+		t.Fatalf("untrusted RemoteAddr = %q, want unchanged (no spoofed client IP)", remote)
+	}
+	if xff != "" || xfp != "" {
+		t.Fatalf("untrusted forwarded headers not stripped: XFF=%q XFP=%q", xff, xfp)
 	}
 }
 

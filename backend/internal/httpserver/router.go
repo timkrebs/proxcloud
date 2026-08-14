@@ -4,6 +4,7 @@ package httpserver
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -64,14 +65,13 @@ type Deps struct {
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	// Proxcloud always runs behind a single trusted reverse proxy (Caddy, ADR-0015),
-	// itself behind a Cloudflare Tunnel — the backend is never directly reachable, so
-	// trusting the proxy's X-Forwarded-For to recover the real client IP (rate-limit
-	// keys + audit provenance) is correct here. SA1019 flags RealIP because it is
-	// unsafe when directly internet-exposed, which is not our topology. A trusted-
-	// proxy allowlist is the documented hardening path (security review notes).
-	//lint:ignore SA1019 safe behind the single trusted proxy described above
-	r.Use(middleware.RealIP)
+	// Trusted-proxy boundary (replaces chi's unconditional RealIP, which the
+	// public-exposure audit flagged as spoofable): recover the real client IP
+	// from X-Forwarded-For/X-Real-IP ONLY when the immediate peer is a configured
+	// trusted proxy (Caddy on the docker edge net); from any other peer, STRIP
+	// the forwarded headers so a client reaching the origin directly cannot spoof
+	// the rate-limit key, audit provenance, or downgrade the Secure cookie.
+	r.Use(trustedProxyHeaders(d.Cfg))
 	r.Use(accessLog(d.Log))
 	r.Use(middleware.Recoverer)
 	r.Use(originCheck(d.Cfg))
@@ -243,6 +243,70 @@ func originCheck(cfg *config.Config) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// trustedProxyHeaders enforces the trusted-proxy boundary for forwarded headers.
+// When TrustProxyHeaders is on AND the immediate peer (RemoteAddr) is inside a
+// configured trusted CIDR, it recovers the real client IP into RemoteAddr
+// (RealIP semantics) and leaves X-Forwarded-Proto intact for the cookie Secure
+// decision. From ANY other peer it deletes X-Forwarded-For/X-Real-IP/
+// X-Forwarded-Proto, so a client reaching the origin directly cannot spoof the
+// rate-limit key / audit IP or downgrade the Secure cookie. Mis-set trust makes
+// the per-IP limiter over-count (all traffic as the proxy), never under-count.
+func trustedProxyHeaders(cfg *config.Config) func(http.Handler) http.Handler {
+	var trusted []*net.IPNet
+	trust := false
+	if cfg != nil {
+		trusted = cfg.TrustedProxies
+		trust = cfg.TrustProxyHeaders
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if trust && peerInCIDRs(r.RemoteAddr, trusted) {
+				if ip := firstForwardedIP(r); ip != "" {
+					r.RemoteAddr = ip
+				}
+			} else {
+				r.Header.Del("X-Forwarded-For")
+				r.Header.Del("X-Real-IP")
+				r.Header.Del("X-Forwarded-Proto")
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// peerInCIDRs reports whether the connection's remote IP is inside any trusted CIDR.
+func peerInCIDRs(remoteAddr string, cidrs []*net.IPNet) bool {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, c := range cidrs {
+		if c != nil && c.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstForwardedIP returns the real client IP the trusted proxy reported:
+// X-Real-IP if present, else the first (client-facing) entry of X-Forwarded-For.
+func firstForwardedIP(r *http.Request) string {
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+		return xr
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	return ""
 }
 
 // maxRequestBodyBytes caps the request body the API reads on non-streaming
