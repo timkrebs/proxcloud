@@ -58,12 +58,42 @@ func New(cfg *config.Config) (*GoPVE, error) {
 	}
 
 	base := strings.TrimSuffix(strings.TrimRight(u.String(), "/"), "/api2/json") + "/api2/json"
+	// Cap concurrent outbound calls to Proxmox: the PVE API is effectively
+	// serialized (cluster locks) and single-threaded per node, so an unbounded
+	// fan-out from a hostile tenant could saturate it and starve every tenant.
+	// A semaphore RoundTripper bounds all in-flight PVE requests cluster-wide.
+	client := &http.Client{Transport: &semaphoreRoundTripper{
+		base: transport,
+		sem:  make(chan struct{}, pveMaxConcurrent),
+	}}
 	c := goproxmox.NewClient(base,
-		goproxmox.WithHTTPClient(&http.Client{Transport: transport}),
+		goproxmox.WithHTTPClient(client),
 		goproxmox.WithAPIToken(cfg.ProxmoxTokenID, cfg.ProxmoxTokenSecret),
 		goproxmox.WithUserAgent("proxcloud"),
 	)
 	return &GoPVE{c: c}, nil
+}
+
+// pveMaxConcurrent bounds simultaneous in-flight requests to the Proxmox API.
+const pveMaxConcurrent = 16
+
+// semaphoreRoundTripper limits concurrent outbound requests. Excess requests
+// block until a slot frees or the request context is cancelled (the 15s handler
+// timeout eventually releases a waiter), so a burst degrades to queueing rather
+// than overwhelming Proxmox.
+type semaphoreRoundTripper struct {
+	base http.RoundTripper
+	sem  chan struct{}
+}
+
+func (s *semaphoreRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	case <-r.Context().Done():
+		return nil, r.Context().Err()
+	}
+	return s.base.RoundTrip(r)
 }
 
 func readCtx(ctx context.Context) (context.Context, context.CancelFunc) {
