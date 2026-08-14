@@ -11,8 +11,10 @@ import (
 	"strings"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
+	"github.com/timkrebs9/proxcloud/backend/internal/store"
 )
 
 // diskKeyRe matches disk config keys: scsi0, virtio3, sata1, ide2, rootfs,
@@ -90,6 +92,59 @@ func (d *Deps) GetGuest(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateGuestConfig serves PATCH /api/guests/{node}/{type}/{vmid}/config.
+// Upper bounds on user-requested guest sizing, independent of quota: a sane
+// ceiling so an absurd value (e.g. a 100000 GiB resize) is rejected outright.
+const (
+	maxMemoryMB = 4 << 20 // 4 TiB, in MiB
+	maxDiskGiB  = 65536   // 64 TiB
+)
+
+// enforceGrowth rejects a resize/config change that would push the caller's
+// tenant/project past quota. `target` carries the ABSOLUTE requested size for
+// the changed dimensions (0 = unchanged); the delta is target-minus-current
+// floored at 0, so shrinks and no-ops pass. A snapshot miss on a real grow is a
+// transient condition, rejected retryably (mirrors create's clone-source path).
+// Quota is only enforced at create today, so this closes the grow-past-cap hole.
+func (d *Deps) enforceGrowth(r *http.Request, ref proxmox.GuestRef, target store.Alloc) error {
+	if target.VCPU <= 0 && target.RAMMB <= 0 && target.DiskGB <= 0 {
+		return nil // no quota dimension is being set
+	}
+	if d.Store == nil {
+		return nil // degraded/bootstrap: no quota store wired
+	}
+	id, ok := auth.IdentityFrom(r.Context())
+	if !ok || id == nil || id.ActiveTenantID == "" || id.ResolvedProjectID == "" {
+		return notFound("Resource not found.")
+	}
+	snap, err := d.clusterSnapshot(r)
+	if err != nil {
+		return err
+	}
+	cur, ok := snap[ref.VMID]
+	if !ok {
+		return &types.APIError{Code: "invalid_request", Message: "guest allocation is currently unavailable; try again", Status: http.StatusBadRequest}
+	}
+	delta := store.Alloc{
+		VCPU:   max(0, target.VCPU-cur.VCPU),
+		RAMMB:  max(0, target.RAMMB-cur.RAMMB),
+		DiskGB: max(0, target.DiskGB-cur.DiskGB),
+	}
+	if delta.VCPU == 0 && delta.RAMMB == 0 && delta.DiskGB == 0 {
+		return nil // requested size ≤ current: not a grow
+	}
+	if err := d.Store.CheckGuestGrowth(r.Context(), store.GrowthCheckParams{
+		TenantID: id.ActiveTenantID, ProjectID: id.ResolvedProjectID, Snapshot: snap, Delta: delta,
+	}); err != nil {
+		var qe store.ErrQuotaExceeded
+		if errors.As(err, &qe) {
+			return &types.APIError{Code: "quota_exceeded", Message: quotaExceededMessage(qe), Status: http.StatusConflict}
+		}
+		d.logger().Error("growth quota check", "vmid", ref.VMID, "err", err)
+		return &types.APIError{Code: "internal", Message: "Failed to verify quota.", Status: http.StatusInternalServerError}
+	}
+	return nil
+}
+
 func (d *Deps) UpdateGuestConfig(w http.ResponseWriter, r *http.Request) {
 	ref, apiErr := guestRef(r)
 	if apiErr != nil {
@@ -111,8 +166,8 @@ func (d *Deps) UpdateGuestConfig(w http.ResponseWriter, r *http.Request) {
 		changes["cores"] = *req.Cores
 	}
 	if req.MemoryMB != nil {
-		if *req.MemoryMB < 16 {
-			httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: "memory must be at least 16 MiB", Status: http.StatusBadRequest})
+		if *req.MemoryMB < 16 || *req.MemoryMB > maxMemoryMB {
+			httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: "memory must be between 16 MiB and 4 TiB", Status: http.StatusBadRequest})
 			return
 		}
 		changes["memory"] = *req.MemoryMB
@@ -142,6 +197,20 @@ func (d *Deps) UpdateGuestConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(changes) == 0 {
 		httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: "no changes provided", Status: http.StatusBadRequest})
+		return
+	}
+
+	// Enforce quota on a cores/memory GROW (quota is otherwise only checked at
+	// create — a Contributor must not be able to create small then grow past cap).
+	target := store.Alloc{}
+	if req.Cores != nil {
+		target.VCPU = *req.Cores
+	}
+	if req.MemoryMB != nil {
+		target.RAMMB = *req.MemoryMB
+	}
+	if err := d.enforceGrowth(r, ref, target); err != nil {
+		httpserver.WriteError(w, err)
 		return
 	}
 
@@ -215,12 +284,18 @@ func (d *Deps) ResizeGuestDisk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req types.ResizeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Disk == "" || req.SizeGiB < 1 {
-		httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: "disk and sizeGib (>=1) are required", Status: http.StatusBadRequest})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Disk == "" || req.SizeGiB < 1 || req.SizeGiB > maxDiskGiB {
+		httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: "disk and sizeGib (1..65536) are required", Status: http.StatusBadRequest})
 		return
 	}
 	if !diskKeyRe.MatchString(req.Disk) {
 		httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: fmt.Sprintf("invalid disk key %q", req.Disk), Status: http.StatusBadRequest})
+		return
+	}
+
+	// Enforce quota on the disk grow (target size vs the guest's current total).
+	if err := d.enforceGrowth(r, ref, store.Alloc{DiskGB: int64(req.SizeGiB)}); err != nil {
+		httpserver.WriteError(w, err)
 		return
 	}
 

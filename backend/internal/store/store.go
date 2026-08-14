@@ -167,6 +167,13 @@ type QuotaStore interface {
 	// ErrQuotaExceeded — then inserts the pending row with reserved_* set
 	// (duplicate VMID → ErrConflict). Commit releases the lock.
 	ReserveOwnership(ctx context.Context, p ReserveOwnershipParams) (*ResourceOwnership, error)
+	// CheckGuestGrowth verifies that growing an EXISTING guest (a disk resize or a
+	// cores/memory config change) by Delta stays within the project AND tenant
+	// caps. It runs the SAME per-tenant advisory-locked usage read as
+	// ReserveOwnership but adds no count and inserts no row (the guest already
+	// exists). usage already includes the guest at its current size (from the
+	// snapshot), so the check is usage+Delta ≤ limit. Over-cap → ErrQuotaExceeded.
+	CheckGuestGrowth(ctx context.Context, p GrowthCheckParams) error
 	// InsertAuditIntent writes a fail-closed intent row (outcome "pending") at the
 	// audit choke-point and returns its id (ADR-0012 §3). It is one of the only
 	// two permitted audit mutations.
@@ -421,6 +428,17 @@ type ReserveOwnershipParams struct {
 	CreatedBy *string
 	Reserved  Alloc
 	Snapshot  map[int]Alloc
+}
+
+// GrowthCheckParams are the inputs to CheckGuestGrowth. Delta is the positive
+// growth per dimension (a resize/config change; shrinks pass Delta 0); Snapshot
+// is the active-guest allocation map fetched BEFORE the lock and includes the
+// guest being grown at its CURRENT size, so the check is usage+Delta ≤ limit.
+type GrowthCheckParams struct {
+	TenantID  string
+	ProjectID string
+	Snapshot  map[int]Alloc
+	Delta     Alloc
 }
 
 // AuditIntent is the fail-closed intent row written before a mutation runs

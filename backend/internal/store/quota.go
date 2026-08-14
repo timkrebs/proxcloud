@@ -237,6 +237,52 @@ func (s *PgStore) ReserveOwnership(ctx context.Context, p ReserveOwnershipParams
 	return out, nil
 }
 
+// CheckGuestGrowth implements QuotaStore: the resize/config-grow quota gate. It
+// mirrors ReserveOwnership's per-tenant advisory-locked usage read but records
+// nothing and adds no count — the guest already exists and is already counted in
+// usage at its current size, so the check is usage+Delta ≤ cap on each dimension.
+func (s *PgStore) CheckGuestGrowth(ctx context.Context, p GrowthCheckParams) error {
+	return s.WithTx(ctx, func(txs Store) error {
+		if err := txs.AdvisoryLock(ctx, AdvisoryKeyTenant(p.TenantID)); err != nil {
+			return err
+		}
+		tenantUsage, byProject, err := txs.ComputeUsage(ctx, p.TenantID, p.Snapshot)
+		if err != nil {
+			return err
+		}
+		projectQuota, err := txs.GetQuota(ctx, "project", p.ProjectID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		tenantQuota, err := txs.GetQuota(ctx, "tenant", p.TenantID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if err := checkGrowth("project", projectQuota, byProject[p.ProjectID], p.Delta); err != nil {
+			return err
+		}
+		return checkGrowth("tenant", tenantQuota, tenantUsage, p.Delta)
+	})
+}
+
+// checkGrowth is checkQuota without the count dimension: growing an existing
+// guest never adds a guest.
+func checkGrowth(scope string, q *Quota, usage QuotaUsage, delta Alloc) error {
+	if q == nil {
+		return nil
+	}
+	if q.MaxVCPU != nil && usage.VCPU+delta.VCPU > *q.MaxVCPU {
+		return ErrQuotaExceeded{Scope: scope, Dimension: "vcpu", Limit: int64(*q.MaxVCPU), Used: int64(usage.VCPU), Requested: int64(delta.VCPU)}
+	}
+	if q.MaxRAMMB != nil && usage.RAMMB+delta.RAMMB > *q.MaxRAMMB {
+		return ErrQuotaExceeded{Scope: scope, Dimension: "ram_mb", Limit: *q.MaxRAMMB, Used: usage.RAMMB, Requested: delta.RAMMB}
+	}
+	if q.MaxDiskGB != nil && usage.DiskGB+delta.DiskGB > *q.MaxDiskGB {
+		return ErrQuotaExceeded{Scope: scope, Dimension: "disk_gb", Limit: *q.MaxDiskGB, Used: usage.DiskGB, Requested: delta.DiskGB}
+	}
+	return nil
+}
+
 // InsertAuditIntent implements QuotaStore: the fail-closed intent write.
 func (s *PgStore) InsertAuditIntent(ctx context.Context, a AuditIntent) (string, error) {
 	const q = `INSERT INTO audit_log

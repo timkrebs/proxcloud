@@ -898,6 +898,38 @@ func checkQuotaFake(scope string, q *store.Quota, usage store.QuotaUsage, delta 
 	return nil
 }
 
+// checkGrowthFake is checkQuotaFake without the count dimension (growing an
+// existing guest adds no guest).
+func checkGrowthFake(scope string, q *store.Quota, usage store.QuotaUsage, delta store.Alloc) error {
+	if q == nil {
+		return nil
+	}
+	if q.MaxVCPU != nil && usage.VCPU+delta.VCPU > *q.MaxVCPU {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "vcpu", Limit: int64(*q.MaxVCPU), Used: int64(usage.VCPU), Requested: int64(delta.VCPU)}
+	}
+	if q.MaxRAMMB != nil && usage.RAMMB+delta.RAMMB > *q.MaxRAMMB {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "ram_mb", Limit: *q.MaxRAMMB, Used: usage.RAMMB, Requested: delta.RAMMB}
+	}
+	if q.MaxDiskGB != nil && usage.DiskGB+delta.DiskGB > *q.MaxDiskGB {
+		return store.ErrQuotaExceeded{Scope: scope, Dimension: "disk_gb", Limit: *q.MaxDiskGB, Used: usage.DiskGB, Requested: delta.DiskGB}
+	}
+	return nil
+}
+
+// CheckGuestGrowth mirrors the real store's growth check in memory.
+func (f *Fake) CheckGuestGrowth(_ context.Context, p store.GrowthCheckParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CheckGuestGrowth"); err != nil {
+		return err
+	}
+	tenantUsage, byProject := f.computeUsageLocked(p.TenantID, p.Snapshot)
+	if err := checkGrowthFake("project", f.quotas["project|"+p.ProjectID], byProject[p.ProjectID], p.Delta); err != nil {
+		return err
+	}
+	return checkGrowthFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, p.Delta)
+}
+
 // ReserveOwnership mirrors the real store's reservation semantics in memory (the
 // AdvisoryLock no-op means the true race guard is proven against Postgres, not
 // here). It computes usage in-memory, enforces the same project-then-tenant
