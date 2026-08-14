@@ -43,6 +43,47 @@ func TestRedactPath(t *testing.T) {
 	}
 }
 
+// TestOriginCheckFailsClosedWithoutOrigin is the L1 regression: a cookie-
+// authenticated state-changing request with NO Origin/Referer is rejected 403
+// (CSRF must not rest on SameSite alone), while a valid Origin passes and a
+// header-less request WITHOUT the cookie still passes (no ambient credential).
+func TestOriginCheckFailsClosedWithoutOrigin(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	fake := storetest.New()
+	authHandler := &auth.Handler{
+		Sessions: auth.NewSessions(fake, false, false, time.Hour, 24*time.Hour),
+		Store:    fake, Hasher: auth.NewHasher(), Log: log, Limiter: auth.NewLoginLimiter(),
+	}
+	router := New(Deps{Cfg: &config.Config{}, Log: log, Auth: authHandler})
+
+	// Cookie + no Origin/Referer → 403 (before routing/auth).
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "whatever"})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cookie POST without Origin = %d, want 403 (fail-closed CSRF)", rec.Code)
+	}
+
+	// Cookie + valid Origin → passes originCheck (reaches auth, not 403).
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: "whatever"})
+	req.Header.Set("Origin", "http://localhost")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("cookie POST with valid Origin wrongly 403'd")
+	}
+
+	// No cookie + no Origin → passes (non-browser automation, no ambient cred).
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("no-cookie header-less POST wrongly 403'd")
+	}
+}
+
 // TestLimitBodyRejectsOversize is the H4 regression: an over-declared request
 // body is rejected with 413 by the middleware BEFORE any handler decodes/hashes
 // it, so a public endpoint cannot be used to OOM the backend. A normal small

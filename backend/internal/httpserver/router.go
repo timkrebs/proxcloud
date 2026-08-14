@@ -214,7 +214,25 @@ func originCheck(cfg *config.Config) func(http.Handler) http.Handler {
 			if check == "" {
 				check = r.Header.Get("Referer")
 			}
-			if check != "" && !allowed(check) {
+			if check == "" {
+				// Fail closed when the request carries the session cookie but no
+				// Origin/Referer: a genuine browser always attaches Origin to a
+				// cross-origin non-GET, so a cookie-authenticated header-less
+				// mutation must not slip through on SameSite alone. Header-less
+				// clients WITHOUT the cookie (curl/automation) still pass — they
+				// present no ambient credential to abuse.
+				if c, err := r.Cookie(auth.CookieName); err == nil && c.Value != "" {
+					WriteError(w, &types.APIError{
+						Code:    "forbidden",
+						Message: "Cross-origin request rejected.",
+						Status:  http.StatusForbidden,
+					})
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
+			if !allowed(check) {
 				WriteError(w, &types.APIError{
 					Code:    "forbidden",
 					Message: "Cross-origin request rejected.",
