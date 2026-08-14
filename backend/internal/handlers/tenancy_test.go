@@ -2,6 +2,8 @@ package handlers_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -80,6 +82,18 @@ func (hh *harness) cookie(t *testing.T, userID string) *http.Cookie {
 		t.Fatalf("issue session: %v", err)
 	}
 	return c
+}
+
+// cookieForTenant seeds a live session for userID with a chosen active tenant
+// (the flat account surface reads ActiveTenantID from the session, not the
+// path) and returns its cookie. The session store persists only the SHA-256 of
+// the token, so we hash the raw value the same way auth.hashToken does.
+func (hh *harness) cookieForTenant(t *testing.T, userID, tenantID string) *http.Cookie {
+	t.Helper()
+	raw := "sess-" + userID + "-" + tenantID
+	sum := sha256.Sum256([]byte(raw))
+	hh.fake.AddSession(userID, hex.EncodeToString(sum[:]), &tenantID)
+	return &http.Cookie{Name: auth.CookieName, Value: raw}
 }
 
 // req performs one authenticated request and returns the recorder.
@@ -174,6 +188,87 @@ func TestIDORCrossTenantVMID404Matrix(t *testing.T) {
 	}
 	if rec := hh.req(t, c, http.MethodGet, "/api/tenants/"+tenantB+"/tasks/"+upid+"/log", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("tasks/{upid}/log cross-tenant = %d, want 404", rec.Code)
+	}
+}
+
+// --- H6: the global notification ring is scoped to the caller's tenant ---
+//
+// GET /api/notifications served the process-global task ring to every tenant
+// (cross-tenant activity leak, iron rule #1). This drives the real router: a
+// tracked task on an A-owned guest must be invisible to tenant B, and B must not
+// be able to flip its Read flag.
+func TestNotificationsScopedToTenant(t *testing.T) {
+	hh := newHarness(t, &proxmoxtest.MockClient{})
+	tenantA := hh.fake.AddTenant("A", "a")
+	tenantB := hh.fake.AddTenant("B", "b")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	userB := hh.fake.AddUser("b@x.io", "Bo", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	hh.fake.AddMembership(userB, "tenant", tenantB, "contributor")
+	// Tenant A owns VMID 100; a tracked task produced a notification for it.
+	hh.fake.AddOwnership(tenantA, projA, 100, "lxc", "pve01", "active", nil)
+	hh.registry.Track("UPID:pve01:1:vzcreate:100:", "Create container", "provisioning",
+		types.TaskResource{Type: "lxc", VMID: 100, Name: "a-cache"})
+
+	cA := hh.cookieForTenant(t, userA, tenantA)
+	cB := hh.cookieForTenant(t, userB, tenantB)
+
+	// Owner A sees the notification.
+	notifsA := decodeBody[[]types.Notification](t, hh.req(t, cA, http.MethodGet, "/api/notifications", ""))
+	if len(notifsA) != 1 {
+		t.Fatalf("owner A sees %d notifications, want 1", len(notifsA))
+	}
+	// Tenant B sees NONE of A's activity — the leak is closed.
+	notifsB := decodeBody[[]types.Notification](t, hh.req(t, cB, http.MethodGet, "/api/notifications", ""))
+	if len(notifsB) != 0 {
+		t.Fatalf("tenant B sees %d of A's notifications, want 0 (cross-tenant leak)", len(notifsB))
+	}
+	// B cannot mark A's notification read.
+	if rec := hh.req(t, cB, http.MethodPost, "/api/notifications/read", `{"ids":["`+notifsA[0].ID+`"]}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("B mark-read = %d, want 204", rec.Code)
+	}
+	after := decodeBody[[]types.Notification](t, hh.req(t, cA, http.MethodGet, "/api/notifications", ""))
+	if len(after) != 1 || after[0].Read {
+		t.Fatal("tenant B flipped tenant A's notification Read flag")
+	}
+}
+
+// --- M6: tenant catalog storage-content is restricted to placement types ---
+//
+// The tenant catalog forwarded an arbitrary `content` filter to Proxmox, letting
+// a Contributor enumerate other tenants' VM disks/backups on shared storage. The
+// tenant path must accept only iso|vztmpl, rejecting the rest BEFORE any PVE call.
+func TestCatalogStorageContentAllowlist(t *testing.T) {
+	var seen []string
+	mock := &proxmoxtest.MockClient{
+		OnStorageContent: func(_ context.Context, _, _, content string) ([]types.StorageContentItem, error) {
+			seen = append(seen, content)
+			return []types.StorageContentItem{{}}, nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	c := hh.cookie(t, userA)
+	base := "/api/tenants/" + tenantA + "/catalog/nodes/pve01/storages/local/content"
+
+	for _, ct := range []string{"iso", "vztmpl"} {
+		if rec := hh.req(t, c, http.MethodGet, base+"?content="+ct, ""); rec.Code != http.StatusOK {
+			t.Fatalf("content=%s = %d, want 200 (body %s)", ct, rec.Code, rec.Body.String())
+		}
+	}
+	for _, ct := range []string{"images", "backup", "rootdir", ""} {
+		if rec := hh.req(t, c, http.MethodGet, base+"?content="+ct, ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("content=%q = %d, want 400 (leaky enumeration must be blocked, body %s)", ct, rec.Code, rec.Body.String())
+		}
+	}
+	// The PVE call was only ever reached with placement types.
+	for _, got := range seen {
+		if got != "iso" && got != "vztmpl" {
+			t.Fatalf("StorageContent reached Proxmox with content=%q — allowlist bypassed", got)
+		}
 	}
 }
 
