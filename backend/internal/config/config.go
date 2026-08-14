@@ -98,6 +98,12 @@ type Config struct {
 	// and the per-account lockout is IP-independent regardless.
 	TrustedProxies []*net.IPNet
 
+	// AllowedHosts, when non-empty, is the allowlist of Host headers the backend
+	// serves (the public portal hosts + internal service names). A request with
+	// any other Host is rejected 421 (DNS-rebinding / host-injection defense).
+	// Empty disables the check (dev/back-compat); set ALLOWED_HOSTS in production.
+	AllowedHosts []string
+
 	ListenAddr string
 	Dev        bool
 }
@@ -140,6 +146,7 @@ func Load() (*Config, error) {
 
 	var problems []string
 	cfg.TrustedProxies = parseCIDRList("TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128", &problems)
+	cfg.AllowedHosts = splitCSV(os.Getenv("ALLOWED_HOSTS"))
 	if cfg.ProxmoxURL == "" {
 		problems = append(problems, "PROXMOX_URL is required")
 	} else if u, err := url.Parse(cfg.ProxmoxURL); err != nil || u.Scheme == "" || u.Host == "" {
@@ -286,6 +293,17 @@ func parseDuration(key string, def time.Duration, problems *[]string) time.Durat
 		return def
 	}
 	return d
+}
+
+// splitCSV splits a comma-separated env value into trimmed, non-empty entries.
+func splitCSV(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // parseCIDRList parses a comma-separated list of CIDRs (e.g.

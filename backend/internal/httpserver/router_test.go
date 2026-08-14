@@ -44,6 +44,62 @@ func TestRedactPath(t *testing.T) {
 	}
 }
 
+// TestSecurityHeaders is the H1 regression: every backend response carries the
+// hardening headers (nosniff, DENY framing, a locked-down CSP with
+// frame-ancestors 'none', HSTS) so the directly-reachable API/WS surface can't
+// be framed, sniffed, or downgraded.
+func TestSecurityHeaders(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	fake := storetest.New()
+	authHandler := &auth.Handler{
+		Sessions: auth.NewSessions(fake, false, false, time.Hour, 24*time.Hour),
+		Store:    fake, Hasher: auth.NewHasher(), Log: log, Limiter: auth.NewLoginLimiter(),
+	}
+	router := New(Deps{Cfg: &config.Config{}, Log: log, Auth: authHandler})
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	h := rec.Header()
+	if got := h.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := h.Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+	if csp := h.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP = %q, want frame-ancestors 'none'", csp)
+	}
+	if h.Get("Strict-Transport-Security") == "" {
+		t.Error("missing Strict-Transport-Security")
+	}
+}
+
+// TestHostAllowlist is the M1 regression: with an allowlist configured, a
+// request with an unknown Host is rejected 421; an allowed Host passes.
+func TestHostAllowlist(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	router := New(Deps{
+		Cfg: &config.Config{AllowedHosts: []string{"portal.test"}},
+		Log: log,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Host = "attacker.example"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("unknown Host = %d, want 421", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Host = "portal.test:443" // host:port still matches the bare host
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusMisdirectedRequest {
+		t.Fatalf("allowed Host wrongly rejected 421")
+	}
+}
+
 // TestTrustedProxyHeaders is the H2 regression: forwarded headers are honored
 // only from a configured trusted-proxy peer; from any other (direct) peer they
 // are stripped, so a client reaching the origin directly cannot spoof the
