@@ -160,3 +160,57 @@ func TestCloneQuotaDeltaFromSource(t *testing.T) {
 		t.Fatalf("a reservation leaked for the refused clone: status %q", s)
 	}
 }
+
+// --- H5: quota is enforced on resize/config-update growth, not only at create ---
+
+func TestQuotaEnforcedOnGrowth(t *testing.T) {
+	var pveWrites int32
+	mock := &proxmoxtest.MockClient{
+		// Guest 101 is currently 2 vCPU / 2048 MiB / 10 GiB.
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			return []proxmox.RawResource{
+				{ID: "qemu/101", Type: "qemu", VMID: 101, Node: "pve01", MaxCPU: 2, MaxMem: 2048 << 20, MaxDisk: 10 << 30},
+			}, nil
+		},
+		OnSetGuestConfig: func(context.Context, proxmox.GuestRef, map[string]any) (proxmox.UPID, error) {
+			atomic.AddInt32(&pveWrites, 1)
+			return "UPID:pve01:0:0:0:qmconfig:101:u@pam:", nil
+		},
+		OnResizeDisk: func(context.Context, proxmox.GuestRef, string, string) (proxmox.UPID, error) {
+			atomic.AddInt32(&pveWrites, 1)
+			return "UPID:pve01:0:0:0:resize:101:u@pam:", nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	// Caps == the guest's CURRENT size, so any grow exceeds.
+	hh.fake.AddQuota("tenant", tenantA, iptr(2), qti64ptr(2048), qti64ptr(10), nil)
+	hh.fake.AddOwnership(tenantA, projA, 101, "qemu", "pve01", "active", nil)
+	c := hh.cookie(t, userA)
+	base := "/api/tenants/" + tenantA + "/guests/pve01/qemu/101"
+
+	for _, g := range []struct{ name, method, path, body string }{
+		{"cores", http.MethodPatch, base + "/config", `{"cores":8}`},
+		{"memory", http.MethodPatch, base + "/config", `{"memoryMb":8192}`},
+		{"disk", http.MethodPost, base + "/resize", `{"disk":"scsi0","sizeGib":100}`},
+	} {
+		rec := hh.req(t, c, g.method, g.path, g.body)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s grow = %d, want 409 quota_exceeded (body %s)", g.name, rec.Code, rec.Body.String())
+		}
+		if env := decodeBody[types.ErrorEnvelope](t, rec); env.Error.Code != "quota_exceeded" {
+			t.Fatalf("%s grow error code = %q, want quota_exceeded", g.name, env.Error.Code)
+		}
+	}
+	if n := atomic.LoadInt32(&pveWrites); n != 0 {
+		t.Fatalf("Proxmox write path was called %d times on a rejected grow, want 0", n)
+	}
+
+	// A no-op (cores 2 -> 2, within cap) is allowed and reaches Proxmox.
+	if rec := hh.req(t, c, http.MethodPatch, base+"/config", `{"cores":2}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("no-op config = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+}

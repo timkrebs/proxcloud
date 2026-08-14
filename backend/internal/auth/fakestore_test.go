@@ -649,6 +649,8 @@ func (f *fakeStore) ComputeUsage(context.Context, string, map[int]store.Alloc) (
 	return store.QuotaUsage{}, map[string]store.QuotaUsage{}, nil
 }
 
+func (f *fakeStore) CheckGuestGrowth(context.Context, store.GrowthCheckParams) error { return nil }
+
 func (f *fakeStore) ReserveOwnership(_ context.Context, p store.ReserveOwnershipParams) (*store.ResourceOwnership, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
