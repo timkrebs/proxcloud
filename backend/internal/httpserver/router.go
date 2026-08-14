@@ -65,6 +65,8 @@ type Deps struct {
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(hostAllowlist(d.Cfg))
+	r.Use(securityHeaders)
 	// Trusted-proxy boundary (replaces chi's unconditional RealIP, which the
 	// public-exposure audit flagged as spoofable): recover the real client IP
 	// from X-Forwarded-For/X-Real-IP ONLY when the immediate peer is a configured
@@ -239,6 +241,54 @@ func originCheck(cfg *config.Config) func(http.Handler) http.Handler {
 					Status:  http.StatusForbidden,
 				})
 				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// securityHeaders sets response headers hardening the directly-reachable API and
+// WS surface: no MIME sniffing, no framing, a locked-down CSP (the API returns
+// data, never renders HTML), a conservative referrer policy, and HSTS (the
+// external connection is HTTPS via Cloudflare even though this proxy hop is
+// plain). The portal HTML sets its own richer CSP in next.config.ts (ADR-0017).
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostAllowlist rejects (421 Misdirected Request) any request whose Host is not
+// in the configured allowlist — a DNS-rebinding / host-injection defense for the
+// directly-reachable origin. An empty allowlist disables the check.
+func hostAllowlist(cfg *config.Config) func(http.Handler) http.Handler {
+	set := map[string]bool{}
+	if cfg != nil {
+		for _, host := range cfg.AllowedHosts {
+			set[strings.ToLower(host)] = true
+		}
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(set) > 0 {
+				host := r.Host
+				if h, _, err := net.SplitHostPort(host); err == nil {
+					host = h
+				}
+				if !set[strings.ToLower(host)] {
+					WriteError(w, &types.APIError{
+						Code:    "misdirected_request",
+						Message: "Unknown host.",
+						Status:  http.StatusMisdirectedRequest,
+					})
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
