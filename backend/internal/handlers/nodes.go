@@ -198,6 +198,30 @@ func (d *Deps) GetStorageContent(w http.ResponseWriter, r *http.Request) {
 	httpserver.WriteJSON(w, http.StatusOK, items)
 }
 
+// catalogContentTypes are the only storage content types a tenant may enumerate
+// through the create-wizard catalog: placement templates/images. Enumerating
+// images/backup/rootdir on shared storage would reveal OTHER tenants' VM disks
+// and backup filenames (iron rule #1 — no cross-tenant read), so the tenant
+// path is restricted to these; the unrestricted GetStorageContent stays behind
+// the platform-admin /api/admin surface.
+var catalogContentTypes = map[string]bool{"iso": true, "vztmpl": true}
+
+// GetStorageContentCatalog is the tenant-facing storage-content route. Same as
+// GetStorageContent but it rejects any `content` filter outside the placement
+// allowlist, so a Contributor cannot enumerate cross-tenant volumes on shared
+// storage.
+func (d *Deps) GetStorageContentCatalog(w http.ResponseWriter, r *http.Request) {
+	if c := r.URL.Query().Get("content"); !catalogContentTypes[c] {
+		httpserver.WriteError(w, &types.APIError{
+			Code:    "invalid_request",
+			Message: "content must be one of: iso, vztmpl",
+			Status:  http.StatusBadRequest,
+		})
+		return
+	}
+	d.GetStorageContent(w, r)
+}
+
 // nonNilFloats keeps empty series as [] instead of JSON null.
 func nonNilFloats(v []float64) []float64 {
 	if v == nil {

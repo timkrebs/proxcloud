@@ -129,7 +129,7 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Get(p+"/catalog/nodes", d.ListCatalogNodes)
 	r.Get(p+"/catalog/nodes/{node}/bridges", d.GetNodeBridges)
 	r.Get(p+"/catalog/nodes/{node}/storages", d.ListCatalogStorages)
-	r.Get(p+"/catalog/nodes/{node}/storages/{storage}/content", d.GetStorageContent)
+	r.Get(p+"/catalog/nodes/{node}/storages/{storage}/content", d.GetStorageContentCatalog)
 
 	r.Get(p+"/guests/{node}/{type}/{vmid}", d.GetGuest)
 	r.Get(p+"/guests/{node}/{type}/{vmid}/metrics", d.GetGuestMetrics)

@@ -34,13 +34,23 @@ type Tracked struct {
 	notifID      string
 }
 
+// notifEntry pairs a client notification with the VMID it concerns, so the ring
+// can be filtered to the caller's owned resources. The notification ring is
+// process-global (one Registry), so returning it unfiltered would leak every
+// tenant's task activity — callers pass their owned-VMID set (tenancy iron
+// rule #1).
+type notifEntry struct {
+	n    types.Notification
+	vmid int
+}
+
 // Registry is safe for concurrent use.
 type Registry struct {
 	mu        sync.RWMutex
 	running   map[proxmox.UPID]*Tracked
 	completed map[proxmox.UPID]Outcome
 	waiters   map[proxmox.UPID][]chan Outcome
-	notifs    []types.Notification // newest first
+	notifs    []notifEntry // newest first
 	nextID    int
 	now       func() time.Time
 }
@@ -70,7 +80,7 @@ func (r *Registry) Track(upid proxmox.UPID, action, transitional string, res typ
 	r.running[upid] = &Tracked{
 		UPID: upid, Action: action, Transitional: transitional, Resource: res, notifID: id,
 	}
-	r.prependNotif(types.Notification{
+	r.prependNotif(notifEntry{vmid: res.VMID, n: types.Notification{
 		ID:        id,
 		Kind:      "prog",
 		Title:     action,
@@ -78,7 +88,7 @@ func (r *Registry) Track(upid proxmox.UPID, action, transitional string, res typ
 		UPID:      string(upid),
 		Status:    "running",
 		CreatedAt: r.now().UTC(),
-	})
+	}})
 }
 
 // Complete finalizes a tracked task: flips its notification to ok/err (err
@@ -108,7 +118,7 @@ func (r *Registry) Complete(upid proxmox.UPID, succeeded bool, exitStatus string
 	delete(r.waiters, upid)
 
 	for i := range r.notifs {
-		if r.notifs[i].ID != tr.notifID {
+		if r.notifs[i].n.ID != tr.notifID {
 			continue
 		}
 		name := tr.Resource.Name
@@ -116,15 +126,15 @@ func (r *Registry) Complete(upid proxmox.UPID, succeeded bool, exitStatus string
 			name = fmt.Sprintf("%s/%d", tr.Resource.Type, tr.Resource.VMID)
 		}
 		if succeeded {
-			r.notifs[i].Kind = "ok"
-			r.notifs[i].Status = "succeeded"
-			r.notifs[i].Detail = fmt.Sprintf("%s (VMID %d) · completed successfully", name, tr.Resource.VMID)
+			r.notifs[i].n.Kind = "ok"
+			r.notifs[i].n.Status = "succeeded"
+			r.notifs[i].n.Detail = fmt.Sprintf("%s (VMID %d) · completed successfully", name, tr.Resource.VMID)
 		} else {
-			r.notifs[i].Kind = "err"
-			r.notifs[i].Status = "failed"
-			r.notifs[i].Detail = fmt.Sprintf("%s (VMID %d) · %s", name, tr.Resource.VMID, exitStatus)
+			r.notifs[i].n.Kind = "err"
+			r.notifs[i].n.Status = "failed"
+			r.notifs[i].n.Detail = fmt.Sprintf("%s (VMID %d) · %s", name, tr.Resource.VMID, exitStatus)
 		}
-		r.notifs[i].Read = false
+		r.notifs[i].n.Read = false
 		break
 	}
 	return tr
@@ -163,17 +173,26 @@ func (r *Registry) Lookup(upid proxmox.UPID) (*Tracked, bool) {
 	return tr, ok
 }
 
-// Notifications returns the ring, newest first.
-func (r *Registry) Notifications() []types.Notification {
+// Notifications returns the ring newest-first, filtered to the caller's owned
+// VMIDs. all=true (platform admin) returns every entry. A non-admin caller sees
+// only notifications for guests its tenant owns — the ring is process-global, so
+// this filter is what prevents a cross-tenant activity leak (iron rule #1).
+func (r *Registry) Notifications(owned map[int]bool, all bool) []types.Notification {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]types.Notification, len(r.notifs))
-	copy(out, r.notifs)
+	out := make([]types.Notification, 0, len(r.notifs))
+	for _, e := range r.notifs {
+		if all || owned[e.vmid] {
+			out = append(out, e.n)
+		}
+	}
 	return out
 }
 
-// MarkRead flags the given notification ids as read.
-func (r *Registry) MarkRead(ids []string) {
+// MarkRead flags the given notification ids as read, but only for entries the
+// caller owns (all=true for platform admin) — so one tenant cannot flip another
+// tenant's notifications.
+func (r *Registry) MarkRead(ids []string, owned map[int]bool, all bool) {
 	set := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		set[id] = struct{}{}
@@ -181,8 +200,8 @@ func (r *Registry) MarkRead(ids []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.notifs {
-		if _, ok := set[r.notifs[i].ID]; ok {
-			r.notifs[i].Read = true
+		if _, ok := set[r.notifs[i].n.ID]; ok && (all || owned[r.notifs[i].vmid]) {
+			r.notifs[i].n.Read = true
 		}
 	}
 }
@@ -208,8 +227,8 @@ func (r *Registry) AwaitCompletion(ctx context.Context, upid proxmox.UPID) (Outc
 	}
 }
 
-func (r *Registry) prependNotif(n types.Notification) {
-	r.notifs = append([]types.Notification{n}, r.notifs...)
+func (r *Registry) prependNotif(e notifEntry) {
+	r.notifs = append([]notifEntry{e}, r.notifs...)
 	if len(r.notifs) > notificationCap {
 		r.notifs = r.notifs[:notificationCap]
 	}
