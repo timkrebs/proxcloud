@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
@@ -36,7 +37,46 @@ type OwnedVMIDsFunc func(ctx context.Context, tenantID string) (map[int]bool, er
 //
 // The owned-VMID set is derived server-side from session.active_tenant_id and
 // refreshed on ownedRefreshInterval; a client cannot widen its own view.
+// maxSSEPerUser caps concurrent SSE streams per user (generous for multiple
+// browser tabs; blocks unbounded stream-open abuse).
+const maxSSEPerUser = 10
+
+// connLimiter counts concurrent connections per key and bounds them, so no
+// single user can hold unbounded SSE streams.
+type connLimiter struct {
+	mu    sync.Mutex
+	count map[string]int
+	max   int
+}
+
+func newConnLimiter(max int) *connLimiter { return &connLimiter{count: map[string]int{}, max: max} }
+
+func (c *connLimiter) acquire(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.count[key] >= c.max {
+		return false
+	}
+	c.count[key]++
+	return true
+}
+
+func (c *connLimiter) release(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.count[key] > 0 {
+		c.count[key]--
+		if c.count[key] == 0 {
+			delete(c.count, key)
+		}
+	}
+}
+
 func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc {
+	// Shared across all connections: cap concurrent SSE streams per user so one
+	// tenant cannot open unbounded streams (each holds broker state and, for
+	// non-admins, re-queries owned VMIDs every few seconds).
+	sseConns := newConnLimiter(maxSSEPerUser)
 	return func(w http.ResponseWriter, r *http.Request) {
 		fl, ok := w.(http.Flusher)
 		if !ok {
@@ -49,6 +89,13 @@ func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc
 		tenantID := ""
 		if id != nil {
 			tenantID = id.ActiveTenantID
+		}
+		if id != nil && id.UserID != "" {
+			if !sseConns.acquire(id.UserID) {
+				http.Error(w, "too many concurrent event streams", http.StatusTooManyRequests)
+				return
+			}
+			defer sseConns.release(id.UserID)
 		}
 
 		// Per-connection owned-VMID set (nil for admin — admin bypasses).
