@@ -163,12 +163,13 @@ textarea::placeholder {
 
 /*
  * Marketing dark theme — overrides the SAME --color-* names with the design's
- * dark palette. Applied only where an ancestor carries [data-theme="dark"],
- * which the marketing root wrapper sets and the portal never does; custom
- * properties inherit, so descendants of the marketing tree resolve dark values
- * while the light-only portal keeps the :root values untouched.
+ * dark palette. Scoped to the marketing root wrapper itself
+ * (.pc-marketing[data-theme="dark"]) so the scope is enforced by the selector,
+ * not just by convention: custom properties inherit, so descendants of the
+ * marketing tree resolve dark values while the light-only portal — which carries
+ * neither .pc-marketing nor data-theme — keeps the :root values untouched.
  */
-[data-theme="dark"] {
+.pc-marketing[data-theme="dark"] {
   --color-page: #1b1a19; /* --pc-page */
   --color-canvas: #201f1e; /* --pc-canvas */
   --color-alt: #252423; /* --pc-alt */
