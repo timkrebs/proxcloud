@@ -15,9 +15,9 @@ func TestAwaitForExceedsGrace(t *testing.T) {
 		graceSec int
 		want     time.Duration
 	}{
-		{30, defaultAwaitTimeout},                 // tiny grace floors at the default
-		{120, defaultAwaitTimeout},                // default grace still floored (210s < 300s)
-		{300, 300*time.Second + 90*time.Second},   // max grace → grace + margin, above the floor
+		{30, defaultAwaitTimeout},               // tiny grace floors at the default
+		{120, defaultAwaitTimeout},              // default grace still floored (210s < 300s)
+		{300, 300*time.Second + 90*time.Second}, // max grace → grace + margin, above the floor
 	}
 	for _, tc := range tests {
 		got := s.awaitFor(tc.graceSec)
