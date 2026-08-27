@@ -1,8 +1,9 @@
-# deploy — the CD wave (ADR-0014 §4): staging → smoke → prod gate → blue/green
-# cutover → prod smoke → auto-rollback. This is the ONLY workflow that runs on
-# the self-hosted homelab runner and reaches production; it never holds
-# GHCR/build credentials and only ever runs already-merged, already-published
-# code. See docs/adr/0014-cd-workflow-structure.md and RELEASING.md.
+# deploy — the CD wave (ADR-0014 §4, ADR-0022): qa → smoke → staging → smoke →
+# prod gate → blue/green cutover → prod smoke → auto-rollback. This is the ONLY
+# workflow that runs on the self-hosted homelab runner and reaches production; it
+# never holds GHCR/build credentials and only ever runs already-merged, already-
+# published code. See docs/adr/0014-cd-workflow-structure.md,
+# docs/adr/0022-cicd-topology-qa-environment.md and RELEASING.md.
 #
 # TRUST BOUNDARY (ADR-0014 §2): fired via `workflow_run` on a *completed,
 # successful* publish.yml run of the BASE repo — a fork PR can never reach here.
@@ -167,11 +168,113 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
+  # ── deploy-qa: FIRST deploy target — SSH the forced-command wrapper → deploy.sh
+  #    <ref> (ADR-0022). Mirrors deploy-staging one-for-one; QA is a disposable
+  #    LXC clone of staging (single-stack, no rollback). QA is repo-level/ungated:
+  #    it uses its OWN key (QA_SSH_KEY) + host (QA_SSH_HOST), never prod's.
+  deploy-qa:
+    needs: prepare
+    runs-on: [self-hosted, homelab]
+    steps:
+      - name: Deploy to qa
+        env:
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          SSH_TARGET: ${{ vars.QA_SSH_HOST }}
+          SSH_KEY: ${{ secrets.QA_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          # Defense in depth: re-validate the ref on the runner before SSH even
+          # though prepare already did (the wrapper validates a THIRD time).
+          printf '%s' "$DEPLOY_REF" | grep -Eq '^[0-9a-f]{40}$|^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::bad deploy ref reached the runner"; exit 1; }
+          [ -n "$SSH_TARGET" ] || { echo "::error::vars.QA_SSH_HOST is not set"; exit 1; }
+          [ -n "$SSH_KEY" ] || { echo "::error::secrets.QA_SSH_KEY is not set"; exit 1; }
+          [ -n "$SSH_KNOWN_HOSTS" ] || { echo "::error::secrets.SSH_KNOWN_HOSTS is not set (ssh-keyscan the guests once)"; exit 1; }
+
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/deploy_key" && chmod 600 "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts" && chmod 600 "$HOME/.ssh/known_hosts"
+
+          # The forced command reads $SSH_ORIGINAL_COMMAND; the wrapper accepts
+          # EXACTLY `deploy <ref>`. Word-splitting is safe: DEPLOY_REF is a
+          # validated single token with no whitespace or globs.
+          # Always connect as the `deploy` user — the forced-command key lives in
+          # /home/deploy/.ssh/authorized_keys (first-boot.sh/bootstrap.sh pin
+          # DEPLOY_USER=deploy), NOT the runner's own account. `-l deploy` keeps
+          # QA_SSH_HOST as a bare host.
+          echo "::group::deploy.sh <ref> (server-side migrate + seed + health gate)"
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o ConnectTimeout=20 \
+            -l deploy \
+            "$SSH_TARGET" "deploy $DEPLOY_REF" 2>&1 | tee deploy-qa.log
+          echo "::endgroup::"
+
+      - name: Verify deployed version + summarize
+        if: ${{ always() && hashFiles('deploy-qa.log') != '' }}
+        env:
+          BASE_URL: ${{ vars.QA_BASE_URL }}
+          DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### QA deploy — \`$DEPLOY_REF\`"
+            echo ""
+            echo "Migrator / health tail:"
+            echo '```'
+            grep -Ei 'migrat|commit|semver|healthy|cutover|deploy' deploy-qa.log | tail -n 20 || tail -n 20 deploy-qa.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${BASE_URL:-}" ]; then
+            echo "Deployed /api/v1/version:" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            curl -fsS --max-time 15 "$BASE_URL/api/v1/version" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo '{"error":"version fetch failed"}' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Scrub SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+
+  # ── smoke-qa: BLOCKING black-box smoke against QA (ADR-0016 / ADR-0022) ───────
+  # First smoke gate: any failure stops the wave BEFORE staging (and thus before
+  # the production gate). QA-scoped smoke creds + reserved VMID (ADR-0016 §4).
+  smoke-qa:
+    needs: [prepare, build-smoketest, deploy-qa]
+    runs-on: [self-hosted, homelab]
+    steps:
+      - name: Download smoketest binary
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: smoketest
+      - name: Run smoke against qa
+        env:
+          SMOKE_BASE_URL: ${{ vars.QA_BASE_URL }}
+          SMOKE_EXPECT_REF: ${{ needs.prepare.outputs.deploy_ref }}
+          SMOKE_EMAIL: ${{ secrets.QA_SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.QA_SMOKE_PASSWORD }}
+          SMOKE_TENANT: ${{ vars.SMOKE_TENANT }}
+          SMOKE_PROJECT: ${{ vars.SMOKE_PROJECT }}
+          SMOKE_NODE: ${{ vars.SMOKE_NODE }}
+          SMOKE_TEMPLATE: ${{ vars.SMOKE_TEMPLATE }}
+          SMOKE_STORAGE: ${{ vars.SMOKE_STORAGE }}
+          SMOKE_BRIDGE: ${{ vars.SMOKE_BRIDGE }}
+          SMOKE_VMID: ${{ vars.QA_SMOKE_VMID }}
+        run: |
+          set -euo pipefail
+          chmod +x ./smoketest
+          ./smoketest
+
   # ── deploy-staging: SSH the forced-command wrapper → deploy.sh <ref> ─────────
   # deploy.sh (server-side) pulls images, migrates, seeds smoke, composes up, and
   # health+version gates. Staging is disposable — no rollback (ADR-0014 §4.1).
+  # Gated on a green QA (ADR-0022 §2): a bad image is caught on QA first.
   deploy-staging:
-    needs: prepare
+    needs: [prepare, smoke-qa]
     runs-on: [self-hosted, homelab]
     steps:
       - name: Deploy to staging
@@ -480,7 +583,7 @@ jobs:
   # NTFY_URL is unset. Composes env/version/color/smoke/approver from job
   # results. Runs even when an earlier stage failed.
   notify:
-    needs: [prepare, build-smoketest, deploy-staging, smoke-staging, deploy-prod, release]
+    needs: [prepare, build-smoketest, deploy-qa, smoke-qa, deploy-staging, smoke-staging, deploy-prod, release]
     if: ${{ always() && needs.prepare.result != 'skipped' }}
     runs-on: [self-hosted, homelab]
     permissions:
@@ -497,6 +600,8 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DEPLOY_REF: ${{ needs.prepare.outputs.deploy_ref }}
           IS_TAG: ${{ needs.prepare.outputs.is_tag }}
+          R_DEPLOY_QA: ${{ needs.deploy-qa.result }}
+          R_SMOKE_QA: ${{ needs.smoke-qa.result }}
           R_DEPLOY_STAGING: ${{ needs.deploy-staging.result }}
           R_SMOKE_STAGING: ${{ needs.smoke-staging.result }}
           R_DEPLOY_PROD: ${{ needs.deploy-prod.result }}
@@ -532,13 +637,17 @@ jobs:
             headline="staging smoke FAILED — wave stopped before prod"; prio="high"
           elif [ "${R_DEPLOY_STAGING}" = "failure" ]; then
             headline="staging deploy FAILED"; prio="high"
+          elif [ "${R_SMOKE_QA}" = "failure" ]; then
+            headline="QA smoke FAILED — wave stopped before staging"; prio="high"
+          elif [ "${R_DEPLOY_QA}" = "failure" ]; then
+            headline="QA deploy FAILED"; prio="high"
           elif [ "${R_DEPLOY_PROD}" = "skipped" ] || [ "${R_DEPLOY_PROD}" = "" ]; then
             headline="pending prod approval / not reached"
           else
             headline="deploy FAILED"; prio="high"
           fi
 
-          msg="$headline | ref=$DEPLOY_REF | staging-smoke=${R_SMOKE_STAGING:-n/a} | prod=${PROD_OUTCOME:-n/a} | approver=$approver | $RUN_URL"
+          msg="$headline | ref=$DEPLOY_REF | qa-smoke=${R_SMOKE_QA:-n/a} | staging-smoke=${R_SMOKE_STAGING:-n/a} | prod=${PROD_OUTCOME:-n/a} | approver=$approver | $RUN_URL"
           echo "ntfy ($prio): $msg"
           curl -fsS --max-time 15 \
             -H "Title: $title" \
