@@ -72,13 +72,16 @@ func (d *Deps) GuestAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A user-initiated start clears the scheduler's auto_stopped marker, so a guest
-	// a user turned back on is no longer treated as "stopped by schedule" (its
-	// paired autoshutdown.start would otherwise re-own the power state). Best-effort:
-	// a failure here must not fail the action the user asked for (ADR-0019).
+	// A user-initiated start clears the scheduler's lifecycle markers: the guest is
+	// no longer "stopped by schedule" (auto_stopped — ADR-0019) nor "expired"
+	// (expired_at — ADR-0020, a TTL stop-expiry is reversible by a user start).
+	// Best-effort: a failure here must not fail the action the user asked for.
 	if action == "start" && d.Store != nil {
 		if err := d.Store.SetAutoStopped(r.Context(), ref.VMID, false); err != nil && !errors.Is(err, store.ErrNotFound) {
 			d.logger().Warn("clear auto_stopped on manual start", "vmid", ref.VMID, "err", err)
+		}
+		if err := d.Store.SetExpiredAt(r.Context(), ref.VMID, nil); err != nil && !errors.Is(err, store.ErrNotFound) {
+			d.logger().Warn("clear expired_at on manual start", "vmid", ref.VMID, "err", err)
 		}
 	}
 

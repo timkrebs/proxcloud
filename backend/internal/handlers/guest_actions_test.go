@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox/proxmoxtest"
+	"github.com/timkrebs9/proxcloud/backend/internal/store/storetest"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
 )
 
@@ -99,6 +101,54 @@ func TestGuestAction(t *testing.T) {
 				t.Errorf("registry has no active task for vmid %d", vmid)
 			}
 		})
+	}
+}
+
+// TestGuestStartClearsLifecycleMarkers proves a user-initiated start clears BOTH
+// the scheduler-stop marker (auto_stopped, ADR-0019) and the TTL-expiry marker
+// (expired_at, ADR-0020) — so a guest a user turns back on is no longer labelled
+// "stopped by schedule" or "expired" (honest task states).
+func TestGuestStartClearsLifecycleMarkers(t *testing.T) {
+	ctx := context.Background()
+	f := storetest.New()
+	tid := f.AddTenant("Acme", "acme")
+	pid := f.AddProject(tid, "P1", "p1", "pc-acme-p1")
+	f.AddOwnership(tid, pid, 101, "qemu", "pve01", "active", nil)
+	if err := f.SetAutoStopped(ctx, 101, true); err != nil {
+		t.Fatalf("seed auto_stopped: %v", err)
+	}
+	now := time.Now()
+	if err := f.SetExpiredAt(ctx, 101, &now); err != nil {
+		t.Fatalf("seed expired_at: %v", err)
+	}
+
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: stubResources(),
+		OnGuestAction: func(_ context.Context, _ proxmox.GuestRef, _ string) (proxmox.UPID, error) {
+			return "UPID:pve01:0001:0002:0003:qmstart:101:root@pam:", nil
+		},
+	}
+	d := &handlers.Deps{
+		PVE: mock, Store: f, Registry: tasks.NewRegistry(), Broker: events.NewBroker(),
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	r := chi.NewRouter()
+	r.Route("/api", func(r chi.Router) { mountLegacy(d, r) })
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/guests/pve01/qemu/101/start", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %q)", rec.Code, rec.Body.String())
+	}
+
+	own, err := f.GetOwnershipByVMID(ctx, 101)
+	if err != nil {
+		t.Fatalf("GetOwnershipByVMID: %v", err)
+	}
+	if own.AutoStopped {
+		t.Error("auto_stopped not cleared on manual start")
+	}
+	if own.ExpiredAt != nil {
+		t.Error("expired_at not cleared on manual start")
 	}
 }
 

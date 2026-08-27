@@ -132,7 +132,9 @@ func (s *AutoShutdown) MaterializeForGuestWith(ctx context.Context, st store.Sto
 }
 
 func (s *AutoShutdown) materializeTx(ctx context.Context, own store.ResourceOwnership) error {
-	if _, err := s.Store.CancelJobsForVMID(ctx, own.VMID); err != nil {
+	// Cancel ONLY this feature's jobs (handler prefix), so re-materializing a
+	// schedule never drops a guest's TTL jobs (ADR-0020).
+	if _, err := s.Store.CancelJobsForVMIDByPrefix(ctx, own.VMID, "autoshutdown."); err != nil {
 		return fmt.Errorf("materialize: cancel existing jobs for vmid %d: %w", own.VMID, err)
 	}
 	if own.Status == "tombstoned" {

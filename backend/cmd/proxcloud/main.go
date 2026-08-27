@@ -215,9 +215,16 @@ func runServe(log *slog.Logger) {
 		Store: st, PVE: pve, Registry: registry, Broker: broker, Log: log,
 		DefaultGrace: cfg.AutoShutdownDefaultGrace,
 	}
+	// TTL / ephemeral-resource service (ADR-0020): shared by the HTTP TTL handlers
+	// (materialize on edit) and the scheduler (run the warn/expire handlers).
+	ttlSvc := &lifecycle.TTL{
+		Store: st, PVE: pve, Registry: registry, Broker: broker, Log: log,
+		DefaultGrace: cfg.AutoShutdownDefaultGrace,
+	}
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW,
 		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL,
-		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive()}
+		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive(),
+		TTL: ttlSvc, TTLEnabled: cfg.TTLActive()}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {
@@ -301,6 +308,12 @@ func runServe(log *slog.Logger) {
 			sched.Register(lifecycle.HandlerStop, autoShutdown.AutoShutdownStop)
 			sched.Register(lifecycle.HandlerWarn, autoShutdown.AutoShutdownWarn)
 			sched.Register(lifecycle.HandlerStart, autoShutdown.AutoShutdownStart)
+		}
+		// TTL warn/expire handlers register only when the TTL feature is active (its
+		// own flag AND the scheduler engine). Nothing registers otherwise.
+		if cfg.TTLActive() {
+			sched.Register(lifecycle.HandlerTTLWarn, ttlSvc.TTLWarn)
+			sched.Register(lifecycle.HandlerTTLExpire, ttlSvc.TTLExpire)
 		}
 		startWorker(sched.Run)
 		log.Info("scheduler enabled", "interval", cfg.SchedulerInterval.String(),

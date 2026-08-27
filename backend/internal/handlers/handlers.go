@@ -70,6 +70,13 @@ type Deps struct {
 	// routes always mount (and persist) but only project jobs when the feature is on.
 	AutoShutdown        *lifecycle.AutoShutdown
 	AutoShutdownEnabled bool
+
+	// TTL materializes a guest's expiry into scheduler jobs (ADR-0020). Nil-safe:
+	// without it the TTL CRUD still persists but no warn/expire jobs are
+	// (re)materialized. TTLEnabled gates materialization on cfg.TTLActive() so the
+	// routes always mount (and persist) but only project jobs when the feature is on.
+	TTL        *lifecycle.TTL
+	TTLEnabled bool
 }
 
 // MountAccount attaches the tenant-agnostic, per-user account routes (paths
@@ -146,7 +153,10 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Get(p+"/guests/{node}/{type}/{vmid}/firewall", d.GetGuestFirewall)
 	r.Get(p+"/guests/{node}/{type}/{vmid}/acl", d.GetGuestACL)
 	r.Get(p+"/guests/{node}/{type}/{vmid}/schedule", d.GetResourceSchedule)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/ttl", d.GetGuestTTL)
 	r.Get(p+"/projects/{projectId}/schedule", d.GetProjectSchedule)
+	r.Get(p+"/projects/{projectId}/ttl-policy", d.GetProjectTTLPolicy)
+	r.Get(p+"/projects/{projectId}/ttls", d.ListProjectTTLs)
 
 	r.Get(p+"/deployments/{id}", d.GetDeployment)
 	r.Get(p+"/tasks", d.ListTenantTasks)
@@ -163,6 +173,7 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Put(p+"/projects/{projectId}/quota", d.PutProjectQuota)
 	r.Put(p+"/projects/{projectId}/schedule", d.PutProjectSchedule)
 	r.Delete(p+"/projects/{projectId}/schedule", d.DeleteProjectSchedule)
+	r.Put(p+"/projects/{projectId}/ttl-policy", d.PutProjectTTLPolicy)
 
 	r.Post(p+"/guests", d.CreateGuest)
 	r.Patch(p+"/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)
@@ -175,6 +186,9 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Put(p+"/guests/{node}/{type}/{vmid}/schedule", d.PutResourceSchedule)
 	r.Delete(p+"/guests/{node}/{type}/{vmid}/schedule", d.DeleteResourceSchedule)
 	r.Post(p+"/guests/{node}/{type}/{vmid}/schedule/skip", d.SkipNextSchedule)
+	r.Put(p+"/guests/{node}/{type}/{vmid}/ttl", d.PutGuestTTL)
+	r.Delete(p+"/guests/{node}/{type}/{vmid}/ttl", d.DeleteGuestTTL)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/ttl/extend", d.ExtendGuestTTL)
 	r.Post(p+"/guests/{node}/{type}/{vmid}/{action}", d.GuestAction)
 	r.Delete(p+"/guests/{node}/{type}/{vmid}", d.DeleteGuest)
 }

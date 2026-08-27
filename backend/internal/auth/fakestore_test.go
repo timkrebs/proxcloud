@@ -998,6 +998,9 @@ func (f *fakeStore) FailJob(context.Context, string, string, time.Time) (bool, e
 }
 func (f *fakeStore) BumpScheduledRunAt(context.Context, string, time.Time) error { return nil }
 func (f *fakeStore) CancelJobsForVMID(context.Context, int) (int, error)         { return 0, nil }
+func (f *fakeStore) CancelJobsForVMIDByPrefix(context.Context, int, string) (int, error) {
+	return 0, nil
+}
 func (f *fakeStore) GetJob(context.Context, string) (*store.Job, error) {
 	return nil, store.ErrNotFound
 }
@@ -1025,6 +1028,28 @@ func (f *fakeStore) ListSchedulesByProject(context.Context, string) ([]store.Sch
 }
 func (f *fakeStore) DeleteResourceSchedule(context.Context, int) error           { return nil }
 func (f *fakeStore) DeleteProjectSchedule(context.Context, string, string) error { return nil }
+
+// --- TTL (ADR-0020) + expired marker: unused by auth tests; minimal stubs ---
+
+func (f *fakeStore) SetExpiredAt(context.Context, int, *time.Time) error { return nil }
+func (f *fakeStore) UpsertTTL(context.Context, store.UpsertTTLParams) (*store.TTL, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetTTL(context.Context, int) (*store.TTL, error) { return nil, store.ErrNotFound }
+func (f *fakeStore) DeleteTTL(context.Context, int) error            { return nil }
+func (f *fakeStore) SetTTLWarned(context.Context, int, string) error { return nil }
+func (f *fakeStore) UpdateTTLExpiry(context.Context, int, time.Time) error {
+	return nil
+}
+func (f *fakeStore) ListTTLsByProject(context.Context, string) ([]store.TTL, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetProjectTTLPolicy(context.Context, string, string) (*store.ProjectTTLPolicy, error) {
+	return nil, store.ErrNotFound
+}
+func (f *fakeStore) UpsertProjectTTLPolicy(context.Context, store.UpsertProjectTTLPolicyParams) (*store.ProjectTTLPolicy, error) {
+	return nil, nil
+}
 
 func cloneUser(u *store.User) *store.User {
 	c := *u

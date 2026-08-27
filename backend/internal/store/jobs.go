@@ -196,6 +196,21 @@ func (s *PgStore) CancelJobsForVMID(ctx context.Context, vmid int) (int, error) 
 	return int(tag.RowsAffected()), nil
 }
 
+// CancelJobsForVMIDByPrefix implements JobStore: cancel only the vmid's
+// non-terminal jobs whose handler begins with prefix (the re-materialization
+// cleanup that leaves other features' jobs intact). prefix is a trusted code
+// constant, not user input.
+func (s *PgStore) CancelJobsForVMIDByPrefix(ctx context.Context, vmid int, prefix string) (int, error) {
+	const q = `UPDATE jobs
+	           SET status = 'cancelled', locked_at = NULL, locked_by = NULL, updated_at = now()
+	           WHERE vmid = $1 AND status IN ('scheduled', 'running') AND handler LIKE $2`
+	tag, err := s.q.Exec(ctx, q, vmid, prefix+"%")
+	if err != nil {
+		return 0, fmt.Errorf("store: cancel jobs for vmid by prefix: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // GetJob implements JobStore.
 func (s *PgStore) GetJob(ctx context.Context, id string) (*Job, error) {
 	const q = `SELECT ` + jobColumns + ` FROM jobs WHERE id = $1::uuid`

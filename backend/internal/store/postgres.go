@@ -520,13 +520,13 @@ func scanProject(row pgx.Row) (*Project, error) {
 // created_by is cast to text so a NULL creator scans cleanly into *string.
 const ownershipColumns = `id::text, tenant_id::text, project_id::text, vmid, guest_type,
 	node, created_by::text, status, pve_upid,
-	reserved_vcpu, reserved_ram_mb, reserved_disk_gb, auto_stopped, created_at, updated_at`
+	reserved_vcpu, reserved_ram_mb, reserved_disk_gb, auto_stopped, expired_at, created_at, updated_at`
 
 func scanOwnership(row pgx.Row) (*ResourceOwnership, error) {
 	var o ResourceOwnership
 	err := row.Scan(&o.ID, &o.TenantID, &o.ProjectID, &o.VMID, &o.GuestType,
 		&o.Node, &o.CreatedBy, &o.Status, &o.PVEUPID,
-		&o.ReservedVCPU, &o.ReservedRAMMB, &o.ReservedDiskGB, &o.AutoStopped, &o.CreatedAt, &o.UpdatedAt)
+		&o.ReservedVCPU, &o.ReservedRAMMB, &o.ReservedDiskGB, &o.AutoStopped, &o.ExpiredAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -755,6 +755,7 @@ func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) 
 	             reserved_disk_gb = EXCLUDED.reserved_disk_gb,
 	             pve_upid        = NULL,
 	             auto_stopped    = false,
+	             expired_at      = NULL,
 	             updated_at      = now()
 	           WHERE resource_ownership.status = 'tombstoned'
 	           RETURNING ` + ownershipColumns
@@ -822,6 +823,20 @@ func (s *PgStore) SetAutoStopped(ctx context.Context, vmid int, v bool) error {
 	tag, err := s.q.Exec(ctx, q, vmid, v)
 	if err != nil {
 		return fmt.Errorf("store: set auto_stopped: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetExpiredAt implements OwnershipStore: set/clear the expired_at marker on a
+// VMID's ownership row (ADR-0020). ErrNotFound if the VMID has no row.
+func (s *PgStore) SetExpiredAt(ctx context.Context, vmid int, at *time.Time) error {
+	const q = `UPDATE resource_ownership SET expired_at = $2, updated_at = now() WHERE vmid = $1`
+	tag, err := s.q.Exec(ctx, q, vmid, at)
+	if err != nil {
+		return fmt.Errorf("store: set expired_at: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

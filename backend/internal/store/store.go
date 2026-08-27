@@ -57,6 +57,7 @@ type Store interface {
 	LoginChallengeStore
 	JobStore
 	ScheduleStore
+	TTLStore
 }
 
 // UserStore is the users aggregate.
@@ -133,6 +134,10 @@ type OwnershipStore interface {
 	// user-initiated start clear it — so a user-stopped guest is never auto-started.
 	// ErrNotFound if the VMID has no ownership row.
 	SetAutoStopped(ctx context.Context, vmid int, v bool) error
+	// SetExpiredAt sets (or clears, when at is nil) the expired_at marker on a
+	// VMID's ownership row (ADR-0020): a TTL stop-expiry stamps it, a user start
+	// clears it. ErrNotFound if the VMID has no ownership row.
+	SetExpiredAt(ctx context.Context, vmid int, at *time.Time) error
 	// ListOwnershipByTenant returns the tenant's ownership rows (tenant filter in
 	// SQL), ordered by VMID.
 	ListOwnershipByTenant(ctx context.Context, tenantID string) ([]ResourceOwnership, error)
@@ -364,6 +369,12 @@ type JobStore interface {
 	// by vmid — the choke-point cleanup when a guest is destroyed so no orphaned
 	// job acts on a gone VMID. Returns the count cancelled. Idempotent.
 	CancelJobsForVMID(ctx context.Context, vmid int) (int, error)
+	// CancelJobsForVMIDByPrefix cancels only the vmid's non-terminal jobs whose
+	// handler starts with prefix (e.g. "autoshutdown." or "ttl."). It is the
+	// re-materialization cleanup: a feature rewrites ONLY its own job projection,
+	// leaving the other feature's jobs (e.g. a TTL expiry) untouched. Returns the
+	// count cancelled. Idempotent.
+	CancelJobsForVMIDByPrefix(ctx context.Context, vmid int, prefix string) (int, error)
 	// GetJob returns the job with the given id, or ErrNotFound.
 	GetJob(ctx context.Context, id string) (*Job, error)
 	// ListJobs returns jobs matching the filter, newest run_at first, for the
@@ -453,6 +464,84 @@ type UpsertProjectScheduleParams struct {
 	GraceSeconds  int
 	Enabled       bool
 	CreatedBy     *string
+}
+
+// TTLStore is the TTL / ephemeral-resource aggregate (ADR-0020): a guest's
+// optional expiry (stop or delete), the warning-flag bookkeeping, and the
+// per-project policy (default/max). One TTL per guest (unique vmid).
+type TTLStore interface {
+	// UpsertTTL inserts or replaces a guest's TTL (ON CONFLICT (vmid)) and returns
+	// the stored row. Re-setting a TTL resets the warning flags (fresh row).
+	UpsertTTL(ctx context.Context, p UpsertTTLParams) (*TTL, error)
+	// GetTTL returns the TTL for a VMID, or ErrNotFound.
+	GetTTL(ctx context.Context, vmid int) (*TTL, error)
+	// DeleteTTL removes a guest's TTL (clearing expiry). ErrNotFound if none.
+	DeleteTTL(ctx context.Context, vmid int) error
+	// SetTTLWarned marks one warning sent (which is "24h" or "1h"), guarding the
+	// at-least-once handler against a double-send. ErrNotFound if the VMID has none.
+	SetTTLWarned(ctx context.Context, vmid int, which string) error
+	// UpdateTTLExpiry sets a new expires_at and RESETS both warning flags (the
+	// extend path: a later expiry re-arms the warnings). ErrNotFound if none.
+	UpdateTTLExpiry(ctx context.Context, vmid int, expiresAt time.Time) error
+	// ListTTLsByProject returns a project's TTLs ordered by expires_at (the
+	// "expiring soon / expired" project view). Tenant-scoped by the project.
+	ListTTLsByProject(ctx context.Context, projectID string) ([]TTL, error)
+	// GetProjectTTLPolicy returns a project's TTL policy, or ErrNotFound (the
+	// caller then treats it as default none / max 30d — the migration default).
+	GetProjectTTLPolicy(ctx context.Context, tenantID, projectID string) (*ProjectTTLPolicy, error)
+	// UpsertProjectTTLPolicy inserts or replaces a project's TTL policy
+	// (ON CONFLICT (tenant_id, project_id)) and returns the stored row.
+	UpsertProjectTTLPolicy(ctx context.Context, p UpsertProjectTTLPolicyParams) (*ProjectTTLPolicy, error)
+}
+
+// TTL is a guest's durable expiry state (ADR-0020). OriginalDuration is the TTL
+// length as chosen (used to size an extend); Warned24h/Warned1h guard the
+// at-least-once warnings.
+type TTL struct {
+	ID               string
+	TenantID         string
+	ProjectID        string
+	VMID             int
+	ExpiresAt        time.Time
+	Action           string // "stop" | "delete"
+	Warned24h        bool
+	Warned1h         bool
+	OriginalDuration time.Duration
+	CreatedBy        *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+// UpsertTTLParams are the inputs to UpsertTTL.
+type UpsertTTLParams struct {
+	TenantID         string
+	ProjectID        string
+	VMID             int
+	ExpiresAt        time.Time
+	Action           string // "stop" | "delete"
+	OriginalDuration time.Duration
+	CreatedBy        *string
+}
+
+// ProjectTTLPolicy is a project's TTL governance (ADR-0020): DefaultTTL is the
+// TTL applied when a creator picks nothing (nil = permanent by default); MaxTTL
+// is the hard ceiling on any TTL at create or extend (default 30 days).
+type ProjectTTLPolicy struct {
+	TenantID   string
+	ProjectID  string
+	DefaultTTL *time.Duration // nil = no default
+	MaxTTL     time.Duration
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// UpsertProjectTTLPolicyParams are the inputs to UpsertProjectTTLPolicy. A nil
+// DefaultTTL clears the default (→ permanent by default).
+type UpsertProjectTTLPolicyParams struct {
+	TenantID   string
+	ProjectID  string
+	DefaultTTL *time.Duration
+	MaxTTL     time.Duration
 }
 
 // CreateUserParams are the inputs to CreateUser; generated columns (id,
@@ -662,8 +751,12 @@ type ResourceOwnership struct {
 	// autoshutdown.start job only starts a guest whose AutoStopped is true, so a
 	// user-stopped guest is never auto-started; a user-initiated start clears it.
 	AutoStopped bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// ExpiredAt marks a guest a TTL stop-expiry powered down (ADR-0020) — distinct
+	// from a user-stop and an auto-shutdown stop; nil = not expired. Reversible:
+	// a user-initiated start clears it.
+	ExpiredAt *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Quota holds per-scope limits; a nil field means unlimited.

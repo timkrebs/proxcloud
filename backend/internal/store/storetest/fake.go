@@ -45,6 +45,10 @@ type Fake struct {
 
 	// Auto-shutdown schedules (ADR-0019).
 	schedules map[string]*store.Schedule // by id
+
+	// TTL / ephemeral resources (ADR-0020).
+	ttls        map[int]*store.TTL                 // by vmid
+	ttlPolicies map[string]*store.ProjectTTLPolicy // by tenantID|projectID
 }
 
 // fakeRecoveryCode is one stored recovery code (hashed, single-use).
@@ -83,6 +87,8 @@ func New() *Fake {
 		chalByHash:  map[string]string{},
 		jobs:        map[string]*store.Job{},
 		schedules:   map[string]*store.Schedule{},
+		ttls:        map[int]*store.TTL{},
+		ttlPolicies: map[string]*store.ProjectTTLPolicy{},
 	}
 }
 
@@ -258,6 +264,14 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	for k, v := range f.schedules {
 		schedules[k] = v
 	}
+	ttls := make(map[int]*store.TTL, len(f.ttls))
+	for k, v := range f.ttls {
+		ttls[k] = v
+	}
+	ttlPolicies := make(map[string]*store.ProjectTTLPolicy, len(f.ttlPolicies))
+	for k, v := range f.ttlPolicies {
+		ttlPolicies[k] = v
+	}
 	f.mu.Unlock()
 
 	if err := fn(f); err != nil {
@@ -273,6 +287,8 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 		f.chalByHash = chalByHash
 		f.jobs = jobs
 		f.schedules = schedules
+		f.ttls = ttls
+		f.ttlPolicies = ttlPolicies
 		f.mu.Unlock()
 		return err
 	}
@@ -765,6 +781,21 @@ func (f *Fake) SetAutoStopped(_ context.Context, vmid int, v bool) error {
 		return store.ErrNotFound
 	}
 	o.AutoStopped = v
+	o.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) SetExpiredAt(_ context.Context, vmid int, at *time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("SetExpiredAt"); err != nil {
+		return err
+	}
+	o, ok := f.ownership[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	o.ExpiredAt = at
 	o.UpdatedAt = f.Now()
 	return nil
 }
@@ -1557,6 +1588,26 @@ func (f *Fake) CancelJobsForVMID(_ context.Context, vmid int) (int, error) {
 	return n, nil
 }
 
+func (f *Fake) CancelJobsForVMIDByPrefix(_ context.Context, vmid int, prefix string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CancelJobsForVMIDByPrefix"); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, j := range f.jobs {
+		if j.VMID != nil && *j.VMID == vmid && strings.HasPrefix(j.Handler, prefix) &&
+			(j.Status == "scheduled" || j.Status == "running") {
+			j.Status = "cancelled"
+			j.LockedAt = nil
+			j.LockedBy = nil
+			j.UpdatedAt = f.Now()
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (f *Fake) GetJob(_ context.Context, id string) (*store.Job, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1761,4 +1812,137 @@ func (f *Fake) DeleteProjectSchedule(_ context.Context, tenantID, projectID stri
 		return nil
 	}
 	return store.ErrNotFound
+}
+
+// --- TTL / ephemeral resources (ADR-0020) ---
+
+func ttlPolicyKey(tenantID, projectID string) string { return tenantID + "|" + projectID }
+
+// TTLByVMID returns a copy of a guest's TTL, or nil (test convenience).
+func (f *Fake) TTLByVMID(vmid int) *store.TTL {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.ttls[vmid]; ok {
+		c := *t
+		return &c
+	}
+	return nil
+}
+
+func (f *Fake) UpsertTTL(_ context.Context, p store.UpsertTTLParams) (*store.TTL, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertTTL"); err != nil {
+		return nil, err
+	}
+	existing, ok := f.ttls[p.VMID]
+	id := f.next("ttl")
+	created := f.Now()
+	if ok {
+		id = existing.ID
+		created = existing.CreatedAt
+	}
+	t := &store.TTL{
+		ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID,
+		ExpiresAt: p.ExpiresAt, Action: p.Action, Warned24h: false, Warned1h: false,
+		OriginalDuration: p.OriginalDuration, CreatedBy: p.CreatedBy,
+		CreatedAt: created, UpdatedAt: f.Now(),
+	}
+	f.ttls[p.VMID] = t
+	c := *t
+	return &c, nil
+}
+
+func (f *Fake) GetTTL(_ context.Context, vmid int) (*store.TTL, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.ttls[vmid]; ok {
+		c := *t
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) DeleteTTL(_ context.Context, vmid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.ttls[vmid]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.ttls, vmid)
+	return nil
+}
+
+func (f *Fake) SetTTLWarned(_ context.Context, vmid int, which string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.ttls[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if which == "1h" {
+		t.Warned1h = true
+	} else {
+		t.Warned24h = true
+	}
+	t.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) UpdateTTLExpiry(_ context.Context, vmid int, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.ttls[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	t.ExpiresAt = expiresAt
+	t.Warned24h = false
+	t.Warned1h = false
+	t.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) ListTTLsByProject(_ context.Context, projectID string) ([]store.TTL, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.TTL{}
+	for _, t := range f.ttls {
+		if t.ProjectID == projectID {
+			out = append(out, *t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ExpiresAt.Before(out[j].ExpiresAt) })
+	return out, nil
+}
+
+func (f *Fake) GetProjectTTLPolicy(_ context.Context, tenantID, projectID string) (*store.ProjectTTLPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.ttlPolicies[ttlPolicyKey(tenantID, projectID)]; ok {
+		c := *p
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) UpsertProjectTTLPolicy(_ context.Context, p store.UpsertProjectTTLPolicyParams) (*store.ProjectTTLPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertProjectTTLPolicy"); err != nil {
+		return nil, err
+	}
+	key := ttlPolicyKey(p.TenantID, p.ProjectID)
+	created := f.Now()
+	if existing, ok := f.ttlPolicies[key]; ok {
+		created = existing.CreatedAt
+	}
+	pol := &store.ProjectTTLPolicy{
+		TenantID: p.TenantID, ProjectID: p.ProjectID,
+		DefaultTTL: p.DefaultTTL, MaxTTL: p.MaxTTL,
+		CreatedAt: created, UpdatedAt: f.Now(),
+	}
+	f.ttlPolicies[key] = pol
+	c := *pol
+	return &c, nil
 }

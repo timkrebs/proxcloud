@@ -1086,6 +1086,78 @@ export interface RecoveryCodesResponse {
 }
 
 //////////
+// source: ttl.go
+
+/**
+ * Ttl is the wire representation of a guest's TTL / ephemeral-expiry (ADR-0020).
+ * Every value comes from the stored row. Action is "stop" (reversible: the guest
+ * is powered off and marked expired) or "delete" (irreversible destroy).
+ * OriginalDurationSeconds is the TTL length as chosen, used to size an extend.
+ */
+export interface Ttl {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  vmid: number /* int */;
+  expiresAt: string /* RFC3339 */;
+  action: string; // "stop" | "delete"
+  warned24h: boolean;
+  warned1h: boolean;
+  originalDurationSeconds: number /* int64 */;
+  createdAt: string /* RFC3339 */;
+  updatedAt: string /* RFC3339 */;
+}
+/**
+ * TtlRequest is the PUT body for a guest TTL. The backend validates action,
+ * ttlSeconds (> 0 and <= the project max), and — when action is "delete" —
+ * requires confirmName to match the guest's name (typed-confirmation, enforced
+ * server-side: a destructive TTL cannot be set without naming the guest).
+ */
+export interface TtlRequest {
+  action: string; // "stop" | "delete"
+  ttlSeconds: number /* int64 */; // TTL length in seconds
+  confirmName?: string; // required only when action == "delete"
+}
+/**
+ * TtlPolicy is a project's TTL governance (ADR-0020). DefaultTtlSeconds is null
+ * when the project applies no default (a guest is permanent unless opted in);
+ * MaxTtlSeconds is the hard ceiling on any TTL at create or extend.
+ */
+export interface TtlPolicy {
+  defaultTtlSeconds?: number /* int64 */;
+  maxTtlSeconds: number /* int64 */;
+}
+/**
+ * TtlPolicyRequest is the PUT body for a project TTL policy. A null
+ * defaultTtlSeconds clears the default (→ permanent by default).
+ */
+export interface TtlPolicyRequest {
+  defaultTtlSeconds?: number /* int64 */;
+  maxTtlSeconds: number /* int64 */;
+}
+/**
+ * TtlExtendResult is the POST …/ttl/extend response: the new (capped) expiry.
+ */
+export interface TtlExtendResult {
+  expiresAt: string /* RFC3339 */;
+}
+/**
+ * TtlWarningEvent is the SSE "ttl_warning" payload: an advance heads-up (T-24h or
+ * T-1h) that a guest's TTL is about to fire. It carries the owning VMID so
+ * events.deliver can scope it to the owning tenant (it is NOT broadcast). Which
+ * is the warning tier ("24h" | "1h"); Action tells the UI whether the guest will
+ * be stopped or destroyed (so it can offer a one-click extend).
+ */
+export interface TtlWarningEvent {
+  vmid: number /* int */;
+  node: string;
+  guestType: string; // qemu | lxc
+  which: string; // "24h" | "1h"
+  expiresAt: string /* RFC3339 */;
+  action: string; // "stop" | "delete"
+}
+
+//////////
 // source: version.go
 
 /**
