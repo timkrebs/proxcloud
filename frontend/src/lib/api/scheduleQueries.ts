@@ -69,7 +69,8 @@ export function usePutResourceSchedule(g: GuestParams) {
       pushToast({ kind: "info", title: "Schedule saved", desc: `VMID ${g.vmid}` });
       invalidateSchedules(qc);
     },
-    onError: (err) => pushToast({ kind: "err", title: "Could not save schedule", desc: errDesc(err) }),
+    onError: (err) =>
+      pushToast({ kind: "err", title: "Could not save schedule", desc: errDesc(err) }),
   });
 }
 
@@ -82,7 +83,8 @@ export function useDeleteResourceSchedule(g: GuestParams) {
       pushToast({ kind: "info", title: "Schedule removed", desc: `VMID ${g.vmid}` });
       invalidateSchedules(qc);
     },
-    onError: (err) => pushToast({ kind: "err", title: "Could not remove schedule", desc: errDesc(err) }),
+    onError: (err) =>
+      pushToast({ kind: "err", title: "Could not remove schedule", desc: errDesc(err) }),
   });
 }
 
@@ -91,7 +93,10 @@ export function useSkipSchedule(g: GuestParams) {
   const tenantId = useActiveTenantId();
   return useMutation({
     mutationFn: () =>
-      apiFetch<ScheduleSkipResult>(`${resourceUrl(tenantId, g)}/skip`, { method: "POST", body: "{}" }),
+      apiFetch<ScheduleSkipResult>(`${resourceUrl(tenantId, g)}/skip`, {
+        method: "POST",
+        body: "{}",
+      }),
     onSuccess: (res) => {
       const desc =
         res.skipped > 0
@@ -122,12 +127,20 @@ export function usePutProjectSchedule(projectId: string) {
   const tenantId = useActiveTenantId();
   return useMutation({
     mutationFn: (body: ScheduleRequest) =>
-      apiFetch<Schedule>(projectUrl(tenantId, projectId), { method: "PUT", body: JSON.stringify(body) }),
+      apiFetch<Schedule>(projectUrl(tenantId, projectId), {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
     onSuccess: () => {
-      pushToast({ kind: "info", title: "Project schedule saved", desc: "Applies to guests without an override." });
+      pushToast({
+        kind: "info",
+        title: "Project schedule saved",
+        desc: "Applies to guests without an override.",
+      });
       invalidateSchedules(qc);
     },
-    onError: (err) => pushToast({ kind: "err", title: "Could not save schedule", desc: errDesc(err) }),
+    onError: (err) =>
+      pushToast({ kind: "err", title: "Could not save schedule", desc: errDesc(err) }),
   });
 }
 
@@ -137,9 +150,14 @@ export function useDeleteProjectSchedule(projectId: string) {
   return useMutation({
     mutationFn: () => apiFetch<void>(projectUrl(tenantId, projectId), { method: "DELETE" }),
     onSuccess: () => {
-      pushToast({ kind: "info", title: "Project schedule removed", desc: "Guests keep their own schedules." });
+      pushToast({
+        kind: "info",
+        title: "Project schedule removed",
+        desc: "Guests keep their own schedules.",
+      });
       invalidateSchedules(qc);
     },
-    onError: (err) => pushToast({ kind: "err", title: "Could not remove schedule", desc: errDesc(err) }),
+    onError: (err) =>
+      pushToast({ kind: "err", title: "Could not remove schedule", desc: errDesc(err) }),
   });
 }

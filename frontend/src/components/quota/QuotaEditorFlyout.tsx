@@ -20,7 +20,12 @@ interface FieldDef {
 
 const FIELDS: FieldDef[] = [
   { key: "maxVcpu", label: "Max vCPU", unit: "cores" },
-  { key: "maxRamMb", label: "Max memory", unit: "MiB", help: "Provisioned memory, in MiB (1024 MiB = 1 GiB)." },
+  {
+    key: "maxRamMb",
+    label: "Max memory",
+    unit: "MiB",
+    help: "Provisioned memory, in MiB (1024 MiB = 1 GiB).",
+  },
   { key: "maxDiskGb", label: "Max disk", unit: "GiB", help: "Provisioned disk, in GiB." },
   { key: "maxCount", label: "Max guests", unit: "guests" },
 ];
@@ -88,7 +93,10 @@ export function QuotaEditorFlyout({
   onClose: () => void;
 }) {
   const [values, setValues] = useState<Values>(() => prefill(current));
-  const { errors, body } = useMemo(() => validateQuotaForm(values, tenantLimits), [values, tenantLimits]);
+  const { errors, body } = useMemo(
+    () => validateQuotaForm(values, tenantLimits),
+    [values, tenantLimits],
+  );
   const valid = body !== undefined;
 
   return (
@@ -134,7 +142,9 @@ export function QuotaEditorFlyout({
         </div>
       ))}
 
-      <p className="text-[12px] text-ink-2">Leave a field blank to remove that limit (unlimited).</p>
+      <p className="text-[12px] text-ink-2">
+        Leave a field blank to remove that limit (unlimited).
+      </p>
       {serverError ? <p className="mt-3 text-[12px] text-err-text">{serverError}</p> : null}
     </Flyout>
   );

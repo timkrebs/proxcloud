@@ -15,7 +15,14 @@ import { useGuest, useGuestInterfaces, useGuestMetrics } from "@/lib/api/guestQu
 import { useResourceSchedule } from "@/lib/api/scheduleQueries";
 import { useGuestTtl } from "@/lib/api/ttlQueries";
 import { useTasks } from "@/lib/api/queries";
-import { formatBytes, formatBytesPair, formatPct, formatRate, formatUptime, relativeTime } from "@/lib/format";
+import {
+  formatBytes,
+  formatBytesPair,
+  formatPct,
+  formatRate,
+  formatUptime,
+  relativeTime,
+} from "@/lib/format";
 import { statusLabel } from "@/lib/status";
 import { pushToast } from "@/lib/stores/toastStore";
 
@@ -57,7 +64,9 @@ export default function OverviewPage() {
   if (guest.isError) return <CardError err={guest.error} />;
   const d = guest.data;
 
-  const ip4 = (interfaces.data?.nics ?? []).flatMap((n) => n.ipv4).filter((a) => !a.startsWith("127."));
+  const ip4 = (interfaces.data?.nics ?? [])
+    .flatMap((n) => n.ipv4)
+    .filter((a) => !a.startsWith("127."));
   const series = metrics.data?.series ?? {};
   const last = (key: string) => {
     const s = series[key] ?? [];
@@ -69,10 +78,18 @@ export default function OverviewPage() {
   }));
 
   const tiles = [
-    { label: "CPU (average)", value: last("cpu") !== undefined ? formatPct(last("cpu")!, 0) : "—", points: series.cpu ?? [], max: 100 },
+    {
+      label: "CPU (average)",
+      value: last("cpu") !== undefined ? formatPct(last("cpu")!, 0) : "—",
+      points: series.cpu ?? [],
+      max: 100,
+    },
     {
       label: "Memory used",
-      value: last("mem") !== undefined && d.memMax > 0 ? formatPct((last("mem")! / d.memMax) * 100, 0) : "—",
+      value:
+        last("mem") !== undefined && d.memMax > 0
+          ? formatPct((last("mem")! / d.memMax) * 100, 0)
+          : "—",
       points: (series.mem ?? []).map((p) => ({ t: p.t, v: p.v })),
       max: d.memMax,
     },
@@ -100,7 +117,10 @@ export default function OverviewPage() {
             <Mi
               name="chevronDown"
               size={12}
-              style={{ transform: essOpen ? "rotate(0deg)" : "rotate(-90deg)", transition: "transform .15s" }}
+              style={{
+                transform: essOpen ? "rotate(0deg)" : "rotate(-90deg)",
+                transition: "transform .15s",
+              }}
             />
             Essentials
           </button>
@@ -118,10 +138,20 @@ export default function OverviewPage() {
         {essOpen ? (
           <div className="mt-3 grid grid-cols-2 gap-x-10">
             <div>
-              <EssRow k="Status" v={<StatusDot status={d.status} label={statusLabel(d.status)} />} />
+              <EssRow
+                k="Status"
+                v={<StatusDot status={d.status} label={statusLabel(d.status)} />}
+              />
               <EssRow k="Node" v={d.node} />
               <EssRow k="Cores" v={String(d.cores)} />
-              <EssRow k="Memory" v={d.status === "running" ? formatBytesPair(d.memUsed, d.memMax) : formatBytes(d.memMax)} />
+              <EssRow
+                k="Memory"
+                v={
+                  d.status === "running"
+                    ? formatBytesPair(d.memUsed, d.memMax)
+                    : formatBytes(d.memMax)
+                }
+              />
               <EssRow k="Uptime" v={d.status === "running" ? formatUptime(d.uptimeSec) : "—"} />
             </div>
             <div>
@@ -131,7 +161,9 @@ export default function OverviewPage() {
                   d.status !== "running" ? (
                     "— (stopped)"
                   ) : interfaces.data?.agentUnavailable ? (
-                    <span className="text-ink-2">Guest agent not running — install qemu-guest-agent</span>
+                    <span className="text-ink-2">
+                      Guest agent not running — install qemu-guest-agent
+                    </span>
                   ) : ip4.length > 0 ? (
                     ip4.join(", ")
                   ) : interfaces.isPending ? (
@@ -177,7 +209,10 @@ export default function OverviewPage() {
                 v={
                   d.tags.length > 0
                     ? d.tags.map((t) => (
-                        <span key={t} className="mr-[6px] rounded-fluent border border-line bg-hover px-2 py-[2px] text-[11px]">
+                        <span
+                          key={t}
+                          className="mr-[6px] rounded-fluent border border-line bg-hover px-2 py-[2px] text-[11px]"
+                        >
                           {t}
                         </span>
                       ))
@@ -225,7 +260,10 @@ export default function OverviewPage() {
           <p className="p-4 text-[13px] text-ink-2">No recorded tasks for this guest.</p>
         ) : (
           (tasks.data ?? []).slice(0, 6).map((t) => (
-            <div key={t.upid} className="flex items-center gap-[10px] border-b border-line-row px-[14px] py-[9px] text-[13px] last:border-b-0">
+            <div
+              key={t.upid}
+              className="flex items-center gap-[10px] border-b border-line-row px-[14px] py-[9px] text-[13px] last:border-b-0"
+            >
               <StatusDot status={t.status} />
               <span className="flex-1">{t.action}</span>
               <span className="text-ink-2">{t.user}</span>

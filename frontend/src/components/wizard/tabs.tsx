@@ -13,7 +13,13 @@ import { Mi } from "@/components/ui/icons";
 import { useProjectQuota } from "@/lib/api/quota";
 import { useResources } from "@/lib/api/queries";
 import { useProjects } from "@/lib/api/tenant";
-import { useBridges, useCatalogNodes, useNextId, useNodeStorages, useStorageContent } from "@/lib/api/wizardQueries";
+import {
+  useBridges,
+  useCatalogNodes,
+  useNextId,
+  useNodeStorages,
+  useStorageContent,
+} from "@/lib/api/wizardQueries";
 import { formatBytes } from "@/lib/format";
 import {
   SIZE_PRESETS,
@@ -78,8 +84,8 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
   return (
     <div>
       <p className="mb-[18px] text-[13px] leading-[1.5] text-ink-2">
-        Create a {kindLabel} on your Proxmox server. Complete the Basics tab, then review each tab or go
-        straight to Review + create.
+        Create a {kindLabel} on your Proxmox server. Complete the Basics tab, then review each tab
+        or go straight to Review + create.
       </p>
 
       <SectionHeading caption="Every resource lives on exactly one node and belongs to a project — the resource group that scopes ownership and access.">
@@ -107,7 +113,11 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
         ) : nodes.isError ? (
           <CardError err={nodes.error} />
         ) : (
-          <Select value={s.node} onChange={(e) => s.set({ node: e.target.value, storage: "", bridge: "" })} className="w-[300px]">
+          <Select
+            value={s.node}
+            onChange={(e) => s.set({ node: e.target.value, storage: "", bridge: "" })}
+            className="w-[300px]"
+          >
             {(nodes.data ?? []).map((n) => (
               <option key={n.name} value={n.name}>
                 {n.name}
@@ -163,8 +173,17 @@ export function BasicsTab({ errs }: { errs: WizardError[] }) {
         ) : null}
       </FormRow>
 
-      <FormRow label="VMID" required help="Auto-suggested from the cluster's next free ID." error={fieldError(errs, "vmid")}>
-        <Input value={s.vmid} onChange={(e) => s.set({ vmid: e.target.value })} className="w-[300px]" />
+      <FormRow
+        label="VMID"
+        required
+        help="Auto-suggested from the cluster's next free ID."
+        error={fieldError(errs, "vmid")}
+      >
+        <Input
+          value={s.vmid}
+          onChange={(e) => s.set({ vmid: e.target.value })}
+          className="w-[300px]"
+        />
       </FormRow>
     </div>
   );
@@ -298,8 +317,8 @@ function TemplatePicker({
         <CardError err={items.error} />
       ) : (items.data ?? []).length === 0 ? (
         <p className="text-[13px] text-ink-2">
-          Storage {selStorage} has no {content === "iso" ? "ISO images" : "templates"} yet — upload one in
-          the Proxmox UI.
+          Storage {selStorage} has no {content === "iso" ? "ISO images" : "templates"} yet — upload
+          one in the Proxmox UI.
         </p>
       ) : (
         <Select value={value} onChange={(e) => onChange(e.target.value)} className="w-[420px]">
@@ -312,7 +331,9 @@ function TemplatePicker({
         </Select>
       )}
       {storages.length > 1 ? (
-        <p className="mt-1 text-[12px] text-ink-3">Showing storage {selStorage}; other storages also hold {content} content.</p>
+        <p className="mt-1 text-[12px] text-ink-3">
+          Showing storage {selStorage}; other storages also hold {content} content.
+        </p>
       ) : null}
     </FormRow>
   );
@@ -324,7 +345,9 @@ export function SizeTab({ errs }: { errs: WizardError[] }) {
   const s = useWizardStore();
   const storages = useNodeStorages(s.node, s.kind === "lxc" ? "rootdir" : "images");
   const clone = s.sourceMode === "clone";
-  const active = SIZE_PRESETS.find((p) => String(p.cores) === s.cores && String(p.ramGiB * 1024) === s.memoryMb);
+  const active = SIZE_PRESETS.find(
+    (p) => String(p.cores) === s.cores && String(p.ramGiB * 1024) === s.memoryMb,
+  );
 
   const quotaErr = errs.find((e) => e.field === "quota")?.message;
 
@@ -336,7 +359,12 @@ export function SizeTab({ errs }: { errs: WizardError[] }) {
 
       {quotaErr ? (
         <div className="mb-4 flex items-start gap-2 rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5] text-err-text">
-          <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 1 }} />
+          <Mi
+            name="warn"
+            size={16}
+            color="var(--color-err)"
+            style={{ flexShrink: 0, marginTop: 1 }}
+          />
           {quotaErr}
         </div>
       ) : null}
@@ -368,20 +396,38 @@ export function SizeTab({ errs }: { errs: WizardError[] }) {
       </div>
 
       <FormRow label="Cores" required error={fieldError(errs, "cores")}>
-        <Input value={s.cores} onChange={(e) => s.set({ cores: e.target.value })} className="w-[300px]" />
+        <Input
+          value={s.cores}
+          onChange={(e) => s.set({ cores: e.target.value })}
+          className="w-[300px]"
+        />
       </FormRow>
       <FormRow label="Memory (MiB)" required error={fieldError(errs, "memoryMb")}>
-        <Input value={s.memoryMb} onChange={(e) => s.set({ memoryMb: e.target.value })} className="w-[300px]" />
+        <Input
+          value={s.memoryMb}
+          onChange={(e) => s.set({ memoryMb: e.target.value })}
+          className="w-[300px]"
+        />
       </FormRow>
 
       {clone ? (
         <p className="text-[13px] text-ink-2">
           Disks are copied from the template.{" "}
-          {s.cloneMode === "full" ? "Choose the target storage below." : "Linked clones stay on the template's storage."}
+          {s.cloneMode === "full"
+            ? "Choose the target storage below."
+            : "Linked clones stay on the template's storage."}
         </p>
       ) : (
-        <FormRow label={s.kind === "lxc" ? "Root disk (GiB)" : "OS disk (GiB)"} required error={fieldError(errs, "diskGb")}>
-          <Input value={s.diskGb} onChange={(e) => s.set({ diskGb: e.target.value })} className="w-[300px]" />
+        <FormRow
+          label={s.kind === "lxc" ? "Root disk (GiB)" : "OS disk (GiB)"}
+          required
+          error={fieldError(errs, "diskGb")}
+        >
+          <Input
+            value={s.diskGb}
+            onChange={(e) => s.set({ diskGb: e.target.value })}
+            className="w-[300px]"
+          />
         </FormRow>
       )}
 
@@ -392,7 +438,11 @@ export function SizeTab({ errs }: { errs: WizardError[] }) {
           ) : storages.isError ? (
             <CardError err={storages.error} />
           ) : (
-            <Select value={s.storage} onChange={(e) => s.set({ storage: e.target.value })} className="w-[300px]">
+            <Select
+              value={s.storage}
+              onChange={(e) => s.set({ storage: e.target.value })}
+              className="w-[300px]"
+            >
               <option value="">Select…</option>
               {(storages.data ?? []).map((st) => (
                 <option key={st.storage} value={st.storage}>
@@ -425,7 +475,9 @@ export function NetworkingTab({ errs }: { errs: WizardError[] }) {
 
   return (
     <div>
-      <SectionHeading caption="The guest gets one NIC on the selected bridge.">Network interface</SectionHeading>
+      <SectionHeading caption="The guest gets one NIC on the selected bridge.">
+        Network interface
+      </SectionHeading>
 
       <FormRow label="Bridge" required error={fieldError(errs, "bridge")}>
         {bridges.isPending ? (
@@ -433,7 +485,11 @@ export function NetworkingTab({ errs }: { errs: WizardError[] }) {
         ) : bridges.isError ? (
           <CardError err={bridges.error} />
         ) : (
-          <Select value={s.bridge} onChange={(e) => s.set({ bridge: e.target.value })} className="w-[300px]">
+          <Select
+            value={s.bridge}
+            onChange={(e) => s.set({ bridge: e.target.value })}
+            className="w-[300px]"
+          >
             <option value="">Select…</option>
             {(bridges.data ?? []).map((b) => (
               <option key={b.iface} value={b.iface}>
@@ -445,14 +501,29 @@ export function NetworkingTab({ errs }: { errs: WizardError[] }) {
         )}
       </FormRow>
 
-      <FormRow label="VLAN tag" help="Optional 802.1q tag (1–4094)." error={fieldError(errs, "vlanTag")}>
-        <Input value={s.vlanTag} onChange={(e) => s.set({ vlanTag: e.target.value })} placeholder="none" className="w-[300px]" />
+      <FormRow
+        label="VLAN tag"
+        help="Optional 802.1q tag (1–4094)."
+        error={fieldError(errs, "vlanTag")}
+      >
+        <Input
+          value={s.vlanTag}
+          onChange={(e) => s.set({ vlanTag: e.target.value })}
+          placeholder="none"
+          className="w-[300px]"
+        />
       </FormRow>
 
       <FormRow label="Proxmox firewall" help="Enables the PVE firewall on this NIC.">
         <div className="flex h-8 items-center gap-2">
-          <Toggle checked={s.firewall} onChange={(on) => s.set({ firewall: on })} aria-label="Firewall" />
-          <span className="text-[13px] text-ink-2">{s.firewall ? "Enabled on the NIC" : "Disabled"}</span>
+          <Toggle
+            checked={s.firewall}
+            onChange={(on) => s.set({ firewall: on })}
+            aria-label="Firewall"
+          />
+          <span className="text-[13px] text-ink-2">
+            {s.firewall ? "Enabled on the NIC" : "Disabled"}
+          </span>
         </div>
       </FormRow>
 
@@ -467,7 +538,11 @@ export function NetworkingTab({ errs }: { errs: WizardError[] }) {
       </SectionHeading>
 
       <FormRow label="Assignment" required>
-        <Select value={s.ipMode} onChange={(e) => s.set({ ipMode: e.target.value as "dhcp" | "static" })} className="w-[300px]">
+        <Select
+          value={s.ipMode}
+          onChange={(e) => s.set({ ipMode: e.target.value as "dhcp" | "static" })}
+          className="w-[300px]"
+        >
           <option value="dhcp">DHCP</option>
           <option value="static">Static</option>
         </Select>
@@ -476,10 +551,20 @@ export function NetworkingTab({ errs }: { errs: WizardError[] }) {
       {s.ipMode === "static" ? (
         <>
           <FormRow label="Address (CIDR)" required error={fieldError(errs, "cidr")}>
-            <Input value={s.cidr} onChange={(e) => s.set({ cidr: e.target.value })} placeholder="192.168.1.50/24" className="w-[300px]" />
+            <Input
+              value={s.cidr}
+              onChange={(e) => s.set({ cidr: e.target.value })}
+              placeholder="192.168.1.50/24"
+              className="w-[300px]"
+            />
           </FormRow>
           <FormRow label="Gateway" error={fieldError(errs, "gateway")}>
-            <Input value={s.gateway} onChange={(e) => s.set({ gateway: e.target.value })} placeholder="192.168.1.1" className="w-[300px]" />
+            <Input
+              value={s.gateway}
+              onChange={(e) => s.set({ gateway: e.target.value })}
+              placeholder="192.168.1.1"
+              className="w-[300px]"
+            />
           </FormRow>
         </>
       ) : null}
@@ -515,7 +600,12 @@ export function AdvancedTab() {
 
       {qemu ? (
         <FormRow label="Default user" help="cloud-init ciuser">
-          <Input value={s.ciUser} onChange={(e) => s.set({ ciUser: e.target.value })} placeholder="e.g. admin" className="w-[300px]" />
+          <Input
+            value={s.ciUser}
+            onChange={(e) => s.set({ ciUser: e.target.value })}
+            placeholder="e.g. admin"
+            className="w-[300px]"
+          />
         </FormRow>
       ) : null}
 
@@ -539,14 +629,25 @@ export function AdvancedTab() {
       </FormRow>
 
       <FormRow label="DNS server" help="Optional nameserver override.">
-        <Input value={s.nameserver} onChange={(e) => s.set({ nameserver: e.target.value })} placeholder="e.g. 1.1.1.1" className="w-[300px]" />
+        <Input
+          value={s.nameserver}
+          onChange={(e) => s.set({ nameserver: e.target.value })}
+          placeholder="e.g. 1.1.1.1"
+          className="w-[300px]"
+        />
       </FormRow>
 
       <FormRow label="Start after create">
         <div className="flex h-8 items-center gap-2">
-          <Toggle checked={s.startAfterCreate} onChange={(on) => s.set({ startAfterCreate: on })} aria-label="Start after create" />
+          <Toggle
+            checked={s.startAfterCreate}
+            onChange={(on) => s.set({ startAfterCreate: on })}
+            aria-label="Start after create"
+          />
           <span className="text-[13px] text-ink-2">
-            {s.startAfterCreate ? "The guest starts as soon as creation finishes" : "Created stopped"}
+            {s.startAfterCreate
+              ? "The guest starts as soon as creation finishes"
+              : "Created stopped"}
           </span>
         </div>
       </FormRow>
@@ -563,18 +664,33 @@ export function TagsTab({ errs }: { errs: WizardError[] }) {
       <SectionHeading caption="Proxmox tags are flat labels (lowercase letters, digits, . - _) for organizing and filtering.">
         Tags
       </SectionHeading>
-      <TagEditor tags={s.tags} onChange={(tags) => s.set({ tags })} error={fieldError(errs, "tags")} />
+      <TagEditor
+        tags={s.tags}
+        onChange={(tags) => s.set({ tags })}
+        error={fieldError(errs, "tags")}
+      />
     </div>
   );
 }
 
-function TagEditor({ tags, onChange, error }: { tags: string[]; onChange: (t: string[]) => void; error?: string }) {
+function TagEditor({
+  tags,
+  onChange,
+  error,
+}: {
+  tags: string[];
+  onChange: (t: string[]) => void;
+  error?: string;
+}) {
   return (
     <div>
       <div className="mb-3 flex flex-wrap gap-2">
         {tags.length === 0 ? <span className="text-[13px] text-ink-2">No tags yet.</span> : null}
         {tags.map((t) => (
-          <span key={t} className="flex items-center gap-2 rounded-fluent border border-line bg-hover px-[10px] py-1 text-[13px]">
+          <span
+            key={t}
+            className="flex items-center gap-2 rounded-fluent border border-line bg-hover px-[10px] py-1 text-[13px]"
+          >
             {t}
             <button
               type="button"
@@ -646,7 +762,9 @@ export function ReviewTab({ errs }: { errs: WizardError[] }) {
       rows: [
         ["Cores", s.cores],
         ["Memory", `${s.memoryMb} MiB`],
-        ...(s.sourceMode !== "clone" ? ([["Disk", `${s.diskGb} GiB on ${s.storage || "—"}`]] as [string, string][]) : []),
+        ...(s.sourceMode !== "clone"
+          ? ([["Disk", `${s.diskGb} GiB on ${s.storage || "—"}`]] as [string, string][])
+          : []),
       ],
     },
     ...(s.sourceMode !== "clone"
@@ -657,7 +775,10 @@ export function ReviewTab({ errs }: { errs: WizardError[] }) {
               ["Bridge", s.bridge || "—"],
               ["VLAN tag", s.vlanTag || "none"],
               ["Firewall", s.firewall ? "Enabled" : "Disabled"],
-              ["IP", s.ipMode === "static" ? `${s.cidr}${s.gateway ? ` via ${s.gateway}` : ""}` : "DHCP"],
+              [
+                "IP",
+                s.ipMode === "static" ? `${s.cidr}${s.gateway ? ` via ${s.gateway}` : ""}` : "DHCP",
+              ],
             ] as [string, string][],
           },
         ]

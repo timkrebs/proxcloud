@@ -117,10 +117,9 @@ export function useRevokeInvitation() {
   const tenantId = useActiveTenantId();
   return useMutation({
     mutationFn: (invitationId: string) =>
-      apiFetch<void>(
-        `/api/tenants/${tenantId}/invitations/${encodeURIComponent(invitationId)}`,
-        { method: "DELETE" },
-      ),
+      apiFetch<void>(`/api/tenants/${tenantId}/invitations/${encodeURIComponent(invitationId)}`, {
+        method: "DELETE",
+      }),
     onSuccess: () => invalidateInvites(qc, tenantId),
   });
 }

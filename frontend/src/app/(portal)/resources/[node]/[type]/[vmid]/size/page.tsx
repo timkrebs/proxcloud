@@ -45,7 +45,9 @@ export default function GuestSizePage() {
   if (guest.isError) return <CardError err={guest.error} />;
   const d = guest.data;
 
-  const activePreset = PRESETS.find((p) => String(p.cores) === cores && String(p.ramGiB * 1024) === ramMiB);
+  const activePreset = PRESETS.find(
+    (p) => String(p.cores) === cores && String(p.ramGiB * 1024) === ramMiB,
+  );
   const dirty =
     cores !== String(d.cores) ||
     ramMiB !== String(Math.round(d.memMax / 2 ** 20)) ||
@@ -113,15 +115,31 @@ export default function GuestSizePage() {
 
       <div className="mb-[14px] flex items-center">
         <label className="w-[220px] flex-none text-[14px]">Cores</label>
-        <Input value={cores} onChange={(e) => setCores(e.target.value)} className="w-[120px]" aria-label="Cores" />
+        <Input
+          value={cores}
+          onChange={(e) => setCores(e.target.value)}
+          className="w-[120px]"
+          aria-label="Cores"
+        />
       </div>
       <div className="mb-[14px] flex items-center">
         <label className="w-[220px] flex-none text-[14px]">Memory (MiB)</label>
-        <Input value={ramMiB} onChange={(e) => setRamMiB(e.target.value)} className="w-[120px]" aria-label="Memory MiB" />
+        <Input
+          value={ramMiB}
+          onChange={(e) => setRamMiB(e.target.value)}
+          className="w-[120px]"
+          aria-label="Memory MiB"
+        />
       </div>
       <div className="mb-[14px] flex items-start">
         <label className="w-[220px] flex-none pt-1 text-[14px]">Description</label>
-        <Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={4} className="w-[300px]" aria-label="Description" />
+        <Textarea
+          value={desc}
+          onChange={(e) => setDesc(e.target.value)}
+          rows={4}
+          className="w-[300px]"
+          aria-label="Description"
+        />
       </div>
       <div className="mb-[18px] flex items-center">
         <label className="w-[220px] flex-none text-[14px]">Start on boot</label>

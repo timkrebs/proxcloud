@@ -69,7 +69,10 @@ export function MarketingHeader() {
           </Link>
 
           {/* Desktop nav (hidden below 900px) */}
-          <nav className="ml-[6px] hidden items-center gap-[2px] min-[900px]:flex" aria-label="Primary">
+          <nav
+            className="ml-[6px] hidden items-center gap-[2px] min-[900px]:flex"
+            aria-label="Primary"
+          >
             <button
               ref={megaBtnRef}
               type="button"
@@ -188,7 +191,9 @@ export function MarketingHeader() {
                 {s.icon}
                 <span className="min-w-0">
                   <span className="block text-[15px] font-semibold">{s.name}</span>
-                  <span className="mt-[3px] block text-[13px] leading-[1.45] text-ink-2">{s.short}</span>
+                  <span className="mt-[3px] block text-[13px] leading-[1.45] text-ink-2">
+                    {s.short}
+                  </span>
                 </span>
               </Link>
             ))}

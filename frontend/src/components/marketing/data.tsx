@@ -48,12 +48,36 @@ export interface MegaService {
 
 /** Products mega-menu — items scroll to the landing #services section. */
 export const megaServices: MegaService[] = [
-  { name: "Virtual Machines", short: "Linux and Windows VMs from templates.", icon: <MarketingSvc name="vm" size={26} /> },
-  { name: "Kubernetes", short: "Managed K3s with node pools and upgrades.", icon: <MarketingSvc name="k8s" size={26} /> },
-  { name: "Databases", short: "PostgreSQL, MongoDB, and Redis.", icon: <MarketingSvc name="db" size={26} /> },
-  { name: "Networking", short: "Isolated networks, firewalls, load balancers.", icon: <MarketingSvc name="net" size={26} /> },
-  { name: "Storage", short: "Block volumes and S3-compatible buckets.", icon: <MarketingSvc name="store" size={26} /> },
-  { name: "Service Catalog", short: "One place to create anything you offer.", icon: <MarketingSvc name="catalog" size={26} /> },
+  {
+    name: "Virtual Machines",
+    short: "Linux and Windows VMs from templates.",
+    icon: <MarketingSvc name="vm" size={26} />,
+  },
+  {
+    name: "Kubernetes",
+    short: "Managed K3s with node pools and upgrades.",
+    icon: <MarketingSvc name="k8s" size={26} />,
+  },
+  {
+    name: "Databases",
+    short: "PostgreSQL, MongoDB, and Redis.",
+    icon: <MarketingSvc name="db" size={26} />,
+  },
+  {
+    name: "Networking",
+    short: "Isolated networks, firewalls, load balancers.",
+    icon: <MarketingSvc name="net" size={26} />,
+  },
+  {
+    name: "Storage",
+    short: "Block volumes and S3-compatible buckets.",
+    icon: <MarketingSvc name="store" size={26} />,
+  },
+  {
+    name: "Service Catalog",
+    short: "One place to create anything you offer.",
+    icon: <MarketingSvc name="catalog" size={26} />,
+  },
 ];
 
 export interface Proof {
@@ -63,10 +87,26 @@ export interface Proof {
 }
 
 export const proofs: Proof[] = [
-  { title: "Multi-tenant by design", desc: "Tenants are a hard isolation boundary, not a naming convention.", icon: <LineIcon d={PERSON} size={22} /> },
-  { title: "Runs on your Proxmox", desc: "No new hypervisor to learn. Point it at the cluster you already operate.", icon: <LineIcon d={SERVER} size={22} /> },
-  { title: "No per-core licensing", desc: "Self-hosted software. Capacity is limited by your hardware, not a contract.", icon: <LineIcon d={RING} size={22} /> },
-  { title: "API-first and Terraform-ready", desc: "The portal is one client of a public API. Your pipelines are another.", icon: <LineIcon d={BOLT} size={22} /> },
+  {
+    title: "Multi-tenant by design",
+    desc: "Tenants are a hard isolation boundary, not a naming convention.",
+    icon: <LineIcon d={PERSON} size={22} />,
+  },
+  {
+    title: "Runs on your Proxmox",
+    desc: "No new hypervisor to learn. Point it at the cluster you already operate.",
+    icon: <LineIcon d={SERVER} size={22} />,
+  },
+  {
+    title: "No per-core licensing",
+    desc: "Self-hosted software. Capacity is limited by your hardware, not a contract.",
+    icon: <LineIcon d={RING} size={22} />,
+  },
+  {
+    title: "API-first and Terraform-ready",
+    desc: "The portal is one client of a public API. Your pipelines are another.",
+    icon: <LineIcon d={BOLT} size={22} />,
+  },
 ];
 
 export interface ServiceCard {
@@ -79,14 +119,64 @@ export interface ServiceCard {
 }
 
 export const serviceCards: ServiceCard[] = [
-  { name: "Virtual Machines", desc: "Ubuntu, Debian, and Windows templates with T-shirt sizes, extra disks, cloud-init, snapshots, and a browser console.", cta: "Learn more", href: "/products", icon: <MarketingSvc name="vm" size={32} /> },
-  { name: "Kubernetes", desc: "Managed K3s clusters with node pools you scale in place, in-place version upgrades, and one-click kubeconfig.", cta: "Learn more", href: "/products", icon: <MarketingSvc name="k8s" size={32} /> },
-  { name: "Databases", desc: "PostgreSQL, MongoDB, and Redis with automated backups, retention policies, and connection strings on day one.", cta: "Learn more", href: "/products", icon: <MarketingSvc name="db" size={32} /> },
-  { name: "Networking", desc: "Per-tenant virtual networks over Proxmox SDN, with subnets, firewall rules, NAT, public IPs, and simple load balancers.", cta: "Learn more", href: "/products", icon: <MarketingSvc name="net" size={32} /> },
-  { name: "Storage", desc: "Block volumes that attach and detach from VMs, plus S3-compatible buckets with their own access keys and quotas.", cta: "Learn more", href: "/products", icon: <MarketingSvc name="store" size={32} /> },
-  { name: "Service Catalog", desc: "Everything a tenant can create in one browsable grid — including the internal services your platform team publishes.", cta: "Learn more", href: "/products", icon: <MarketingSvc name="catalog" size={32} /> },
-  { name: "Secrets", desc: "Vault-backed secrets, scoped per project and injectable into VMs and clusters at provisioning time.", cta: "On the roadmap", href: "/products", icon: <MarketingSvc name="secrets" size={32} />, soon: true },
-  { name: "DNS", desc: "Tenant-scoped DNS zones with records managed alongside the resources they point at.", cta: "On the roadmap", href: "/products", icon: <MarketingSvc name="dns" size={32} />, soon: true },
+  {
+    name: "Virtual Machines",
+    desc: "Ubuntu, Debian, and Windows templates with T-shirt sizes, extra disks, cloud-init, snapshots, and a browser console.",
+    cta: "Learn more",
+    href: "/products",
+    icon: <MarketingSvc name="vm" size={32} />,
+  },
+  {
+    name: "Kubernetes",
+    desc: "Managed K3s clusters with node pools you scale in place, in-place version upgrades, and one-click kubeconfig.",
+    cta: "Learn more",
+    href: "/products",
+    icon: <MarketingSvc name="k8s" size={32} />,
+  },
+  {
+    name: "Databases",
+    desc: "PostgreSQL, MongoDB, and Redis with automated backups, retention policies, and connection strings on day one.",
+    cta: "Learn more",
+    href: "/products",
+    icon: <MarketingSvc name="db" size={32} />,
+  },
+  {
+    name: "Networking",
+    desc: "Per-tenant virtual networks over Proxmox SDN, with subnets, firewall rules, NAT, public IPs, and simple load balancers.",
+    cta: "Learn more",
+    href: "/products",
+    icon: <MarketingSvc name="net" size={32} />,
+  },
+  {
+    name: "Storage",
+    desc: "Block volumes that attach and detach from VMs, plus S3-compatible buckets with their own access keys and quotas.",
+    cta: "Learn more",
+    href: "/products",
+    icon: <MarketingSvc name="store" size={32} />,
+  },
+  {
+    name: "Service Catalog",
+    desc: "Everything a tenant can create in one browsable grid — including the internal services your platform team publishes.",
+    cta: "Learn more",
+    href: "/products",
+    icon: <MarketingSvc name="catalog" size={32} />,
+  },
+  {
+    name: "Secrets",
+    desc: "Vault-backed secrets, scoped per project and injectable into VMs and clusters at provisioning time.",
+    cta: "On the roadmap",
+    href: "/products",
+    icon: <MarketingSvc name="secrets" size={32} />,
+    soon: true,
+  },
+  {
+    name: "DNS",
+    desc: "Tenant-scoped DNS zones with records managed alongside the resources they point at.",
+    cta: "On the roadmap",
+    href: "/products",
+    icon: <MarketingSvc name="dns" size={32} />,
+    soon: true,
+  },
 ];
 
 export interface FeatureRow {
@@ -154,9 +244,24 @@ export interface Step {
 }
 
 export const steps: Step[] = [
-  { n: "1", title: "Connect your Proxmox", desc: "Add your cluster nodes and storage, import templates, and set the node capacity Proxcloud is allowed to use.", icon: <LineIcon d={SERVER} size={20} /> },
-  { n: "2", title: "Invite your tenants", desc: "Create a tenant per team or customer, set its quotas, and assign Owner, Contributor, or Reader roles.", icon: <LineIcon d={PERSON} size={20} /> },
-  { n: "3", title: "Users self-serve resources", desc: "They open the portal, pick a service, and provision inside their own project. You watch capacity, not tickets.", icon: <LineIcon d={BOLT} size={20} /> },
+  {
+    n: "1",
+    title: "Connect your Proxmox",
+    desc: "Add your cluster nodes and storage, import templates, and set the node capacity Proxcloud is allowed to use.",
+    icon: <LineIcon d={SERVER} size={20} />,
+  },
+  {
+    n: "2",
+    title: "Invite your tenants",
+    desc: "Create a tenant per team or customer, set its quotas, and assign Owner, Contributor, or Reader roles.",
+    icon: <LineIcon d={PERSON} size={20} />,
+  },
+  {
+    n: "3",
+    title: "Users self-serve resources",
+    desc: "They open the portal, pick a service, and provision inside their own project. You watch capacity, not tickets.",
+    icon: <LineIcon d={BOLT} size={20} />,
+  },
 ];
 
 export const apiPoints: string[] = [

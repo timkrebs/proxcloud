@@ -31,7 +31,12 @@ export function DeleteFlyout({
   return (
     <Flyout title={`Delete ${kind}`} onClose={onClose}>
       <div className="mb-4 flex gap-[10px] rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5]">
-        <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 2 }} />
+        <Mi
+          name="warn"
+          size={16}
+          color="var(--color-err)"
+          style={{ flexShrink: 0, marginTop: 2 }}
+        />
         <span>
           Deleting <strong>{name}</strong> is permanent and cannot be undone.
         </span>
@@ -53,7 +58,13 @@ export function DeleteFlyout({
       <div className="mb-[6px] text-[13px]">
         Type <strong>{name}</strong> to confirm
       </div>
-      <Input value={text} onChange={(e) => setText(e.target.value)} placeholder={name} aria-label="Confirm name" className="w-full" />
+      <Input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={name}
+        aria-label="Confirm name"
+        className="w-full"
+      />
 
       <div className="mt-4 flex gap-2">
         <Button

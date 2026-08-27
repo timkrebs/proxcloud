@@ -6,8 +6,7 @@ import type { CSSProperties } from "react";
 
 const MI_PATHS = {
   home: "M2.5 7.5 8 2.5l5.5 5M4 7v6.5h8V7",
-  person:
-    "M8 7.5a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6zM2.5 14c.8-2.6 2.9-4 5.5-4s4.7 1.4 5.5 4",
+  person: "M8 7.5a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6zM2.5 14c.8-2.6 2.9-4 5.5-4s4.7 1.4 5.5 4",
   clock: "M8 4.5V8l2.5 1.5M14.5 8a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0",
   gear: "M8 10.5A2.5 2.5 0 1 0 8 5.5a2.5 2.5 0 0 0 0 5zM8 1.2v2M8 12.8v2M1.2 8h2M12.8 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4",
   grid: "M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z",
@@ -117,7 +116,10 @@ const SVC_SHAPES: Record<string, Shape[]> = {
     ["circle", { cx: 10, cy: 4.8, r: 1.4, fill: "#50E6FF" }],
     ["circle", { cx: 5.2, cy: 12.8, r: 1.4, fill: "#50E6FF" }],
     ["circle", { cx: 14.8, cy: 12.8, r: 1.4, fill: "#50E6FF" }],
-    ["path", { d: "M10 6.2v1.8M6.4 12.1l1.8-1M13.6 12.1l-1.8-1", stroke: "#C3F1FF", strokeWidth: 1.1 }],
+    [
+      "path",
+      { d: "M10 6.2v1.8M6.4 12.1l1.8-1M13.6 12.1l-1.8-1", stroke: "#C3F1FF", strokeWidth: 1.1 },
+    ],
   ],
   node: [
     ["rect", { x: 2, y: 2.5, width: 16, height: 6.4, rx: 0.8, fill: "#005BA1" }],
@@ -182,7 +184,13 @@ export function Spinner({ size = 16, color = "#0078D4" }: { size?: number; color
       aria-hidden
     >
       <circle cx={8} cy={8} r={6} fill="none" stroke="#DEECF9" strokeWidth={2} />
-      <path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" />
+      <path
+        d="M8 2a6 6 0 0 1 6 6"
+        fill="none"
+        stroke={color}
+        strokeWidth={2}
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

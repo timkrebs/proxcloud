@@ -25,22 +25,34 @@ export default function GuestMetricsPage() {
     (s[a] ?? []).map((p, i) => ({ t: p.t, v: p.v + (s[b]?.[i]?.v ?? 0) }));
 
   const charts = [
-    { label: "CPU (average)", value: last("cpu") !== undefined ? formatPct(last("cpu")!, 0) : "—", points: s.cpu ?? [], max: 100 },
+    {
+      label: "CPU (average)",
+      value: last("cpu") !== undefined ? formatPct(last("cpu")!, 0) : "—",
+      points: s.cpu ?? [],
+      max: 100,
+    },
     {
       label: "Memory used",
-      value: last("mem") !== undefined && memMax > 0 ? formatPct((last("mem")! / memMax) * 100, 0) : "—",
+      value:
+        last("mem") !== undefined && memMax > 0 ? formatPct((last("mem")! / memMax) * 100, 0) : "—",
       points: s.mem ?? [],
       max: memMax || undefined,
     },
     {
       label: "Disk I/O (read/write)",
-      value: last("diskread") !== undefined ? `${formatRate(last("diskread")!)} / ${formatRate(last("diskwrite") ?? 0)}` : "—",
+      value:
+        last("diskread") !== undefined
+          ? `${formatRate(last("diskread")!)} / ${formatRate(last("diskwrite") ?? 0)}`
+          : "—",
       points: combined("diskread", "diskwrite"),
       max: undefined,
     },
     {
       label: "Network (in/out)",
-      value: last("netin") !== undefined ? `${formatRate(last("netin")!)} / ${formatRate(last("netout") ?? 0)}` : "—",
+      value:
+        last("netin") !== undefined
+          ? `${formatRate(last("netin")!)} / ${formatRate(last("netout") ?? 0)}`
+          : "—",
       points: combined("netin", "netout"),
       max: undefined,
     },

@@ -52,7 +52,8 @@ export function useGuestMetrics(g: GuestParams, timeframe = "hour") {
   const tenantId = useActiveTenantId();
   return useQuery({
     queryKey: [...guestKey(g), "metrics", timeframe],
-    queryFn: () => apiFetch<MetricsResponse>(`${guestBase(tenantId, g)}/metrics?timeframe=${timeframe}`),
+    queryFn: () =>
+      apiFetch<MetricsResponse>(`${guestBase(tenantId, g)}/metrics?timeframe=${timeframe}`),
     refetchInterval: 60_000,
     enabled: tenantId !== null,
   });
@@ -132,7 +133,10 @@ export function useResizeDisk(g: GuestParams) {
   return useGuestMutation(
     g,
     (req: { disk: string; sizeGib: number }) =>
-      apiFetch<TaskRef>(`${guestBase(tenantId, g)}/resize`, { method: "POST", body: JSON.stringify(req) }),
+      apiFetch<TaskRef>(`${guestBase(tenantId, g)}/resize`, {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
     (req) => ({ title: "Resize submitted", desc: `${req.disk} → ${req.sizeGib} GiB` }),
   );
 }
@@ -144,7 +148,11 @@ export function useCreateSnapshot(g: GuestParams) {
     (req: { name: string; description?: string; vmState?: boolean }) =>
       apiFetch<TaskRef>(`${guestBase(tenantId, g)}/snapshots`, {
         method: "POST",
-        body: JSON.stringify({ name: req.name, description: req.description ?? "", vmState: req.vmState ?? false }),
+        body: JSON.stringify({
+          name: req.name,
+          description: req.description ?? "",
+          vmState: req.vmState ?? false,
+        }),
       }),
     (req) => ({ title: "Snapshot started", desc: req.name }),
   );
@@ -155,10 +163,13 @@ export function useRollbackSnapshot(g: GuestParams) {
   return useGuestMutation(
     g,
     (name: string) =>
-      apiFetch<TaskRef>(`${guestBase(tenantId, g)}/snapshots/${encodeURIComponent(name)}/rollback`, {
-        method: "POST",
-        body: "{}",
-      }),
+      apiFetch<TaskRef>(
+        `${guestBase(tenantId, g)}/snapshots/${encodeURIComponent(name)}/rollback`,
+        {
+          method: "POST",
+          body: "{}",
+        },
+      ),
     (name) => ({ title: "Rollback started", desc: name }),
   );
 }
@@ -168,7 +179,9 @@ export function useDeleteSnapshot(g: GuestParams) {
   return useGuestMutation(
     g,
     (name: string) =>
-      apiFetch<TaskRef>(`${guestBase(tenantId, g)}/snapshots/${encodeURIComponent(name)}`, { method: "DELETE" }),
+      apiFetch<TaskRef>(`${guestBase(tenantId, g)}/snapshots/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
     (name) => ({ title: "Snapshot deletion started", desc: name }),
   );
 }

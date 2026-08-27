@@ -32,10 +32,7 @@ export function isMarketingPath(pathname: string): boolean {
  * Pure decision function (unit-tested): an authenticated visitor on a marketing
  * path is redirected to the portal; everyone else passes through.
  */
-export function shouldRedirectToDashboard(
-  pathname: string,
-  hasSession: boolean,
-): boolean {
+export function shouldRedirectToDashboard(pathname: string, hasSession: boolean): boolean {
   return hasSession && isMarketingPath(pathname);
 }
 

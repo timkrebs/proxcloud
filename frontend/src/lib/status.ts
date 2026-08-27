@@ -6,7 +6,17 @@ export const STATUS_GRAY = "#605E5C";
 export const STATUS_RED = "#D13438";
 export const STATUS_BLUE = "#0078D4";
 
-const GREEN = new Set(["running", "healthy", "available", "active", "succeeded", "created", "attached", "online", "ok"]);
+const GREEN = new Set([
+  "running",
+  "healthy",
+  "available",
+  "active",
+  "succeeded",
+  "created",
+  "attached",
+  "online",
+  "ok",
+]);
 const GRAY = new Set(["stopped", "pending", "offline"]);
 const RED = new Set(["failed", "deny", "error"]);
 

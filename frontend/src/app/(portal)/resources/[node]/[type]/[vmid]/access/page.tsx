@@ -2,7 +2,13 @@
 // Access control blade — design §3.5.3: real Proxmox ACL entries whose
 // path covers this guest (read-only in v1).
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
-import { BladeHeading, BladeTable, bladeCell, bladeCellMuted, useGuestParams } from "@/components/guest/common";
+import {
+  BladeHeading,
+  BladeTable,
+  bladeCell,
+  bladeCellMuted,
+  useGuestParams,
+} from "@/components/guest/common";
 import { useGuestACL } from "@/lib/api/guestQueries";
 
 export default function GuestAccessPage() {

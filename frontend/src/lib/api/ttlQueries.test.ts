@@ -45,7 +45,9 @@ afterEach(() => vi.clearAllMocks());
 describe("getTtlOrNull", () => {
   it("returns the TTL when the GET succeeds", async () => {
     mockApiFetch.mockResolvedValueOnce(sampleTtl);
-    await expect(getTtlOrNull("/api/tenants/t1/guests/pve/qemu/101/ttl")).resolves.toEqual(sampleTtl);
+    await expect(getTtlOrNull("/api/tenants/t1/guests/pve/qemu/101/ttl")).resolves.toEqual(
+      sampleTtl,
+    );
   });
 
   it("maps a 404 to null (no TTL — a real empty state)", async () => {
@@ -55,11 +57,15 @@ describe("getTtlOrNull", () => {
 
   it("propagates a non-404 API error", async () => {
     mockApiFetch.mockRejectedValueOnce(new ApiError(500, { code: "internal", message: "boom" }));
-    await expect(getTtlOrNull("/api/tenants/t1/guests/pve/qemu/101/ttl")).rejects.toBeInstanceOf(ApiError);
+    await expect(getTtlOrNull("/api/tenants/t1/guests/pve/qemu/101/ttl")).rejects.toBeInstanceOf(
+      ApiError,
+    );
   });
 
   it("propagates a non-API error (e.g. network)", async () => {
     mockApiFetch.mockRejectedValueOnce(new Error("network down"));
-    await expect(getTtlOrNull("/api/tenants/t1/guests/pve/qemu/101/ttl")).rejects.toThrow("network down");
+    await expect(getTtlOrNull("/api/tenants/t1/guests/pve/qemu/101/ttl")).rejects.toThrow(
+      "network down",
+    );
   });
 });

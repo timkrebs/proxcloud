@@ -28,7 +28,15 @@ import { relativeTime } from "@/lib/format";
 import { pushToast } from "@/lib/stores/toastStore";
 
 // §1.6 section heading (16px/600) + 1px rule.
-function Section({ title, caption, children }: { title: string; caption?: string; children: ReactNode }) {
+function Section({
+  title,
+  caption,
+  children,
+}: {
+  title: string;
+  caption?: string;
+  children: ReactNode;
+}) {
   return (
     <section className="mt-8 first:mt-0">
       <h2 className="text-[16px] font-semibold text-ink">{title}</h2>
@@ -40,7 +48,15 @@ function Section({ title, caption, children }: { title: string; caption?: string
 }
 
 // §1.6 form row: label flex 0 0 220px, control width 300px.
-function FieldRow({ label, htmlFor, children }: { label: string; htmlFor?: string; children: ReactNode }) {
+function FieldRow({
+  label,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  htmlFor?: string;
+  children: ReactNode;
+}) {
   return (
     <div className="mb-[14px] flex items-center">
       <label htmlFor={htmlFor} className="flex-none basis-[220px] text-[14px] text-ink">
@@ -88,10 +104,14 @@ function AccountSection() {
   return (
     <Section title="Account" caption="Your sign-in identity for this portal.">
       <FieldRow label="Display name">
-        <div className="flex h-8 items-center text-[14px] text-ink">{me.data.displayName || "—"}</div>
+        <div className="flex h-8 items-center text-[14px] text-ink">
+          {me.data.displayName || "—"}
+        </div>
       </FieldRow>
       <FieldRow label="Email">
-        <div className="flex h-8 items-center text-[14px] text-ink tabular-nums">{me.data.email}</div>
+        <div className="flex h-8 items-center text-[14px] text-ink tabular-nums">
+          {me.data.email}
+        </div>
       </FieldRow>
       {me.data.isPlatformAdmin ? (
         <FieldRow label="Role">
@@ -225,7 +245,8 @@ function ChangePasswordSection() {
 
 function securityError(err: unknown, wrongPasswordHint = false): string {
   if (err instanceof ApiError) {
-    if (err.status === 401) return wrongPasswordHint ? "That password is incorrect." : "That code is not valid.";
+    if (err.status === 401)
+      return wrongPasswordHint ? "That password is incorrect." : "That code is not valid.";
     if (err.status === 409) return "This action is no longer available — refresh and try again.";
     if (err.status === 429) return "Too many attempts — wait a minute and try again.";
     return err.detail;
@@ -309,7 +330,9 @@ function TotpEnrollFlyout({ onClose }: { onClose: () => void }) {
       ) : enroll.data ? (
         <div>
           <ol className="mb-4 list-decimal space-y-1 pl-5 text-[13px] leading-[1.5] text-ink-2">
-            <li>Scan the QR code with an authenticator app (Google Authenticator, 1Password, …).</li>
+            <li>
+              Scan the QR code with an authenticator app (Google Authenticator, 1Password, …).
+            </li>
             <li>Enter the 6-digit code it shows to confirm.</li>
           </ol>
 
@@ -366,7 +389,11 @@ function TotpEnrollFlyout({ onClose }: { onClose: () => void }) {
           {error ? <p className="mt-2 text-[12px] text-err-text">{error}</p> : null}
 
           <div className="mt-5 flex gap-2">
-            <Button variant="primary" disabled={code.length !== 6 || verify.isPending} onClick={submitCode}>
+            <Button
+              variant="primary"
+              disabled={code.length !== 6 || verify.isPending}
+              onClick={submitCode}
+            >
               {verify.isPending ? "Verifying…" : "Confirm"}
             </Button>
             <Button variant="secondary" onClick={onClose}>
@@ -411,8 +438,15 @@ function DisableTotpFlyout({ onClose }: { onClose: () => void }) {
   return (
     <Flyout title="Turn off two-step verification" onClose={onClose}>
       <div className="mb-4 flex gap-[10px] rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5]">
-        <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>Turning this off deletes your recovery codes and lets anyone with your password sign in.</span>
+        <Mi
+          name="warn"
+          size={16}
+          color="var(--color-err)"
+          style={{ flexShrink: 0, marginTop: 2 }}
+        />
+        <span>
+          Turning this off deletes your recovery codes and lets anyone with your password sign in.
+        </span>
       </div>
       <form onSubmit={submit}>
         <label htmlFor="disable-totp-password" className="mb-[6px] block text-[13px] text-ink">
@@ -457,7 +491,11 @@ function RegenerateCodesFlyout({ onClose }: { onClose: () => void }) {
           codes={regen.data.recoveryCodes}
           doneLabel="Done"
           onDone={() => {
-            pushToast({ kind: "ok", title: "Recovery codes regenerated", desc: "Older codes no longer work." });
+            pushToast({
+              kind: "ok",
+              title: "Recovery codes regenerated",
+              desc: "Older codes no longer work.",
+            });
             onClose();
           }}
         />
@@ -478,8 +516,8 @@ function RegenerateCodesFlyout({ onClose }: { onClose: () => void }) {
   return (
     <Flyout title="Regenerate recovery codes" onClose={onClose}>
       <p className="mb-4 text-[13px] leading-[1.5] text-ink-2">
-        This replaces your existing recovery codes with ten new ones. Any codes you saved before will
-        stop working.
+        This replaces your existing recovery codes with ten new ones. Any codes you saved before
+        will stop working.
       </p>
       <form onSubmit={submit}>
         <label htmlFor="regen-password" className="mb-[6px] block text-[13px] text-ink">
@@ -614,7 +652,11 @@ function SessionRow({ session }: { session: SessionInfo }) {
             onClick={() =>
               revoke.mutate(session.id, {
                 onSuccess: () =>
-                  pushToast({ kind: "ok", title: "Session revoked", desc: "The session was signed out." }),
+                  pushToast({
+                    kind: "ok",
+                    title: "Session revoked",
+                    desc: "The session was signed out.",
+                  }),
                 onError: (err) =>
                   pushToast({
                     kind: "err",

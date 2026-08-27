@@ -1,0 +1,13 @@
+# tygo-generated types from backend/api/types — never hand-edited.
+src/lib/api/generated/**
+
+# build + tooling output
+.next/
+coverage/
+node_modules/
+
+# docs stay as-authored; no Prettier reflow of Markdown
+*.md
+
+# lockfile is machine-managed
+package-lock.json

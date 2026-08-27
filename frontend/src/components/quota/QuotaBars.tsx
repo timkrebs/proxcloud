@@ -67,7 +67,12 @@ export function QuotaBars({ quota }: { quota: QuotaWithUsage }) {
       <QuotaBar label="vCPU" used={usage.vcpu} limit={limits.maxVcpu ?? null} format={fmtCount} />
       <QuotaBar label="Memory" used={usage.ramMb} limit={limits.maxRamMb ?? null} format={fmtMib} />
       <QuotaBar label="Disk" used={usage.diskGb} limit={limits.maxDiskGb ?? null} format={fmtGib} />
-      <QuotaBar label="Guests" used={usage.count} limit={limits.maxCount ?? null} format={fmtCount} />
+      <QuotaBar
+        label="Guests"
+        used={usage.count}
+        limit={limits.maxCount ?? null}
+        format={fmtCount}
+      />
     </div>
   );
 }

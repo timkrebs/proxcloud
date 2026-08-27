@@ -34,13 +34,22 @@ describe("validateScheduleForm", () => {
   });
 
   it("includes an enabled auto-start time and drops it when disabled", () => {
-    const on = validateScheduleForm({ ...base(), autoStartEnabled: true, autoStartTime: "07:30" }, "resource");
+    const on = validateScheduleForm(
+      { ...base(), autoStartEnabled: true, autoStartTime: "07:30" },
+      "resource",
+    );
     expect(on.body?.autoStartTime).toBe("07:30");
-    const off = validateScheduleForm({ ...base(), autoStartEnabled: false, autoStartTime: "07:30" }, "resource");
+    const off = validateScheduleForm(
+      { ...base(), autoStartEnabled: false, autoStartTime: "07:30" },
+      "resource",
+    );
     expect(off.body?.autoStartTime).toBeUndefined();
   });
 
-  const badTimes: [Partial<ScheduleFormValues>, keyof ReturnType<typeof validateScheduleForm>["errors"]][] = [
+  const badTimes: [
+    Partial<ScheduleFormValues>,
+    keyof ReturnType<typeof validateScheduleForm>["errors"],
+  ][] = [
     [{ shutdownTime: "25:00" }, "shutdownTime"],
     [{ shutdownTime: "" }, "shutdownTime"],
     [{ autoStartEnabled: true, autoStartTime: "9:9" }, "autoStartTime"],
@@ -58,8 +67,12 @@ describe("validateScheduleForm", () => {
   });
 
   it("allows grace at the 1 and 300 bounds", () => {
-    expect(validateScheduleForm({ ...base(), graceSeconds: "1" }, "resource").body?.graceSeconds).toBe(1);
-    expect(validateScheduleForm({ ...base(), graceSeconds: "300" }, "resource").body?.graceSeconds).toBe(300);
+    expect(
+      validateScheduleForm({ ...base(), graceSeconds: "1" }, "resource").body?.graceSeconds,
+    ).toBe(1);
+    expect(
+      validateScheduleForm({ ...base(), graceSeconds: "300" }, "resource").body?.graceSeconds,
+    ).toBe(300);
   });
 
   it("dedupes and sorts days in the body", () => {

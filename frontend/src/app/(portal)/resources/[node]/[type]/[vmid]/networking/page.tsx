@@ -2,11 +2,22 @@
 // Networking blade — design §3.5.5: NIC config card, live interfaces, and
 // the real guest firewall (rules table + enable toggle).
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
-import { BladeHeading, BladeTable, bladeCell, bladeCellMuted, useGuestParams } from "@/components/guest/common";
+import {
+  BladeHeading,
+  BladeTable,
+  bladeCell,
+  bladeCellMuted,
+  useGuestParams,
+} from "@/components/guest/common";
 import { Card } from "@/components/ui/Card";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Toggle } from "@/components/ui/Toggle";
-import { useGuest, useGuestFirewall, useGuestInterfaces, useSetFirewall } from "@/lib/api/guestQueries";
+import {
+  useGuest,
+  useGuestFirewall,
+  useGuestInterfaces,
+  useSetFirewall,
+} from "@/lib/api/guestQueries";
 
 function KV({ k, v }: { k: string; v: React.ReactNode }) {
   return (
@@ -36,7 +47,10 @@ export default function GuestNetworkingPage() {
           <p className="text-[13px] text-ink-2">No network interfaces configured.</p>
         ) : (
           d.nics.map((nic) => (
-            <div key={nic.key} className="border-b border-line-row py-2 first:pt-0 last:border-b-0 last:pb-0">
+            <div
+              key={nic.key}
+              className="border-b border-line-row py-2 first:pt-0 last:border-b-0 last:pb-0"
+            >
               <KV k="Interface" v={`${nic.key} (${nic.model || "—"})`} />
               <KV k="Bridge" v={nic.bridge || "—"} />
               <KV k="MAC address" v={nic.mac || "—"} />
@@ -58,8 +72,8 @@ export default function GuestNetworkingPage() {
           <CardError err={interfaces.error} />
         ) : interfaces.data.agentUnavailable ? (
           <p className="text-[13px] text-ink-2">
-            The QEMU guest agent is not running — install <code>qemu-guest-agent</code> inside the VM to
-            see its IP addresses here.
+            The QEMU guest agent is not running — install <code>qemu-guest-agent</code> inside the
+            VM to see its IP addresses here.
           </p>
         ) : (
           interfaces.data.nics
@@ -92,17 +106,38 @@ export default function GuestNetworkingPage() {
         <CardError err={firewall.error} />
       ) : (firewall.data.rules ?? []).length === 0 ? (
         <p className="text-[13px] text-ink-2">
-          No guest firewall rules defined. Rules can be managed in the Proxmox UI; Proxcloud shows and
-          toggles them.
+          No guest firewall rules defined. Rules can be managed in the Proxmox UI; Proxcloud shows
+          and toggles them.
         </p>
       ) : (
-        <BladeTable headers={["Pos", "Type", "Action", "Source", "Dest", "Proto", "Port", "Enabled", "Comment"]}>
+        <BladeTable
+          headers={[
+            "Pos",
+            "Type",
+            "Action",
+            "Source",
+            "Dest",
+            "Proto",
+            "Port",
+            "Enabled",
+            "Comment",
+          ]}
+        >
           {firewall.data.rules.map((r) => (
             <tr key={r.pos} className="border-b border-line-row last:border-b-0">
               <td className={`${bladeCellMuted} tabular-nums`}>{r.pos}</td>
               <td className={bladeCellMuted}>{r.type}</td>
               <td className={bladeCell}>
-                <span style={{ color: r.action === "ACCEPT" ? "var(--color-ok)" : r.action === "DROP" || r.action === "REJECT" ? "var(--color-err)" : undefined }}>
+                <span
+                  style={{
+                    color:
+                      r.action === "ACCEPT"
+                        ? "var(--color-ok)"
+                        : r.action === "DROP" || r.action === "REJECT"
+                          ? "var(--color-err)"
+                          : undefined,
+                  }}
+                >
                   {r.action}
                 </span>
               </td>
@@ -111,7 +146,10 @@ export default function GuestNetworkingPage() {
               <td className={bladeCellMuted}>{r.proto || "any"}</td>
               <td className={`${bladeCellMuted} tabular-nums`}>{r.dport || "any"}</td>
               <td className={bladeCell}>
-                <StatusDot status={r.enable ? "active" : "stopped"} label={r.enable ? "on" : "off"} />
+                <StatusDot
+                  status={r.enable ? "active" : "stopped"}
+                  label={r.enable ? "on" : "off"}
+                />
               </td>
               <td className={bladeCellMuted}>{r.comment}</td>
             </tr>

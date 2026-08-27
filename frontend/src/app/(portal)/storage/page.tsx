@@ -49,7 +49,10 @@ export default function StoragePage() {
             <thead>
               <tr>
                 {["Name", "Node", "Type", "Content", "Status", "Usage"].map((h) => (
-                  <th key={h} className="border-b border-line bg-hover px-4 py-2 text-left font-semibold">
+                  <th
+                    key={h}
+                    className="border-b border-line bg-hover px-4 py-2 text-left font-semibold"
+                  >
                     {h}
                   </th>
                 ))}
@@ -57,21 +60,34 @@ export default function StoragePage() {
             </thead>
             <tbody>
               {(storage.data ?? []).map((s) => (
-                <tr key={`${s.node}/${s.storage}`} className="border-b border-line-row last:border-b-0">
+                <tr
+                  key={`${s.node}/${s.storage}`}
+                  className="border-b border-line-row last:border-b-0"
+                >
                   <td className="h-10 px-4 font-semibold">
                     {s.storage}
-                    {s.shared ? <span className="ml-2 text-[11px] font-normal text-ink-3">shared</span> : null}
+                    {s.shared ? (
+                      <span className="ml-2 text-[11px] font-normal text-ink-3">shared</span>
+                    ) : null}
                   </td>
                   <td className="px-4 text-ink-2">{s.node}</td>
                   <td className="px-4 text-ink-2">{s.type}</td>
                   <td className="px-4 text-ink-2">{s.content.join(", ")}</td>
                   <td className="px-4">
-                    <StatusDot status={s.active ? "active" : "offline"} label={s.active ? "Active" : "Inactive"} />
+                    <StatusDot
+                      status={s.active ? "active" : "offline"}
+                      label={s.active ? "Active" : "Inactive"}
+                    />
                   </td>
                   <td className="w-[280px] px-4">
                     <div className="flex items-center gap-2">
-                      <ProgressBar pct={s.total > 0 ? (s.used / s.total) * 100 : 0} className="flex-1" />
-                      <span className="text-[12px] text-ink-2 tabular-nums">{formatBytesPair(s.used, s.total)}</span>
+                      <ProgressBar
+                        pct={s.total > 0 ? (s.used / s.total) * 100 : 0}
+                        className="flex-1"
+                      />
+                      <span className="text-[12px] text-ink-2 tabular-nums">
+                        {formatBytesPair(s.used, s.total)}
+                      </span>
                     </div>
                   </td>
                 </tr>

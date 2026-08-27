@@ -8,13 +8,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 
 const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
-export function Reveal({
-  children,
-  className = "",
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
+export function Reveal({ children, className = "" }: { children: ReactNode; className?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [armed, setArmed] = useState(false);
 

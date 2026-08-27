@@ -25,7 +25,9 @@ function barCount(container: HTMLElement): number {
 describe("QuotaBars", () => {
   it("renders Unlimited with no bar where the limit is null", () => {
     const { container } = render(
-      <QuotaBars quota={{ ...base, limits: {}, usage: { vcpu: 6, ramMb: 2048, diskGb: 40, count: 3 } }} />,
+      <QuotaBars
+        quota={{ ...base, limits: {}, usage: { vcpu: 6, ramMb: 2048, diskGb: 40, count: 3 } }}
+      />,
     );
     // All four dimensions are unlimited → four "Unlimited" labels, zero bars.
     expect(screen.getAllByText(/Unlimited/)).toHaveLength(4);
@@ -36,7 +38,13 @@ describe("QuotaBars", () => {
 
   it("renders a used/limit bar only for capped dimensions", () => {
     const { container } = render(
-      <QuotaBars quota={{ ...base, limits: { maxVcpu: 8 }, usage: { vcpu: 6, ramMb: 0, diskGb: 0, count: 0 } }} />,
+      <QuotaBars
+        quota={{
+          ...base,
+          limits: { maxVcpu: 8 },
+          usage: { vcpu: 6, ramMb: 0, diskGb: 0, count: 0 },
+        }}
+      />,
     );
     expect(screen.getByText(/6 \/ 8/)).toBeTruthy();
     // Only vCPU is capped → exactly one bar; the other three stay Unlimited.
@@ -49,7 +57,13 @@ describe("QuotaBars", () => {
 
   it("colors the fill err when usage exceeds the limit", () => {
     const { container } = render(
-      <QuotaBars quota={{ ...base, limits: { maxVcpu: 8 }, usage: { vcpu: 10, ramMb: 0, diskGb: 0, count: 0 } }} />,
+      <QuotaBars
+        quota={{
+          ...base,
+          limits: { maxVcpu: 8 },
+          usage: { vcpu: 10, ramMb: 0, diskGb: 0, count: 0 },
+        }}
+      />,
     );
     const fill = container.querySelector('div[style*="width"]') as HTMLElement;
     expect(fill.className).toContain("bg-err");
@@ -58,7 +72,13 @@ describe("QuotaBars", () => {
 
   it("colors the fill warn near the cap (>=80%)", () => {
     const { container } = render(
-      <QuotaBars quota={{ ...base, limits: { maxCount: 10 }, usage: { vcpu: 0, ramMb: 0, diskGb: 0, count: 9 } }} />,
+      <QuotaBars
+        quota={{
+          ...base,
+          limits: { maxCount: 10 },
+          usage: { vcpu: 0, ramMb: 0, diskGb: 0, count: 9 },
+        }}
+      />,
     );
     const fill = container.querySelector('div[style*="width"]') as HTMLElement;
     expect(fill.className).toContain("bg-warn");

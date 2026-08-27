@@ -22,11 +22,7 @@ export interface ScheduleFormValues {
 }
 
 export type ScheduleFieldError =
-  | "shutdownTime"
-  | "autoStartTime"
-  | "daysOfWeek"
-  | "timezone"
-  | "graceSeconds";
+  "shutdownTime" | "autoStartTime" | "daysOfWeek" | "timezone" | "graceSeconds";
 
 export const DEFAULT_GRACE_SECONDS = 120;
 
@@ -77,7 +73,9 @@ export function validateScheduleForm(
   if (v.autoStartEnabled && !parseHhmm(v.autoStartTime)) {
     errors.autoStartTime = "Enter a valid time (HH:MM, 24-hour).";
   }
-  const days = Array.from(new Set(v.daysOfWeek.filter((d) => d >= 0 && d <= 6))).sort((a, b) => a - b);
+  const days = Array.from(new Set(v.daysOfWeek.filter((d) => d >= 0 && d <= 6))).sort(
+    (a, b) => a - b,
+  );
   if (days.length === 0) {
     errors.daysOfWeek = "Select at least one day.";
   }
@@ -154,8 +152,12 @@ export function ScheduleEditor({
 
   return (
     <div>
-      <Field label="Shutdown time" htmlFor="sched-shutdown" error={errors.shutdownTime}
-        hint="Local to the selected time zone.">
+      <Field
+        label="Shutdown time"
+        htmlFor="sched-shutdown"
+        error={errors.shutdownTime}
+        hint="Local to the selected time zone."
+      >
         <Input
           id="sched-shutdown"
           type="time"
@@ -168,8 +170,11 @@ export function ScheduleEditor({
         />
       </Field>
 
-      <Field label="Auto-start" error={errors.autoStartTime}
-        hint="Optionally power the guest back on later the same day.">
+      <Field
+        label="Auto-start"
+        error={errors.autoStartTime}
+        hint="Optionally power the guest back on later the same day."
+      >
         <div className="flex items-center gap-3">
           <Toggle
             checked={values.autoStartEnabled}
@@ -224,8 +229,12 @@ export function ScheduleEditor({
         />
       </Field>
 
-      <Field label="Grace period (seconds)" htmlFor="sched-grace" error={errors.graceSeconds}
-        hint="Warning-to-shutdown window sent to the guest (1–300).">
+      <Field
+        label="Grace period (seconds)"
+        htmlFor="sched-grace"
+        error={errors.graceSeconds}
+        hint="Warning-to-shutdown window sent to the guest (1–300)."
+      >
         <Input
           id="sched-grace"
           value={values.graceSeconds}
@@ -247,7 +256,9 @@ export function ScheduleEditor({
         />
         <div>
           <div className="text-[13px] font-semibold">Enabled</div>
-          <div className="text-[12px] text-ink-3">Paused schedules keep their settings but never fire.</div>
+          <div className="text-[12px] text-ink-3">
+            Paused schedules keep their settings but never fire.
+          </div>
         </div>
       </div>
 

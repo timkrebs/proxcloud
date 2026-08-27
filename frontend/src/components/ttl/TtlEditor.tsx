@@ -18,12 +18,13 @@ export type TtlAction = "stop" | "delete";
 export const HOUR_SECONDS = 3600;
 
 /** Fixed presets, in ascending seconds. "custom" is entered as whole hours. */
-export const TTL_PRESETS: { key: Exclude<TtlPreset, "custom">; label: string; seconds: number }[] = [
-  { key: "24h", label: "24 hours", seconds: 24 * HOUR_SECONDS },
-  { key: "48h", label: "48 hours", seconds: 48 * HOUR_SECONDS },
-  { key: "7d", label: "7 days", seconds: 7 * 24 * HOUR_SECONDS },
-  { key: "30d", label: "30 days", seconds: 30 * 24 * HOUR_SECONDS },
-];
+export const TTL_PRESETS: { key: Exclude<TtlPreset, "custom">; label: string; seconds: number }[] =
+  [
+    { key: "24h", label: "24 hours", seconds: 24 * HOUR_SECONDS },
+    { key: "48h", label: "48 hours", seconds: 48 * HOUR_SECONDS },
+    { key: "7d", label: "7 days", seconds: 7 * 24 * HOUR_SECONDS },
+    { key: "30d", label: "30 days", seconds: 30 * 24 * HOUR_SECONDS },
+  ];
 
 export interface TtlFormValues {
   preset: TtlPreset;
@@ -55,7 +56,8 @@ export function secondsToPreset(seconds: number): { preset: TtlPreset; customHou
 
 /** Fresh defaults: prefill the project default TTL when set, else 24h / stop. */
 export function defaultTtlForm(defaultTtlSeconds?: number | null): TtlFormValues {
-  const seeded = defaultTtlSeconds && defaultTtlSeconds > 0 ? secondsToPreset(defaultTtlSeconds) : null;
+  const seeded =
+    defaultTtlSeconds && defaultTtlSeconds > 0 ? secondsToPreset(defaultTtlSeconds) : null;
   return {
     preset: seeded?.preset ?? "24h",
     customHours: seeded?.customHours ?? "",
@@ -263,7 +265,12 @@ export function TtlEditor({
       {values.action === "delete" ? (
         <div className="mb-4">
           <div className="mb-3 flex gap-[10px] rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5]">
-            <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 2 }} />
+            <Mi
+              name="warn"
+              size={16}
+              color="var(--color-err)"
+              style={{ flexShrink: 0, marginTop: 2 }}
+            />
             <span>
               When this TTL fires, <strong>{guestName}</strong> and all its disks are permanently
               destroyed. This cannot be undone.

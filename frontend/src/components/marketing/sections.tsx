@@ -27,8 +27,8 @@ export function Hero(): ReactElement {
             Your own cloud, on your own hardware.
           </h1>
           <p className="mt-5 max-w-[560px] text-[clamp(16px,1.5vw,19px)] leading-[1.55] text-ink-2 text-pretty">
-            Self-service VMs, Kubernetes, databases and networking on Proxmox — with
-            multi-tenancy, quotas, and an Azure-familiar portal.
+            Self-service VMs, Kubernetes, databases and networking on Proxmox — with multi-tenancy,
+            quotas, and an Azure-familiar portal.
           </p>
           <div className="mt-[30px] flex flex-wrap gap-3">
             <Link
@@ -80,7 +80,9 @@ export function ProofStrip(): ReactElement {
             {p.icon}
             <div>
               <div className="text-[16px] font-semibold">{p.title}</div>
-              <div className="mt-1 text-[13.5px] leading-[1.5] text-ink-2 text-pretty">{p.desc}</div>
+              <div className="mt-1 text-[13.5px] leading-[1.5] text-ink-2 text-pretty">
+                {p.desc}
+              </div>
             </div>
           </div>
         ))}
@@ -98,8 +100,8 @@ export function ServiceGrid(): ReactElement {
             Explore Proxcloud services
           </h2>
           <p className="mt-[14px] text-[17px] leading-[1.55] text-ink-2 text-pretty">
-            Every service is provisioned from the same catalog, governed by the same
-            quotas, and billed against the same showback model.
+            Every service is provisioned from the same catalog, governed by the same quotas, and
+            billed against the same showback model.
           </p>
         </Reveal>
         <div className="mt-9 grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
@@ -118,7 +120,9 @@ export function ServiceGrid(): ReactElement {
                   </span>
                 )}
               </span>
-              <span className="flex-1 text-[14.5px] leading-[1.5] text-ink-2 text-pretty">{s.desc}</span>
+              <span className="flex-1 text-[14.5px] leading-[1.5] text-ink-2 text-pretty">
+                {s.desc}
+              </span>
               <span className="flex flex-wrap items-center gap-[6px] text-[14px] font-semibold text-accent">
                 <span>{s.cta}</span>
                 <ArrowIcon />
@@ -179,10 +183,11 @@ export function HowItWorks(): ReactElement {
     <section id="how" className="border-t border-line bg-page">
       <div className={`${SHELL} px-[clamp(16px,4vw,40px)] py-[clamp(56px,8vw,96px)]`}>
         <Reveal className="max-w-[600px]">
-          <h2 className="text-[clamp(26px,3.2vw,34px)] font-semibold tracking-[-0.5px]">How it works</h2>
+          <h2 className="text-[clamp(26px,3.2vw,34px)] font-semibold tracking-[-0.5px]">
+            How it works
+          </h2>
           <p className="mt-[14px] text-[17px] leading-[1.55] text-ink-2 text-pretty">
-            Three steps from an existing Proxmox cluster to teams provisioning their own
-            resources.
+            Three steps from an existing Proxmox cluster to teams provisioning their own resources.
           </p>
         </Reveal>
         <div className="mt-10 grid gap-7 [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
@@ -219,14 +224,22 @@ export function ApiSection(): ReactElement {
             Automate everything.
           </h2>
           <p className="mt-[14px] max-w-[520px] text-[16px] leading-[1.6] text-[#C8C6C4] text-pretty">
-            Every action in the portal is a call to the same public API. Drive Proxcloud
-            from the CLI, from Terraform, or straight from your pipeline — the portal has no
-            private endpoints.
+            Every action in the portal is a call to the same public API. Drive Proxcloud from the
+            CLI, from Terraform, or straight from your pipeline — the portal has no private
+            endpoints.
           </p>
           <div className="mt-[22px] flex flex-col gap-[10px]">
             {apiPoints.map((p) => (
-              <div key={p} className="flex items-start gap-[10px] text-[15px] leading-[1.5] text-[#F3F2F1]">
-                <LineIcon d="M3 8.5l3.2 3L13 4.5" size={15} strokeWidth={1.6} className="mt-1 text-[#479EF5]" />
+              <div
+                key={p}
+                className="flex items-start gap-[10px] text-[15px] leading-[1.5] text-[#F3F2F1]"
+              >
+                <LineIcon
+                  d="M3 8.5l3.2 3L13 4.5"
+                  size={15}
+                  strokeWidth={1.6}
+                  className="mt-1 text-[#479EF5]"
+                />
                 <span>{p}</span>
               </div>
             ))}
@@ -254,9 +267,9 @@ export function PricingTeaser(): ReactElement {
             You run it, you control the cost
           </h2>
           <p className="mt-[14px] text-[17px] leading-[1.55] text-ink-2 text-pretty">
-            Proxcloud is self-hosted software on hardware you already own. There is no
-            per-core licensing and no metered egress — the only cost model that matters is
-            the one you set for your own teams.
+            Proxcloud is self-hosted software on hardware you already own. There is no per-core
+            licensing and no metered egress — the only cost model that matters is the one you set
+            for your own teams.
           </p>
         </Reveal>
         <div className="mt-9 grid max-w-[900px] gap-4 [grid-template-columns:repeat(auto-fit,minmax(300px,1fr))]">
@@ -275,7 +288,9 @@ export function PricingTeaser(): ReactElement {
                 {c.kicker}
               </div>
               <div className="mt-[10px] text-[22px] font-semibold">{c.title}</div>
-              <div className="mt-[10px] text-[15px] leading-[1.55] text-ink-2 text-pretty">{c.desc}</div>
+              <div className="mt-[10px] text-[15px] leading-[1.55] text-ink-2 text-pretty">
+                {c.desc}
+              </div>
               <div className="mt-4 flex flex-col gap-2">
                 {c.items.map((i) => (
                   <div key={i} className="flex items-start gap-[9px] text-[14.5px] leading-[1.5]">
@@ -310,8 +325,8 @@ export function CtaBand(): ReactElement {
             Ready to run your own cloud?
           </h2>
           <p className="mt-[10px] max-w-[560px] text-[16px] leading-[1.55] text-ink-2 text-pretty">
-            Point Proxcloud at a Proxmox cluster and hand your teams a portal they already
-            know how to use.
+            Point Proxcloud at a Proxmox cluster and hand your teams a portal they already know how
+            to use.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">

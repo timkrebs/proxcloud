@@ -88,7 +88,8 @@ export default function GuestTtlPage() {
   const dirty = !!form && (!baseline || JSON.stringify(form) !== JSON.stringify(baseline));
 
   // TTL + policy must both resolve before the editor is meaningful.
-  if (ttl.isPending || policy.isPending || resources.isPending) return <Skeleton className="h-64" />;
+  if (ttl.isPending || policy.isPending || resources.isPending)
+    return <Skeleton className="h-64" />;
   if (ttl.isError) return <CardError err={ttl.error} />;
   if (policy.isError) return <CardError err={policy.error} />;
 
@@ -125,7 +126,10 @@ export default function GuestTtlPage() {
           }
           cta={
             canEdit
-              ? { label: "Set TTL", onClick: () => setForm(defaultTtlForm(policy.data?.defaultTtlSeconds)) }
+              ? {
+                  label: "Set TTL",
+                  onClick: () => setForm(defaultTtlForm(policy.data?.defaultTtlSeconds)),
+                }
               : undefined
           }
         />
@@ -170,7 +174,11 @@ export default function GuestTtlPage() {
 
           {ttl.data ? (
             <>
-              <Button variant="secondary" disabled={extend.isPending} onClick={() => extend.mutate()}>
+              <Button
+                variant="secondary"
+                disabled={extend.isPending}
+                onClick={() => extend.mutate()}
+              >
                 {extend.isPending ? "Extending…" : "Extend"}
               </Button>
 

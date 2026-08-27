@@ -47,7 +47,10 @@ export default function SolutionsPage() {
         >
           Go to portal
         </Link>
-        <Link href="/pricing" className="flex h-[46px] items-center text-[16px] font-semibold text-accent">
+        <Link
+          href="/pricing"
+          className="flex h-[46px] items-center text-[16px] font-semibold text-accent"
+        >
           See how pricing works
         </Link>
       </div>

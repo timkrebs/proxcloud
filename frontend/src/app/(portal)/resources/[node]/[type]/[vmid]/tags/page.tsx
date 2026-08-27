@@ -29,13 +29,17 @@ export default function GuestTagsPage() {
     <div>
       <BladeHeading>Tags</BladeHeading>
       <p className="mb-4 -mt-1 text-[12px] text-ink-2">
-        Proxmox tags are flat labels (lowercase letters, digits, <code>. - _</code>) — not key:value pairs.
+        Proxmox tags are flat labels (lowercase letters, digits, <code>. - _</code>) — not key:value
+        pairs.
       </p>
 
       <div className="mb-4 flex flex-wrap gap-2">
         {tags.length === 0 ? <span className="text-[13px] text-ink-2">No tags yet.</span> : null}
         {tags.map((t) => (
-          <span key={t} className="flex items-center gap-2 rounded-fluent border border-line bg-hover px-[10px] py-[5px] text-[13px]">
+          <span
+            key={t}
+            className="flex items-center gap-2 rounded-fluent border border-line bg-hover px-[10px] py-[5px] text-[13px]"
+          >
             {t}
             <button
               type="button"

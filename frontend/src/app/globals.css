@@ -81,8 +81,10 @@
   --color-tint: #eff6fc; /* --pc-tint: accent-tinted section + badge fills */
   --color-tint2: #deecf9; /* --pc-tint2: deeper accent tint (badge borders) */
   --color-nav: rgba(255, 255, 255, 0.94); /* --pc-nav: translucent sticky header */
-  --shadow-pc: 0 1.6px 3.6px rgba(0, 0, 0, 0.13), 0 0.3px 0.9px rgba(0, 0, 0, 0.11); /* --pc-shadow */
-  --shadow-pc-lift: 0 8px 20px rgba(0, 0, 0, 0.13), 0 1.2px 3.6px rgba(0, 0, 0, 0.1); /* --pc-shadow-lift */
+  --shadow-pc:
+    0 1.6px 3.6px rgba(0, 0, 0, 0.13), 0 0.3px 0.9px rgba(0, 0, 0, 0.11); /* --pc-shadow */
+  --shadow-pc-lift:
+    0 8px 20px rgba(0, 0, 0, 0.13), 0 1.2px 3.6px rgba(0, 0, 0, 0.1); /* --pc-shadow-lift */
 
   /* Motion */
   --animate-pcspin: pcspin 1s linear infinite;

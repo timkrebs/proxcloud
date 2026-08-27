@@ -3,7 +3,13 @@
 import { useState } from "react";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
-import { BladeHeading, BladeTable, bladeCell, bladeCellMuted, useGuestParams } from "@/components/guest/common";
+import {
+  BladeHeading,
+  BladeTable,
+  bladeCell,
+  bladeCellMuted,
+  useGuestParams,
+} from "@/components/guest/common";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { useGuest, useResizeDisk } from "@/lib/api/guestQueries";
@@ -41,7 +47,9 @@ export default function GuestDisksPage() {
                 </td>
                 <td className={bladeCellMuted}>{disk.storage || "—"}</td>
                 <td className={`${bladeCellMuted} break-all`}>{disk.volume}</td>
-                <td className={`${bladeCell} tabular-nums`}>{disk.sizeBytes > 0 ? formatBytes(disk.sizeBytes, 0) : "—"}</td>
+                <td className={`${bladeCell} tabular-nums`}>
+                  {disk.sizeBytes > 0 ? formatBytes(disk.sizeBytes, 0) : "—"}
+                </td>
                 <td className={bladeCell}>
                   {disk.cdrom || disk.sizeBytes === 0 ? null : editing === disk.key ? (
                     <span className="flex items-center gap-2">

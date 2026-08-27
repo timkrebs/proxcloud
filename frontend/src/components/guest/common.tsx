@@ -24,14 +24,23 @@ export function BladeHeading({ children, sub }: { children: React.ReactNode; sub
 }
 
 /** List-page table wrapper: white card, gray header row (§4.3). */
-export function BladeTable({ headers, children }: { headers: string[]; children: React.ReactNode }) {
+export function BladeTable({
+  headers,
+  children,
+}: {
+  headers: string[];
+  children: React.ReactNode;
+}) {
   return (
     <div className="overflow-x-auto rounded-fluent border border-line bg-card">
       <table className="w-full border-collapse text-[13px]">
         <thead>
           <tr>
             {headers.map((h) => (
-              <th key={h} className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">
+              <th
+                key={h}
+                className="border-b border-line bg-hover px-3 py-2 text-left font-semibold"
+              >
                 {h}
               </th>
             ))}

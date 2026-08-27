@@ -16,7 +16,12 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Mi } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
-import type { CreateInvitationRequest, Invitation, Member, Project } from "@/lib/api/generated/types";
+import type {
+  CreateInvitationRequest,
+  Invitation,
+  Member,
+  Project,
+} from "@/lib/api/generated/types";
 import { useCreateInvitation, useInvitations, useRevokeInvitation } from "@/lib/api/security";
 import { useMe } from "@/lib/api/queries";
 import { useMembers, useProjects } from "@/lib/api/tenant";
@@ -50,7 +55,12 @@ function errText(err: unknown): string {
 // ── Invite flyout ──────────────────────────────────────────────────────────────
 
 /** Scope options carry the concrete scopeType+scopeId the request needs. */
-type ScopeChoice = { value: string; label: string; scopeType: "tenant" | "project"; scopeId: string };
+type ScopeChoice = {
+  value: string;
+  label: string;
+  scopeType: "tenant" | "project";
+  scopeId: string;
+};
 
 function InviteFlyout({
   tenantId,
@@ -73,7 +83,12 @@ function InviteFlyout({
 
   const scopes: ScopeChoice[] = useMemo(
     () => [
-      { value: "tenant", label: `Entire directory — ${tenantName}`, scopeType: "tenant", scopeId: tenantId },
+      {
+        value: "tenant",
+        label: `Entire directory — ${tenantName}`,
+        scopeType: "tenant",
+        scopeId: tenantId,
+      },
       ...projects.map<ScopeChoice>((p) => ({
         value: `project:${p.id}`,
         label: `Project — ${p.name}`,
@@ -149,7 +164,9 @@ function InviteFlyout({
           ))}
         </Select>
         <p className="mb-4 text-[12px] text-ink-3">
-          {projectsPending ? "Loading projects…" : "Directory scope grants access to every project."}
+          {projectsPending
+            ? "Loading projects…"
+            : "Directory scope grants access to every project."}
         </p>
 
         <label htmlFor="invite-role" className="mb-[6px] block text-[13px] text-ink">
@@ -185,7 +202,13 @@ function InviteFlyout({
 
 // ── Tables ─────────────────────────────────────────────────────────────────────
 
-function ScopeLabel({ member, projectsById }: { member: Member; projectsById: Record<string, string> }) {
+function ScopeLabel({
+  member,
+  projectsById,
+}: {
+  member: Member;
+  projectsById: Record<string, string>;
+}) {
   if (member.scopeType === "tenant") return <span className="text-ink-2">Directory</span>;
   return <span className="text-ink-2">{projectsById[member.scopeId] ?? member.scopeId}</span>;
 }
@@ -221,7 +244,10 @@ function MembersTable({
           <thead>
             <tr>
               {["Name", "Email", "Scope", "Role"].map((h) => (
-                <th key={h} className="border-b border-line bg-hover px-4 py-2 text-left font-semibold">
+                <th
+                  key={h}
+                  className="border-b border-line bg-hover px-4 py-2 text-left font-semibold"
+                >
                   {h}
                 </th>
               ))}
@@ -229,7 +255,10 @@ function MembersTable({
           </thead>
           <tbody>
             {(members.data ?? []).map((m) => (
-              <tr key={`${m.userId}:${m.scopeType}:${m.scopeId}`} className="border-b border-line-row last:border-b-0">
+              <tr
+                key={`${m.userId}:${m.scopeType}:${m.scopeId}`}
+                className="border-b border-line-row last:border-b-0"
+              >
                 <td className="h-10 px-4 font-semibold">{m.displayName || "—"}</td>
                 <td className="px-4 text-ink-2">{m.email}</td>
                 <td className="px-4">
@@ -331,7 +360,11 @@ function InvitationsTable({ invitations }: { invitations: ReturnType<typeof useI
 
 // ── Toast helpers (kept out of the row so it stays presentational) ──────────────
 function pushRevokeToast() {
-  pushToast({ kind: "ok", title: "Invitation revoked", desc: "The invitation link no longer works." });
+  pushToast({
+    kind: "ok",
+    title: "Invitation revoked",
+    desc: "The invitation link no longer works.",
+  });
 }
 function pushRevokeError(err: unknown) {
   pushToast({ kind: "err", title: "Could not revoke invitation", desc: errText(err) });

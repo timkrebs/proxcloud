@@ -13,10 +13,7 @@ export default function SignInPage() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center bg-canvas px-5 py-10">
       <AuthPanel />
-      <Link
-        href="/"
-        className="mt-[18px] text-[12px] text-ink-2 hover:text-ink"
-      >
+      <Link href="/" className="mt-[18px] text-[12px] text-ink-2 hover:text-ink">
         ← Back to landing page
       </Link>
     </main>

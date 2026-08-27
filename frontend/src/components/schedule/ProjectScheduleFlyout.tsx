@@ -23,7 +23,13 @@ import {
   usePutProjectSchedule,
 } from "@/lib/api/scheduleQueries";
 
-export function ProjectScheduleFlyout({ project, onClose }: { project: Project; onClose: () => void }) {
+export function ProjectScheduleFlyout({
+  project,
+  onClose,
+}: {
+  project: Project;
+  onClose: () => void;
+}) {
   const sched = useProjectSchedule(project.id);
   const put = usePutProjectSchedule(project.id);
   const del = useDeleteProjectSchedule(project.id);
@@ -61,7 +67,11 @@ export function ProjectScheduleFlyout({ project, onClose }: { project: Project; 
           {sched.data ? (
             confirmRemove ? (
               <>
-                <Button variant="danger" disabled={del.isPending} onClick={() => del.mutate(undefined, { onSuccess: onClose })}>
+                <Button
+                  variant="danger"
+                  disabled={del.isPending}
+                  onClick={() => del.mutate(undefined, { onSuccess: onClose })}
+                >
                   {del.isPending ? "Removing…" : "Confirm remove"}
                 </Button>
                 <Button variant="secondary" onClick={() => setConfirmRemove(false)}>
@@ -82,8 +92,8 @@ export function ProjectScheduleFlyout({ project, onClose }: { project: Project; 
       }
     >
       <p className="mb-4 text-[13px] leading-[1.5] text-ink-2">
-        Applies to every guest in <strong>{project.name}</strong> that has no schedule of its own and
-        has not opted out. A guest-level schedule always overrides this.
+        Applies to every guest in <strong>{project.name}</strong> that has no schedule of its own
+        and has not opted out. A guest-level schedule always overrides this.
       </p>
 
       {sched.isPending ? (

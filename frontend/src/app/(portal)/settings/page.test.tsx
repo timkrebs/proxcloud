@@ -38,7 +38,14 @@ const mockUseRevokeSession = vi.mocked(useRevokeSession);
 // Minimal query/mutation shapes the settings page reads. Cast through unknown so
 // the test does not need the full TanStack Query result type surface.
 function query(overrides: Record<string, unknown>) {
-  return { isPending: false, isError: false, error: null, data: undefined, refetch: vi.fn(), ...overrides } as never;
+  return {
+    isPending: false,
+    isError: false,
+    error: null,
+    data: undefined,
+    refetch: vi.fn(),
+    ...overrides,
+  } as never;
 }
 function mutation(overrides: Record<string, unknown> = {}) {
   return { mutate: vi.fn(), isPending: false, ...overrides } as never;
@@ -147,12 +154,16 @@ describe("Settings change-password — client-side guards", () => {
     mockUseChangePassword.mockReturnValue(changePassword);
     render(<SettingsPage />);
 
-    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "old-password-1" } });
+    fireEvent.change(screen.getByLabelText("Current password"), {
+      target: { value: "old-password-1" },
+    });
     fireEvent.change(screen.getByLabelText("New password"), { target: { value: "short" } });
     fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "short" } });
     fireEvent.click(screen.getByRole("button", { name: "Change password" }));
 
-    expect((changePassword as unknown as { mutate: ReturnType<typeof vi.fn> }).mutate).not.toHaveBeenCalled();
+    expect(
+      (changePassword as unknown as { mutate: ReturnType<typeof vi.fn> }).mutate,
+    ).not.toHaveBeenCalled();
     // The submit error is distinct from the always-present "At least 12 characters" hint.
     expect(screen.getByText("New password must be at least 12 characters.")).toBeTruthy();
   });
@@ -162,12 +173,20 @@ describe("Settings change-password — client-side guards", () => {
     mockUseChangePassword.mockReturnValue(changePassword);
     render(<SettingsPage />);
 
-    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "old-password-1" } });
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "a-brand-new-passphrase" } });
-    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "different-passphrase-x" } });
+    fireEvent.change(screen.getByLabelText("Current password"), {
+      target: { value: "old-password-1" },
+    });
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "a-brand-new-passphrase" },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm new password"), {
+      target: { value: "different-passphrase-x" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Change password" }));
 
-    expect((changePassword as unknown as { mutate: ReturnType<typeof vi.fn> }).mutate).not.toHaveBeenCalled();
+    expect(
+      (changePassword as unknown as { mutate: ReturnType<typeof vi.fn> }).mutate,
+    ).not.toHaveBeenCalled();
     // Shown both as the live inline hint and the submit error — assert >= 1.
     expect(screen.getAllByText("New passwords do not match.").length).toBeGreaterThan(0);
   });
@@ -177,9 +196,15 @@ describe("Settings change-password — client-side guards", () => {
     mockUseChangePassword.mockReturnValue(mutation({ mutate }));
     render(<SettingsPage />);
 
-    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "old-password-1" } });
-    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "a-brand-new-passphrase" } });
-    fireEvent.change(screen.getByLabelText("Confirm new password"), { target: { value: "a-brand-new-passphrase" } });
+    fireEvent.change(screen.getByLabelText("Current password"), {
+      target: { value: "old-password-1" },
+    });
+    fireEvent.change(screen.getByLabelText("New password"), {
+      target: { value: "a-brand-new-passphrase" },
+    });
+    fireEvent.change(screen.getByLabelText("Confirm new password"), {
+      target: { value: "a-brand-new-passphrase" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Change password" }));
 
     expect(mutate).toHaveBeenCalledTimes(1);

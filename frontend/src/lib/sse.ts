@@ -46,7 +46,9 @@ export function useEvents() {
       qc.invalidateQueries({ queryKey: ["tasks"] });
       qc.invalidateQueries({ queryKey: qk.notifications });
       if (data.resource) {
-        qc.invalidateQueries({ queryKey: ["guest", data.resource.node, data.resource.type, data.resource.vmid] });
+        qc.invalidateQueries({
+          queryKey: ["guest", data.resource.node, data.resource.type, data.resource.vmid],
+        });
       }
 
       const name = data.resource?.name || (data.resource ? `VMID ${data.resource.vmid}` : "");
