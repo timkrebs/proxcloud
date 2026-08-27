@@ -5,12 +5,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA tz database so timezone-aware schedules (ADR-0019) resolve on any base image
 
 	"github.com/joho/godotenv"
 
@@ -29,6 +32,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/mail"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/reconciler"
+	"github.com/timkrebs9/proxcloud/backend/internal/scheduler"
 	"github.com/timkrebs9/proxcloud/backend/internal/secrets"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
@@ -250,20 +254,45 @@ func runServe(log *slog.Logger) {
 		log.Info("console disabled — set PROXMOX_CONSOLE_USER/PASSWORD to enable")
 	}
 
-	// Background loops: node-metrics poller (idle without SSE subscribers)
-	// and the tracked-task watcher. Both stop on shutdown via bgCtx.
+	// Background loops: node-metrics poller (idle without SSE subscribers) and
+	// the tracked-task watcher. All background workers register in bgWG so
+	// shutdown can drain them (cancel-then-join) rather than tearing an
+	// at-least-once handler down mid-action.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
-	go (&events.MetricsPoller{PVE: pve, Broker: broker, Log: log}).Run(bgCtx)
-	go (&tasks.Watcher{PVE: pve, Registry: registry, Broker: broker, Log: log}).Run(bgCtx)
+	var bgWG sync.WaitGroup
+	startWorker := func(run func(context.Context)) {
+		bgWG.Go(func() { run(bgCtx) })
+	}
+	startWorker((&events.MetricsPoller{PVE: pve, Broker: broker, Log: log}).Run)
+	startWorker((&tasks.Watcher{PVE: pve, Registry: registry, Broker: broker, Log: log}).Run)
 	// Stale-pending reservation reclaim (ADR-0012 §2.3): frees quota leaked by a
 	// backend that died mid-create. Runs after backfill, stops with bgCtx on shutdown.
-	go (&reconciler.Reconciler{
+	startWorker((&reconciler.Reconciler{
 		Store:    st,
 		Log:      log,
 		Interval: cfg.ReconcilerInterval,
 		TTL:      cfg.ReservationTTL,
-	}).Run(bgCtx)
+	}).Run)
+
+	// Job scheduler (ADR-0018): the persistent, tenant-aware engine behind
+	// auto-shutdown + TTL. Off by default; handlers are registered by the feature
+	// wiring (Part 2/3) only when their own flag is also on. locked_by is unique
+	// per instance so a claim is attributable across a blue/green pair.
+	if cfg.SchedulerEnabled {
+		hostname, _ := os.Hostname()
+		sched := &scheduler.Scheduler{
+			Store:      st,
+			Log:        log,
+			Interval:   cfg.SchedulerInterval,
+			InstanceID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
+		}
+		startWorker(sched.Run)
+		log.Info("scheduler enabled", "interval", cfg.SchedulerInterval.String(),
+			"autoshutdown", cfg.AutoShutdownActive(), "ttl", cfg.TTLActive())
+	} else {
+		log.Info("scheduler disabled — set SCHEDULER_ENABLED=true to enable")
+	}
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
@@ -298,6 +327,17 @@ func runServe(log *slog.Logger) {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("shutdown", "err", err)
+	}
+	// Drain background workers: stop accepting new work (bgCancel) then join,
+	// bounded, so an in-flight scheduler handler finishes (or is left 'running'
+	// for re-claim) instead of being torn down mid-action.
+	bgCancel()
+	drained := make(chan struct{})
+	go func() { bgWG.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(15 * time.Second):
+		log.Warn("background workers did not drain in time")
 	}
 	log.Info("stopped")
 }

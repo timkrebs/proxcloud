@@ -240,12 +240,12 @@ func (s *PgStore) ReserveOwnership(ctx context.Context, p ReserveOwnershipParams
 // InsertAuditIntent implements QuotaStore: the fail-closed intent write.
 func (s *PgStore) InsertAuditIntent(ctx context.Context, a AuditIntent) (string, error) {
 	const q = `INSERT INTO audit_log
-	             (actor_user_id, tenant_id, project_id, action, target_type, target_id, outcome, ip)
-	           VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, 'pending', $7)
+	             (actor_user_id, actor_system, tenant_id, project_id, action, target_type, target_id, outcome, ip)
+	           VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6, $7, 'pending', $8)
 	           RETURNING id::text`
 	var id string
 	err := s.q.QueryRow(ctx, q,
-		a.ActorUserID, a.TenantID, a.ProjectID, a.Action, a.TargetType, a.TargetID, a.IP).Scan(&id)
+		a.ActorUserID, a.ActorSystem, a.TenantID, a.ProjectID, a.Action, a.TargetType, a.TargetID, a.IP).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("store: insert audit intent: %w", err)
 	}
@@ -266,7 +266,7 @@ func (s *PgStore) FinalizeAudit(ctx context.Context, id, outcome string, detail 
 	return nil
 }
 
-const auditColumns = `id::text, ts, actor_user_id::text, tenant_id::text, project_id::text,
+const auditColumns = `id::text, ts, actor_user_id::text, actor_system, tenant_id::text, project_id::text,
 	action, target_type, target_id, outcome, ip, detail`
 
 // ListAudit implements QuotaStore: the tenant-filtered, keyset-paginated audit
@@ -303,7 +303,7 @@ func (s *PgStore) ListAudit(ctx context.Context, aq AuditQuery) ([]AuditEntry, e
 	out := []AuditEntry{}
 	for rows.Next() {
 		var e AuditEntry
-		if err := rows.Scan(&e.ID, &e.TS, &e.ActorUserID, &e.TenantID, &e.ProjectID,
+		if err := rows.Scan(&e.ID, &e.TS, &e.ActorUserID, &e.ActorSystem, &e.TenantID, &e.ProjectID,
 			&e.Action, &e.TargetType, &e.TargetID, &e.Outcome, &e.IP, &e.Detail); err != nil {
 			return nil, fmt.Errorf("store: scan audit row: %w", err)
 		}

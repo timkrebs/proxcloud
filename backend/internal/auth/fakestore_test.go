@@ -982,6 +982,26 @@ func strPtr(s string) *string {
 	return &s
 }
 
+// --- jobs (scheduler, ADR-0018): unused by auth tests; minimal stubs ---
+
+func (f *fakeStore) EnqueueJob(context.Context, store.EnqueueJobParams) (*store.Job, error) {
+	return nil, nil
+}
+func (f *fakeStore) ClaimDueJobs(context.Context, time.Time, int, string) ([]store.Job, error) {
+	return nil, nil
+}
+func (f *fakeStore) ReclaimStaleRunning(context.Context, time.Time) (int, error)  { return 0, nil }
+func (f *fakeStore) CompleteJob(context.Context, string) error                    { return nil }
+func (f *fakeStore) RescheduleRecurring(context.Context, string, time.Time) error { return nil }
+func (f *fakeStore) FailJob(context.Context, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+func (f *fakeStore) CancelJobsForVMID(context.Context, int) (int, error) { return 0, nil }
+func (f *fakeStore) GetJob(context.Context, string) (*store.Job, error)  { return nil, store.ErrNotFound }
+func (f *fakeStore) ListJobs(context.Context, store.JobFilter) ([]store.Job, error) {
+	return nil, nil
+}
+
 func cloneUser(u *store.User) *store.User {
 	c := *u
 	return &c

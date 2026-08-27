@@ -39,6 +39,9 @@ type Fake struct {
 	recovery    []*fakeRecoveryCode          // append-only; single-use via UsedAt
 	challenges  map[string]*fakeChallenge    // by id
 	chalByHash  map[string]string            // token_hash -> challenge id
+
+	// Scheduler (ADR-0018) job store.
+	jobs map[string]*store.Job // by id
 }
 
 // fakeRecoveryCode is one stored recovery code (hashed, single-use).
@@ -75,6 +78,7 @@ func New() *Fake {
 		recovery:    []*fakeRecoveryCode{},
 		challenges:  map[string]*fakeChallenge{},
 		chalByHash:  map[string]string{},
+		jobs:        map[string]*store.Job{},
 	}
 }
 
@@ -242,6 +246,10 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	for k, v := range f.chalByHash {
 		chalByHash[k] = v
 	}
+	jobs := make(map[string]*store.Job, len(f.jobs))
+	for k, v := range f.jobs {
+		jobs[k] = v
+	}
 	f.mu.Unlock()
 
 	if err := fn(f); err != nil {
@@ -255,6 +263,7 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 		f.recovery = recovery
 		f.challenges = challenges
 		f.chalByHash = chalByHash
+		f.jobs = jobs
 		f.mu.Unlock()
 		return err
 	}
@@ -950,7 +959,8 @@ func (f *Fake) InsertAuditIntent(_ context.Context, a store.AuditIntent) (string
 	}
 	id := f.next("audit")
 	f.audit = append(f.audit, &store.AuditEntry{
-		ID: id, TS: f.Now(), ActorUserID: a.ActorUserID, TenantID: a.TenantID, ProjectID: a.ProjectID,
+		ID: id, TS: f.Now(), ActorUserID: a.ActorUserID, ActorSystem: a.ActorSystem,
+		TenantID: a.TenantID, ProjectID: a.ProjectID,
 		Action: a.Action, TargetType: a.TargetType, TargetID: a.TargetID, Outcome: "pending", IP: a.IP,
 	})
 	return id, nil
@@ -1331,4 +1341,224 @@ func (f *Fake) RecordChallengeFailure(_ context.Context, id string, maxAttempts 
 		return true, nil
 	}
 	return false, nil
+}
+
+// --- jobs (scheduler, ADR-0018) ---
+
+// AllJobs returns a copy of every job row (test convenience), unordered.
+func (f *Fake) AllJobs() []store.Job {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.Job, 0, len(f.jobs))
+	for _, j := range f.jobs {
+		out = append(out, *j)
+	}
+	return out
+}
+
+// JobStatus returns the current status of the job with id, or "" if none — a
+// convenience for claim/complete/fail assertions.
+func (f *Fake) JobStatus(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j, ok := f.jobs[id]; ok {
+		return j.Status
+	}
+	return ""
+}
+
+func (f *Fake) EnqueueJob(_ context.Context, p store.EnqueueJobParams) (*store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("EnqueueJob"); err != nil {
+		return nil, err
+	}
+	maxAttempts := p.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	missed := p.MissedPolicy
+	if missed == "" {
+		missed = "catch_up"
+	}
+	id := f.next("job")
+	j := &store.Job{
+		ID: id, Kind: p.Kind, Handler: p.Handler, TenantID: p.TenantID, ProjectID: p.ProjectID,
+		VMID: p.VMID, Payload: p.Payload, Cron: p.Cron, Timezone: p.Timezone, RunAt: p.RunAt,
+		Status: "scheduled", Attempts: 0, MaxAttempts: maxAttempts, MissedPolicy: missed,
+		CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	f.jobs[id] = j
+	c := *j
+	return &c, nil
+}
+
+func (f *Fake) ClaimDueJobs(_ context.Context, now time.Time, limit int, lockedBy string) ([]store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ClaimDueJobs"); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	var due []*store.Job
+	for _, j := range f.jobs {
+		if j.Status == "scheduled" && !j.RunAt.After(now) {
+			due = append(due, j)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool { return due[i].RunAt.Before(due[j].RunAt) })
+	out := []store.Job{}
+	for _, j := range due {
+		if len(out) >= limit {
+			break
+		}
+		t := now
+		lb := lockedBy
+		j.Status = "running"
+		j.LockedAt = &t
+		j.LockedBy = &lb
+		j.UpdatedAt = f.Now()
+		out = append(out, *j)
+	}
+	return out, nil
+}
+
+func (f *Fake) ReclaimStaleRunning(_ context.Context, olderThan time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, j := range f.jobs {
+		if j.Status == "running" && j.LockedAt != nil && j.LockedAt.Before(olderThan) {
+			j.Status = "scheduled"
+			j.LockedAt = nil
+			j.LockedBy = nil
+			j.UpdatedAt = f.Now()
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *Fake) CompleteJob(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.jobs[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	j.Status = "succeeded"
+	j.LockedAt = nil
+	j.LockedBy = nil
+	j.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) RescheduleRecurring(_ context.Context, id string, nextRunAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.jobs[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	j.Status = "scheduled"
+	j.RunAt = nextRunAt
+	j.Attempts = 0
+	j.LastError = nil
+	j.LockedAt = nil
+	j.LockedBy = nil
+	j.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) FailJob(_ context.Context, id, lastErr string, retryAt time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("FailJob"); err != nil {
+		return false, err
+	}
+	j, ok := f.jobs[id]
+	if !ok {
+		return false, store.ErrNotFound
+	}
+	j.Attempts++
+	le := lastErr
+	j.LastError = &le
+	j.LockedAt = nil
+	j.LockedBy = nil
+	j.UpdatedAt = f.Now()
+	if j.Attempts >= j.MaxAttempts {
+		j.Status = "failed"
+		return true, nil
+	}
+	j.Status = "scheduled"
+	j.RunAt = retryAt
+	return false, nil
+}
+
+func (f *Fake) CancelJobsForVMID(_ context.Context, vmid int) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CancelJobsForVMID"); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, j := range f.jobs {
+		if j.VMID != nil && *j.VMID == vmid && (j.Status == "scheduled" || j.Status == "running") {
+			j.Status = "cancelled"
+			j.LockedAt = nil
+			j.LockedBy = nil
+			j.UpdatedAt = f.Now()
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *Fake) GetJob(_ context.Context, id string) (*store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j, ok := f.jobs[id]; ok {
+		c := *j
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) ListJobs(_ context.Context, fl store.JobFilter) ([]store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListJobs"); err != nil {
+		return nil, err
+	}
+	var matched []store.Job
+	for _, j := range f.jobs {
+		if fl.TenantID != "" && (j.TenantID == nil || *j.TenantID != fl.TenantID) {
+			continue
+		}
+		if fl.Status != "" && j.Status != fl.Status {
+			continue
+		}
+		if fl.VMID != nil && (j.VMID == nil || *j.VMID != *fl.VMID) {
+			continue
+		}
+		matched = append(matched, *j)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].RunAt.Equal(matched[j].RunAt) {
+			return matched[i].RunAt.After(matched[j].RunAt)
+		}
+		return matched[i].ID > matched[j].ID
+	})
+	limit := fl.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	out := []store.Job{}
+	out = append(out, matched...)
+	return out, nil
 }

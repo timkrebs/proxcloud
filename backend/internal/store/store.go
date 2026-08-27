@@ -55,6 +55,7 @@ type Store interface {
 	TOTPStore
 	RecoveryCodeStore
 	LoginChallengeStore
+	JobStore
 }
 
 // UserStore is the users aggregate.
@@ -317,6 +318,47 @@ type LoginChallengeStore interface {
 	RecordChallengeFailure(ctx context.Context, id string, maxAttempts int) (locked bool, err error)
 }
 
+// JobStore is the scheduler's job aggregate (ADR-0018): a persistent, tenant-
+// aware work queue claimed with SELECT … FOR UPDATE SKIP LOCKED so a second
+// backend instance never double-fires. Handlers are idempotent + defensive; the
+// store gives at-least-once delivery, retry→backoff→dead-letter, and the stale-
+// running reclaim that makes a crash mid-handler recoverable.
+type JobStore interface {
+	// EnqueueJob inserts a scheduled job and returns the stored row.
+	EnqueueJob(ctx context.Context, p EnqueueJobParams) (*Job, error)
+	// ClaimDueJobs atomically claims up to limit jobs whose run_at <= now and
+	// status='scheduled', flipping them to 'running' with locked_at=now and
+	// locked_by=owner. It runs its own WithTx with SELECT … FOR UPDATE SKIP
+	// LOCKED, so concurrent instances claim disjoint sets (no double-fire).
+	// Returns the claimed rows (already 'running').
+	ClaimDueJobs(ctx context.Context, now time.Time, limit int, lockedBy string) ([]Job, error)
+	// ReclaimStaleRunning resets jobs stuck in 'running' with locked_at strictly
+	// before olderThan (a backend that crashed mid-handler) back to 'scheduled'
+	// so they are re-claimed — the at-least-once recovery path. Returns the count
+	// reclaimed. olderThan MUST exceed the longest handler grace window.
+	ReclaimStaleRunning(ctx context.Context, olderThan time.Time) (int, error)
+	// CompleteJob marks a claimed job succeeded (one_shot) — terminal.
+	CompleteJob(ctx context.Context, id string) error
+	// RescheduleRecurring returns a claimed recurring job to 'scheduled' with a
+	// new run_at (its next cron boundary) and clears the claim + attempts.
+	RescheduleRecurring(ctx context.Context, id string, nextRunAt time.Time) error
+	// FailJob records a handler error: increments attempts, stores lastErr, and
+	// either reschedules to retryAt with status='scheduled' (attempts <
+	// max_attempts) or dead-letters to status='failed'. deadLettered reports which
+	// branch ran. retryAt is ignored when dead-lettered.
+	FailJob(ctx context.Context, id, lastErr string, retryAt time.Time) (deadLettered bool, err error)
+	// CancelJobsForVMID cancels (status='cancelled') every non-terminal job owned
+	// by vmid — the choke-point cleanup when a guest is destroyed so no orphaned
+	// job acts on a gone VMID. Returns the count cancelled. Idempotent.
+	CancelJobsForVMID(ctx context.Context, vmid int) (int, error)
+	// GetJob returns the job with the given id, or ErrNotFound.
+	GetJob(ctx context.Context, id string) (*Job, error)
+	// ListJobs returns jobs matching the filter, newest run_at first, for the
+	// admin view. TenantID scopes a tenant Owner to their tenant; empty TenantID
+	// (platform-admin) spans all tenants. Status/VMID narrow further.
+	ListJobs(ctx context.Context, f JobFilter) ([]Job, error)
+}
+
 // CreateUserParams are the inputs to CreateUser; generated columns (id,
 // timestamps, flags defaulting false) are filled by the database.
 type CreateUserParams struct {
@@ -428,6 +470,10 @@ type ReserveOwnershipParams struct {
 // TargetID are nil for creates whose id is not yet known.
 type AuditIntent struct {
 	ActorUserID *string
+	// ActorSystem names a non-user actor ("system:scheduler") for mutations the
+	// scheduler initiates. actor_user_id stays nil; the two are mutually
+	// exclusive in practice (ADR-0018). nil for ordinary user mutations.
+	ActorSystem *string
 	TenantID    *string
 	ProjectID   *string
 	Action      string
@@ -615,6 +661,7 @@ type AuditEntry struct {
 	ID          string
 	TS          time.Time
 	ActorUserID *string
+	ActorSystem *string // "system:scheduler" for scheduler-initiated mutations (ADR-0018)
 	TenantID    *string
 	ProjectID   *string
 	Action      string
@@ -623,4 +670,56 @@ type AuditEntry struct {
 	Outcome     string
 	IP          *string
 	Detail      []byte // jsonb
+}
+
+// Job is one scheduler work item (ADR-0018). Tenant/Project/VMID identify the
+// owning resource (nil for non-resource jobs). Cron/Timezone are set only on
+// recurring jobs; one-shot jobs fire once at RunAt.
+type Job struct {
+	ID           string
+	Kind         string  // "recurring" | "one_shot"
+	Handler      string  // dispatch key -> a registered handler
+	TenantID     *string
+	ProjectID    *string
+	VMID         *int
+	Payload      []byte // jsonb
+	Cron         *string
+	Timezone     *string // IANA
+	RunAt        time.Time
+	Status       string // "scheduled" | "running" | "failed" | "succeeded" | "cancelled"
+	Attempts     int
+	MaxAttempts  int
+	LastError    *string
+	LockedAt     *time.Time
+	LockedBy     *string
+	MissedPolicy string // "catch_up" | "skip" | "run_late"
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// EnqueueJobParams are the inputs to EnqueueJob. Status defaults to 'scheduled'
+// and Attempts to 0 in the DB; MaxAttempts defaults to 5 when zero. Cron/Timezone
+// are nil for one-shot jobs; VMID/Tenant/Project are nil for non-resource jobs.
+type EnqueueJobParams struct {
+	Kind         string
+	Handler      string
+	TenantID     *string
+	ProjectID    *string
+	VMID         *int
+	Payload      []byte
+	Cron         *string
+	Timezone     *string
+	RunAt        time.Time
+	MaxAttempts  int    // 0 -> DB default (5)
+	MissedPolicy string // "" -> DB default ('catch_up')
+}
+
+// JobFilter narrows ListJobs for the admin view. TenantID scopes a tenant Owner
+// (empty = platform-admin, all tenants). Status/VMID are optional narrowing
+// filters; Limit is clamped by the caller.
+type JobFilter struct {
+	TenantID string // "" = all tenants (platform-admin)
+	Status   string // "" = any status
+	VMID     *int   // nil = any VMID
+	Limit    int
 }
