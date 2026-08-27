@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 	_ "time/tzdata" // guarantee IANA zones in the test binary regardless of the host
@@ -10,6 +11,12 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/store/storetest"
 )
+
+// counter is a race-safe call counter — the scheduler now dispatches a tick's
+// jobs concurrently, so handler-invocation counts are written from goroutines.
+type counter struct{ n atomic.Int64 }
+
+func (c *counter) get() int { return int(c.n.Load()) }
 
 // clockAt returns a fake whose clock is pinned to t, plus a pointer to advance it.
 func fakeAt(t time.Time) (*storetest.Fake, *time.Time) {
@@ -19,10 +26,10 @@ func fakeAt(t time.Time) (*storetest.Fake, *time.Time) {
 	return f, &now
 }
 
-// countingHandler returns a HandlerFunc that increments *calls and returns err.
-func countingHandler(calls *int, err error) HandlerFunc {
+// countingHandler returns a HandlerFunc that increments calls and returns err.
+func countingHandler(calls *counter, err error) HandlerFunc {
 	return func(context.Context, store.Job) error {
-		*calls++
+		calls.n.Add(1)
 		return err
 	}
 }
@@ -39,7 +46,7 @@ func newSched(f *storetest.Fake, clock *time.Time, h map[string]HandlerFunc) *Sc
 func TestTickOneShotSuccess(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 
 	vmid := 101
@@ -53,8 +60,8 @@ func TestTickOneShotSuccess(t *testing.T) {
 	if n := s.Tick(context.Background()); n != 1 {
 		t.Fatalf("Tick processed %d jobs, want 1", n)
 	}
-	if calls != 1 {
-		t.Fatalf("handler called %d times, want 1", calls)
+	if calls.get() != 1 {
+		t.Fatalf("handler called %d times, want 1", calls.get())
 	}
 	if got := f.JobStatus(job.ID); got != "succeeded" {
 		t.Fatalf("job status = %q, want succeeded", got)
@@ -64,15 +71,15 @@ func TestTickOneShotSuccess(t *testing.T) {
 	if n := s.Tick(context.Background()); n != 0 {
 		t.Fatalf("second Tick processed %d jobs, want 0", n)
 	}
-	if calls != 1 {
-		t.Fatalf("handler re-fired a terminal job (calls=%d)", calls)
+	if calls.get() != 1 {
+		t.Fatalf("handler re-fired a terminal job (calls=%d)", calls.get())
 	}
 }
 
 func TestTickNotDueIsSkipped(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 
 	vmid := 1
@@ -84,15 +91,15 @@ func TestTickNotDueIsSkipped(t *testing.T) {
 	if n := s.Tick(context.Background()); n != 0 {
 		t.Fatalf("Tick processed %d future jobs, want 0", n)
 	}
-	if calls != 0 {
-		t.Fatalf("future job fired early (calls=%d)", calls)
+	if calls.get() != 0 {
+		t.Fatalf("future job fired early (calls=%d)", calls.get())
 	}
 }
 
 func TestTickHandlerErrorRetriesThenDeadLetters(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"boom": countingHandler(&calls, errors.New("kaboom"))})
 
 	vmid := 7
@@ -113,8 +120,8 @@ func TestTickHandlerErrorRetriesThenDeadLetters(t *testing.T) {
 	// it so the second tick claims it.
 	*clock = base.Add(10 * time.Minute)
 	s.Tick(context.Background())
-	if calls != 2 {
-		t.Fatalf("handler called %d times, want 2", calls)
+	if calls.get() != 2 {
+		t.Fatalf("handler called %d times, want 2", calls.get())
 	}
 	if got := f.JobStatus(job.ID); got != "failed" {
 		t.Fatalf("after max attempts status = %q, want failed (dead-letter)", got)
@@ -125,8 +132,8 @@ func TestTickHandlerErrorRetriesThenDeadLetters(t *testing.T) {
 	if n := s.Tick(context.Background()); n != 0 {
 		t.Fatalf("dead-lettered job re-claimed (%d)", n)
 	}
-	if calls != 2 {
-		t.Fatalf("dead-lettered job re-fired (calls=%d)", calls)
+	if calls.get() != 2 {
+		t.Fatalf("dead-lettered job re-fired (calls=%d)", calls.get())
 	}
 }
 
@@ -134,7 +141,7 @@ func TestTickRecurringReschedules(t *testing.T) {
 	// 12:00 UTC; a daily 03:00 UTC job's next fire is 03:00 the following day.
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"tick": countingHandler(&calls, nil)})
 
 	cron := "0 3 * * *"
@@ -148,8 +155,8 @@ func TestTickRecurringReschedules(t *testing.T) {
 	}
 
 	s.Tick(context.Background())
-	if calls != 1 {
-		t.Fatalf("recurring handler called %d times, want 1", calls)
+	if calls.get() != 1 {
+		t.Fatalf("recurring handler called %d times, want 1", calls.get())
 	}
 	got, err := f.GetJob(context.Background(), job.ID)
 	if err != nil {
@@ -192,15 +199,15 @@ func TestMissedPolicy(t *testing.T) {
 
 	t.Run("skip abandons the occurrence", func(t *testing.T) {
 		f, clock := fakeAt(base)
-		calls := 0
+		var calls counter
 		s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 		vmid := 1
 		job, _ := f.EnqueueJob(context.Background(), store.EnqueueJobParams{
 			Kind: "one_shot", Handler: "noop", VMID: &vmid, RunAt: pastRunAt, MissedPolicy: "skip",
 		})
 		s.Tick(context.Background())
-		if calls != 0 {
-			t.Fatalf("skip: handler ran (calls=%d), want 0", calls)
+		if calls.get() != 0 {
+			t.Fatalf("skip: handler ran (calls=%d), want 0", calls.get())
 		}
 		if got := f.JobStatus(job.ID); got != "succeeded" {
 			t.Fatalf("skip: status = %q, want succeeded (settled without running)", got)
@@ -209,7 +216,7 @@ func TestMissedPolicy(t *testing.T) {
 
 	t.Run("run_late still executes", func(t *testing.T) {
 		f, clock := fakeAt(base)
-		calls := 0
+		var calls counter
 		s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 		vmid := 2
 		if _, err := f.EnqueueJob(context.Background(), store.EnqueueJobParams{
@@ -218,8 +225,8 @@ func TestMissedPolicy(t *testing.T) {
 			t.Fatalf("EnqueueJob: %v", err)
 		}
 		s.Tick(context.Background())
-		if calls != 1 {
-			t.Fatalf("run_late: handler called %d times, want 1", calls)
+		if calls.get() != 1 {
+			t.Fatalf("run_late: handler called %d times, want 1", calls.get())
 		}
 	})
 }
@@ -227,7 +234,7 @@ func TestMissedPolicy(t *testing.T) {
 func TestTickReclaimsStaleRunning(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 
 	vmid := 9
@@ -249,8 +256,8 @@ func TestTickReclaimsStaleRunning(t *testing.T) {
 	// Advance past the stale-after window; the next tick reclaims and processes it.
 	*clock = base.Add(defaultStaleAfter + time.Minute)
 	s.Tick(context.Background())
-	if calls != 1 {
-		t.Fatalf("stale job not reclaimed+run (calls=%d, want 1)", calls)
+	if calls.get() != 1 {
+		t.Fatalf("stale job not reclaimed+run (calls=%d, want 1)", calls.get())
 	}
 	if got := f.JobStatus(job.ID); got != "succeeded" {
 		t.Fatalf("reclaimed job status = %q, want succeeded", got)
@@ -260,7 +267,7 @@ func TestTickReclaimsStaleRunning(t *testing.T) {
 func TestTickCancelledJobNeverFires(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 
 	vmid := 3
@@ -276,15 +283,98 @@ func TestTickCancelledJobNeverFires(t *testing.T) {
 	if n := s.Tick(context.Background()); n != 0 {
 		t.Fatalf("cancelled job was claimed (%d)", n)
 	}
-	if calls != 0 {
-		t.Fatalf("cancelled job fired (calls=%d)", calls)
+	if calls.get() != 0 {
+		t.Fatalf("cancelled job fired (calls=%d)", calls.get())
+	}
+}
+
+// TestCancelWhileRunningIsNotResurrected guards the race the code review flagged:
+// a job cancelled while its handler is in flight (owning guest destroyed) must
+// not be flipped back to succeeded/scheduled by the settle path.
+func TestCancelWhileRunningIsNotResurrected(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+
+	t.Run("CompleteJob no-ops on a cancelled one-shot", func(t *testing.T) {
+		f, _ := fakeAt(base)
+		vmid := 55
+		job, _ := f.EnqueueJob(ctx, store.EnqueueJobParams{Kind: "one_shot", Handler: "noop", VMID: &vmid, RunAt: base})
+		if _, err := f.ClaimDueJobs(ctx, base, 10, "inst"); err != nil { // -> running
+			t.Fatalf("ClaimDueJobs: %v", err)
+		}
+		if _, err := f.CancelJobsForVMID(ctx, vmid); err != nil { // -> cancelled mid-run
+			t.Fatalf("CancelJobsForVMID: %v", err)
+		}
+		if err := f.CompleteJob(ctx, job.ID); err != nil {
+			t.Fatalf("CompleteJob: %v", err)
+		}
+		if got := f.JobStatus(job.ID); got != "cancelled" {
+			t.Fatalf("CompleteJob resurrected a cancelled job to %q", got)
+		}
+	})
+
+	t.Run("RescheduleRecurring no-ops on a cancelled recurring", func(t *testing.T) {
+		f, _ := fakeAt(base)
+		cron, tz := "0 3 * * *", "UTC"
+		vmid := 56
+		job, _ := f.EnqueueJob(ctx, store.EnqueueJobParams{Kind: "recurring", Handler: "tick", VMID: &vmid, RunAt: base, Cron: &cron, Timezone: &tz})
+		if _, err := f.ClaimDueJobs(ctx, base, 10, "inst"); err != nil {
+			t.Fatalf("ClaimDueJobs: %v", err)
+		}
+		if _, err := f.CancelJobsForVMID(ctx, vmid); err != nil {
+			t.Fatalf("CancelJobsForVMID: %v", err)
+		}
+		if err := f.RescheduleRecurring(ctx, job.ID, base.Add(24*time.Hour)); err != nil {
+			t.Fatalf("RescheduleRecurring: %v", err)
+		}
+		if got := f.JobStatus(job.ID); got != "cancelled" {
+			t.Fatalf("RescheduleRecurring re-armed a cancelled job to %q", got)
+		}
+	})
+
+	t.Run("FailJob no-ops on a cancelled job", func(t *testing.T) {
+		f, _ := fakeAt(base)
+		vmid := 57
+		job, _ := f.EnqueueJob(ctx, store.EnqueueJobParams{Kind: "one_shot", Handler: "boom", VMID: &vmid, RunAt: base})
+		if _, err := f.ClaimDueJobs(ctx, base, 10, "inst"); err != nil {
+			t.Fatalf("ClaimDueJobs: %v", err)
+		}
+		if _, err := f.CancelJobsForVMID(ctx, vmid); err != nil {
+			t.Fatalf("CancelJobsForVMID: %v", err)
+		}
+		dead, err := f.FailJob(ctx, job.ID, "boom", base.Add(time.Minute))
+		if err != nil || dead {
+			t.Fatalf("FailJob on cancelled = (%v, %v), want (false, nil)", dead, err)
+		}
+		if got := f.JobStatus(job.ID); got != "cancelled" {
+			t.Fatalf("FailJob changed a cancelled job to %q", got)
+		}
+	})
+}
+
+// TestHandlerPanicDoesNotCrash proves a panicking handler is converted to a
+// normal failure (retry→dead-letter) instead of taking down the process.
+func TestHandlerPanicDoesNotCrash(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	f, clock := fakeAt(base)
+	s := newSched(f, clock, map[string]HandlerFunc{
+		"panic": func(context.Context, store.Job) error { panic("boom in handler") },
+	})
+	vmid := 88
+	job, _ := f.EnqueueJob(context.Background(), store.EnqueueJobParams{
+		Kind: "one_shot", Handler: "panic", VMID: &vmid, RunAt: base, MaxAttempts: 1,
+	})
+	// Must not panic out of Tick.
+	s.Tick(context.Background())
+	if got := f.JobStatus(job.ID); got != "failed" {
+		t.Fatalf("panicking handler job status = %q, want failed (dead-lettered)", got)
 	}
 }
 
 func TestClaimLimitBounded(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	f, clock := fakeAt(base)
-	calls := 0
+	var calls counter
 	s := newSched(f, clock, map[string]HandlerFunc{"noop": countingHandler(&calls, nil)})
 	s.ClaimLimit = 2
 

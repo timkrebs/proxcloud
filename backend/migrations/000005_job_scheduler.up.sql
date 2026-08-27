@@ -43,7 +43,15 @@ CREATE TABLE jobs (
                     CHECK (missed_policy IN ('catch_up', 'skip', 'run_late')),
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
-    FOREIGN KEY (tenant_id, project_id) REFERENCES projects (tenant_id, id)
+    FOREIGN KEY (tenant_id, project_id) REFERENCES projects (tenant_id, id),
+    -- Owner columns are all-or-nothing: a resource job sets tenant+project+vmid,
+    -- a non-resource job sets none. This forbids a partially-owned row (e.g. vmid
+    -- set but tenant_id NULL) that would slip past the composite FK's MATCH SIMPLE
+    -- semantics (a NULL in the FK tuple disables the check).
+    CONSTRAINT jobs_owner_all_or_none CHECK (
+        (tenant_id IS NULL) = (project_id IS NULL)
+        AND (project_id IS NULL) = (vmid IS NULL)
+    )
 );
 
 -- The claim hot path: due, still-schedulable jobs, oldest first.

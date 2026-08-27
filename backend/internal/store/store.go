@@ -328,9 +328,10 @@ type JobStore interface {
 	EnqueueJob(ctx context.Context, p EnqueueJobParams) (*Job, error)
 	// ClaimDueJobs atomically claims up to limit jobs whose run_at <= now and
 	// status='scheduled', flipping them to 'running' with locked_at=now and
-	// locked_by=owner. It runs its own WithTx with SELECT … FOR UPDATE SKIP
-	// LOCKED, so concurrent instances claim disjoint sets (no double-fire).
-	// Returns the claimed rows (already 'running').
+	// locked_by=owner. It is a single UPDATE whose subquery uses SELECT … FOR
+	// UPDATE SKIP LOCKED (atomic on its own, no explicit WithTx needed), so
+	// concurrent instances claim disjoint sets (no double-fire). Returns the
+	// claimed rows (already 'running').
 	ClaimDueJobs(ctx context.Context, now time.Time, limit int, lockedBy string) ([]Job, error)
 	// ReclaimStaleRunning resets jobs stuck in 'running' with locked_at strictly
 	// before olderThan (a backend that crashed mid-handler) back to 'scheduled'

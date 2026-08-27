@@ -1441,12 +1441,14 @@ func (f *Fake) ReclaimStaleRunning(_ context.Context, olderThan time.Time) (int,
 	return n, nil
 }
 
+// CompleteJob no-ops unless the job is still 'running' (mirrors the Pg
+// `status='running'` guard): a job cancelled mid-run is never resurrected.
 func (f *Fake) CompleteJob(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
-	if !ok {
-		return store.ErrNotFound
+	if !ok || j.Status != "running" {
+		return nil // missing or raced to cancelled/terminal — no-op
 	}
 	j.Status = "succeeded"
 	j.LockedAt = nil
@@ -1459,8 +1461,8 @@ func (f *Fake) RescheduleRecurring(_ context.Context, id string, nextRunAt time.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, ok := f.jobs[id]
-	if !ok {
-		return store.ErrNotFound
+	if !ok || j.Status != "running" {
+		return nil // guarded: never re-arm a cancelled/terminal job
 	}
 	j.Status = "scheduled"
 	j.RunAt = nextRunAt
@@ -1479,8 +1481,8 @@ func (f *Fake) FailJob(_ context.Context, id, lastErr string, retryAt time.Time)
 		return false, err
 	}
 	j, ok := f.jobs[id]
-	if !ok {
-		return false, store.ErrNotFound
+	if !ok || j.Status != "running" {
+		return false, nil // guarded: raced to cancelled/terminal — no-op
 	}
 	j.Attempts++
 	le := lastErr

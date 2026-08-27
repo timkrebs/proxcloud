@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -25,6 +26,7 @@ import (
 // exceed the longest auto-shutdown/TTL grace window (default 120s) with margin.
 const (
 	defaultClaimLimit     = 20
+	defaultMaxConcurrent  = 8
 	defaultHandlerTimeout = 10 * time.Minute
 	defaultStaleAfter     = 15 * time.Minute
 	defaultBaseBackoff    = 30 * time.Second
@@ -55,6 +57,7 @@ type Scheduler struct {
 
 	// Overridable tuning (zero → the defaults above).
 	ClaimLimit      int
+	MaxConcurrent   int // bound on jobs dispatched concurrently within one tick
 	HandlerTimeout  time.Duration
 	StaleAfter      time.Duration
 	BaseBackoff     time.Duration
@@ -96,6 +99,13 @@ func (s *Scheduler) claimLimit() int {
 		return s.ClaimLimit
 	}
 	return defaultClaimLimit
+}
+
+func (s *Scheduler) maxConcurrent() int {
+	if s.MaxConcurrent > 0 {
+		return s.MaxConcurrent
+	}
+	return defaultMaxConcurrent
 }
 
 func (s *Scheduler) handlerTimeout() time.Duration {
@@ -168,9 +178,22 @@ func (s *Scheduler) Tick(ctx context.Context) int {
 		s.logger().Error("scheduler: claim due jobs", "err", err)
 		return 0
 	}
+	// Dispatch concurrently (bounded) so one slow/hung handler doesn't block a
+	// time-sensitive job (an auto-shutdown) behind it in the same tick. The tick
+	// still waits for all in-flight handlers so the graceful-drain join is honest.
+	sem := make(chan struct{}, s.maxConcurrent())
+	var wg sync.WaitGroup
 	for i := range claimed {
-		s.process(ctx, claimed[i], now)
+		job := claimed[i]
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			s.process(ctx, job, now)
+		}()
 	}
+	wg.Wait()
 	if len(claimed) > 0 {
 		s.logger().Info("scheduler: processed jobs", "count", len(claimed))
 	}
@@ -201,13 +224,14 @@ func (s *Scheduler) process(ctx context.Context, job store.Job, now time.Time) {
 	}
 
 	hctx, cancel := context.WithTimeout(ctx, s.handlerTimeout())
-	err := handler(hctx, job)
+	err, panicked := runHandler(handler, hctx, job, log)
 	cancel()
 	if err != nil {
 		// Shutdown cancellation is not a handler failure: leave the row 'running'
 		// so it is reclaimed and retried on the next boot (at-least-once), rather
-		// than burning a retry attempt on a drain.
-		if ctx.Err() != nil {
+		// than burning a retry attempt on a drain. A panic is always a real failure
+		// (counts toward dead-letter), never treated as a drain.
+		if !panicked && ctx.Err() != nil {
 			log.Warn("scheduler: tick cancelled mid-handler; job left running for re-claim")
 			return
 		}
@@ -215,6 +239,21 @@ func (s *Scheduler) process(ctx context.Context, job store.Job, now time.Time) {
 		return
 	}
 	s.settleSuccess(ctx, job, now, log)
+}
+
+// runHandler invokes a handler and converts a panic into a normal error so one
+// bad handler retries/dead-letters instead of crashing the whole backend
+// process (the scheduler runs in a background goroutine). panicked reports
+// whether a panic was recovered, so the caller never mistakes it for a drain.
+func runHandler(handler HandlerFunc, ctx context.Context, job store.Job, log *slog.Logger) (err error, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			err = fmt.Errorf("handler panicked: %v", r)
+			log.Error("scheduler: handler panic recovered", "panic", fmt.Sprint(r))
+		}
+	}()
+	return handler(ctx, job), false
 }
 
 // settleSuccess marks a one-shot job succeeded, or reschedules a recurring job

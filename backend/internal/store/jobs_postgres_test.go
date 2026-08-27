@@ -21,6 +21,23 @@ func resetJobsTables(t *testing.T, s *PgStore) {
 
 func vptr(v int) *int { return &v }
 
+// defaultOwner returns the migration-seeded default tenant + project ids as the
+// pointers EnqueueJobParams wants. Resource jobs must set tenant+project+vmid
+// together (the jobs_owner_all_or_none CHECK), so job tests own a real project.
+func defaultOwner(t *testing.T, s *PgStore) (*string, *string) {
+	t.Helper()
+	ctx := context.Background()
+	ten, err := s.GetTenantBySlug(ctx, "default")
+	if err != nil {
+		t.Fatalf("default tenant: %v", err)
+	}
+	proj, err := s.GetProjectByPoolID(ctx, "pc-default-default")
+	if err != nil {
+		t.Fatalf("default project: %v", err)
+	}
+	return &ten.ID, &proj.ID
+}
+
 func TestJobLifecycleEnqueueClaimComplete(t *testing.T) {
 	s := requireStore(t)
 	if _, err := s.RunMigrations(); err != nil {
@@ -30,8 +47,9 @@ func TestJobLifecycleEnqueueClaimComplete(t *testing.T) {
 	t.Cleanup(func() { resetJobsTables(t, s) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
 
-	job, err := s.EnqueueJob(ctx, EnqueueJobParams{
+	job, err := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid,
 		Kind: "one_shot", Handler: "ttl.expire", VMID: vptr(101),
 		Payload: []byte(`{"reason":"test"}`), RunAt: now,
 	})
@@ -88,10 +106,11 @@ func TestJobClaimSkipLockedNoDoubleFire(t *testing.T) {
 	t.Cleanup(func() { resetJobsTables(t, s) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
 
 	const numJobs = 60
 	for i := 0; i < numJobs; i++ {
-		if _, err := s.EnqueueJob(ctx, EnqueueJobParams{
+		if _, err := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid,
 			Kind: "one_shot", Handler: "autoshutdown.stop", VMID: vptr(1000 + i), RunAt: now,
 		}); err != nil {
 			t.Fatalf("EnqueueJob %d: %v", i, err)
@@ -160,15 +179,21 @@ func TestJobFailRetryThenDeadLetter(t *testing.T) {
 	t.Cleanup(func() { resetJobsTables(t, s) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
 
-	job, err := s.EnqueueJob(ctx, EnqueueJobParams{
+	job, err := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid,
 		Kind: "one_shot", Handler: "boom", VMID: vptr(202), RunAt: now, MaxAttempts: 2,
 	})
 	if err != nil {
 		t.Fatalf("EnqueueJob: %v", err)
 	}
 
+	// FailJob only acts on a claimed (running) job — mirror the real flow: claim,
+	// fail (retry), claim again at the retry time, fail again (dead-letter).
 	retryAt := now.Add(30 * time.Second)
+	if _, err := s.ClaimDueJobs(ctx, now, 10, "inst"); err != nil {
+		t.Fatalf("ClaimDueJobs 1: %v", err)
+	}
 	dead, err := s.FailJob(ctx, job.ID, "first failure", retryAt)
 	if err != nil {
 		t.Fatalf("FailJob 1: %v", err)
@@ -181,6 +206,9 @@ func TestJobFailRetryThenDeadLetter(t *testing.T) {
 		t.Fatalf("after 1st failure = %+v, want scheduled/attempts=1/retryAt", got)
 	}
 
+	if _, err := s.ClaimDueJobs(ctx, retryAt, 10, "inst"); err != nil {
+		t.Fatalf("ClaimDueJobs 2: %v", err)
+	}
 	dead, err = s.FailJob(ctx, job.ID, "second failure", retryAt.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("FailJob 2: %v", err)
@@ -203,11 +231,12 @@ func TestJobCancelForVMID(t *testing.T) {
 	t.Cleanup(func() { resetJobsTables(t, s) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
 
 	// Two jobs for vmid 303 (one scheduled, one running), one for 304.
-	j1, _ := s.EnqueueJob(ctx, EnqueueJobParams{Kind: "one_shot", Handler: "ttl.warn", VMID: vptr(303), RunAt: now})
-	j2, _ := s.EnqueueJob(ctx, EnqueueJobParams{Kind: "one_shot", Handler: "ttl.expire", VMID: vptr(303), RunAt: now.Add(time.Hour)})
-	other, _ := s.EnqueueJob(ctx, EnqueueJobParams{Kind: "one_shot", Handler: "ttl.expire", VMID: vptr(304), RunAt: now})
+	j1, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "ttl.warn", VMID: vptr(303), RunAt: now})
+	j2, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "ttl.expire", VMID: vptr(303), RunAt: now.Add(time.Hour)})
+	other, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "ttl.expire", VMID: vptr(304), RunAt: now})
 	if _, err := s.ClaimDueJobs(ctx, now, 10, "inst"); err != nil { // moves j1 → running
 		t.Fatalf("ClaimDueJobs: %v", err)
 	}
@@ -234,6 +263,68 @@ func TestJobCancelForVMID(t *testing.T) {
 	}
 }
 
+// TestJobSettleGuardedByRunningStatus proves the code-review race fix: a job
+// cancelled while its handler is in flight must not be resurrected by the settle
+// path (Complete/Reschedule/Fail all guard on status='running').
+func TestJobSettleGuardedByRunningStatus(t *testing.T) {
+	s := requireStore(t)
+	if _, err := s.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	resetJobsTables(t, s)
+	t.Cleanup(func() { resetJobsTables(t, s) })
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
+
+	// one-shot: claim -> cancel -> Complete must be a no-op.
+	j1, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "noop", VMID: vptr(701), RunAt: now})
+	if _, err := s.ClaimDueJobs(ctx, now, 10, "inst"); err != nil {
+		t.Fatalf("ClaimDueJobs: %v", err)
+	}
+	if _, err := s.CancelJobsForVMID(ctx, 701); err != nil {
+		t.Fatalf("CancelJobsForVMID: %v", err)
+	}
+	if err := s.CompleteJob(ctx, j1.ID); err != nil {
+		t.Fatalf("CompleteJob: %v", err)
+	}
+	if got, _ := s.GetJob(ctx, j1.ID); got.Status != "cancelled" {
+		t.Fatalf("CompleteJob resurrected a cancelled job to %q", got.Status)
+	}
+
+	// recurring: claim -> cancel -> Reschedule must be a no-op.
+	cron, tz := "0 3 * * *", "UTC"
+	j2, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "recurring", Handler: "tick", VMID: vptr(702), RunAt: now, Cron: &cron, Timezone: &tz})
+	if _, err := s.ClaimDueJobs(ctx, now, 10, "inst"); err != nil {
+		t.Fatalf("ClaimDueJobs: %v", err)
+	}
+	if _, err := s.CancelJobsForVMID(ctx, 702); err != nil {
+		t.Fatalf("CancelJobsForVMID: %v", err)
+	}
+	if err := s.RescheduleRecurring(ctx, j2.ID, now.Add(24*time.Hour)); err != nil {
+		t.Fatalf("RescheduleRecurring: %v", err)
+	}
+	if got, _ := s.GetJob(ctx, j2.ID); got.Status != "cancelled" {
+		t.Fatalf("RescheduleRecurring re-armed a cancelled job to %q", got.Status)
+	}
+
+	// FailJob on a cancelled job is a no-op returning (false, nil).
+	j3, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "boom", VMID: vptr(703), RunAt: now})
+	if _, err := s.ClaimDueJobs(ctx, now, 10, "inst"); err != nil {
+		t.Fatalf("ClaimDueJobs: %v", err)
+	}
+	if _, err := s.CancelJobsForVMID(ctx, 703); err != nil {
+		t.Fatalf("CancelJobsForVMID: %v", err)
+	}
+	dead, err := s.FailJob(ctx, j3.ID, "boom", now.Add(time.Minute))
+	if err != nil || dead {
+		t.Fatalf("FailJob on cancelled = (%v, %v), want (false, nil)", dead, err)
+	}
+	if got, _ := s.GetJob(ctx, j3.ID); got.Status != "cancelled" {
+		t.Fatalf("FailJob changed a cancelled job to %q", got.Status)
+	}
+}
+
 func TestJobReclaimStaleRunning(t *testing.T) {
 	s := requireStore(t)
 	if _, err := s.RunMigrations(); err != nil {
@@ -243,8 +334,9 @@ func TestJobReclaimStaleRunning(t *testing.T) {
 	t.Cleanup(func() { resetJobsTables(t, s) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
 
-	job, _ := s.EnqueueJob(ctx, EnqueueJobParams{Kind: "one_shot", Handler: "noop", VMID: vptr(404), RunAt: now.Add(-time.Hour)})
+	job, _ := s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "noop", VMID: vptr(404), RunAt: now.Add(-time.Hour)})
 	if _, err := s.ClaimDueJobs(ctx, now, 10, "dead-instance"); err != nil {
 		t.Fatalf("ClaimDueJobs: %v", err)
 	}
@@ -279,9 +371,10 @@ func TestListJobsFilters(t *testing.T) {
 	t.Cleanup(func() { resetJobsTables(t, s) })
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
+	tid, pid := defaultOwner(t, s)
 
-	s.EnqueueJob(ctx, EnqueueJobParams{Kind: "one_shot", Handler: "a", VMID: vptr(501), RunAt: now})
-	s.EnqueueJob(ctx, EnqueueJobParams{Kind: "one_shot", Handler: "b", VMID: vptr(502), RunAt: now.Add(time.Hour)})
+	s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "a", VMID: vptr(501), RunAt: now})
+	s.EnqueueJob(ctx, EnqueueJobParams{TenantID: tid, ProjectID: pid, Kind: "one_shot", Handler: "b", VMID: vptr(502), RunAt: now.Add(time.Hour)})
 
 	all, err := s.ListJobs(ctx, JobFilter{})
 	if err != nil {

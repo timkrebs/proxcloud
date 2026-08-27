@@ -108,34 +108,31 @@ func (s *PgStore) ReclaimStaleRunning(ctx context.Context, olderThan time.Time) 
 	return int(tag.RowsAffected()), nil
 }
 
-// CompleteJob implements JobStore: mark a one-shot job succeeded (terminal).
+// CompleteJob implements JobStore: mark a one-shot job succeeded (terminal). The
+// `status = 'running'` guard makes it a no-op if the job was cancelled while its
+// handler was in flight (guest destroyed mid-run) — a cancelled job is never
+// resurrected to 'succeeded'. 0 rows affected is that expected race, not an error.
 func (s *PgStore) CompleteJob(ctx context.Context, id string) error {
 	const q = `UPDATE jobs SET status = 'succeeded', locked_at = NULL, locked_by = NULL, updated_at = now()
-	           WHERE id = $1::uuid`
-	tag, err := s.q.Exec(ctx, q, id)
-	if err != nil {
+	           WHERE id = $1::uuid AND status = 'running'`
+	if _, err := s.q.Exec(ctx, q, id); err != nil {
 		return fmt.Errorf("store: complete job: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
 	}
 	return nil
 }
 
 // RescheduleRecurring implements JobStore: return a claimed recurring job to
 // 'scheduled' at its next cron boundary and clear the claim + retry counter (a
-// successful run resets attempts).
+// successful run resets attempts). The `status = 'running'` guard prevents
+// re-arming a job that was cancelled mid-run (its owner is gone); 0 rows is that
+// expected race, not an error.
 func (s *PgStore) RescheduleRecurring(ctx context.Context, id string, nextRunAt time.Time) error {
 	const q = `UPDATE jobs
 	           SET status = 'scheduled', run_at = $2, attempts = 0, last_error = NULL,
 	               locked_at = NULL, locked_by = NULL, updated_at = now()
-	           WHERE id = $1::uuid`
-	tag, err := s.q.Exec(ctx, q, id, nextRunAt)
-	if err != nil {
+	           WHERE id = $1::uuid AND status = 'running'`
+	if _, err := s.q.Exec(ctx, q, id, nextRunAt); err != nil {
 		return fmt.Errorf("store: reschedule recurring: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
 	}
 	return nil
 }
@@ -143,7 +140,9 @@ func (s *PgStore) RescheduleRecurring(ctx context.Context, id string, nextRunAt 
 // FailJob implements JobStore: record a handler error and either reschedule for
 // retry (attempts < max_attempts) or dead-letter to 'failed'. The branch is
 // decided in SQL from the incremented attempts so the read-modify-write is
-// atomic; deadLettered reports which branch ran.
+// atomic; deadLettered reports which branch ran. The `status = 'running'` guard
+// makes a cancel-mid-run a no-op (returns false, nil) rather than resurrecting a
+// cancelled job into 'scheduled'/'failed'.
 func (s *PgStore) FailJob(ctx context.Context, id, lastErr string, retryAt time.Time) (bool, error) {
 	const q = `UPDATE jobs
 	           SET attempts   = attempts + 1,
@@ -153,12 +152,12 @@ func (s *PgStore) FailJob(ctx context.Context, id, lastErr string, retryAt time.
 	               locked_at  = NULL,
 	               locked_by  = NULL,
 	               updated_at = now()
-	           WHERE id = $1::uuid
+	           WHERE id = $1::uuid AND status = 'running'
 	           RETURNING status`
 	var status string
 	err := s.q.QueryRow(ctx, q, id, lastErr, retryAt).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrNotFound
+		return false, nil // raced to cancelled/terminal — no-op, not an error
 	}
 	if err != nil {
 		return false, fmt.Errorf("store: fail job: %w", err)
