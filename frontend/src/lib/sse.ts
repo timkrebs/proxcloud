@@ -5,7 +5,12 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import type { MetricsEvent, ScheduleWarningEvent, TaskEvent } from "@/lib/api/generated/types";
+import type {
+  MetricsEvent,
+  ScheduleWarningEvent,
+  TaskEvent,
+  TtlWarningEvent,
+} from "@/lib/api/generated/types";
 import { qk } from "@/lib/api/queryKeys";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { pushToast } from "@/lib/stores/toastStore";
@@ -64,6 +69,27 @@ export function useEvents() {
       }
       pushToast({ kind: "info", title: data.title, desc: data.detail });
       qc.invalidateQueries({ queryKey: ["schedule"] });
+      qc.invalidateQueries({ queryKey: ["resources"] });
+    });
+
+    // TTL heads-up (T-24h / T-1h): the backend scopes this to the owning tenant,
+    // so it only reaches users who can act on it. Toast an extend-oriented
+    // message and refresh the ttl/resources caches (a fresh expiry).
+    es.addEventListener("ttl_warning", (ev) => {
+      let data: TtlWarningEvent;
+      try {
+        data = JSON.parse((ev as MessageEvent).data) as TtlWarningEvent;
+      } catch {
+        return;
+      }
+      const verb = data.action === "delete" ? "be deleted" : "stop";
+      const when = data.which === "1h" ? "within an hour" : "within 24 hours";
+      pushToast({
+        kind: "info",
+        title: `Guest ${data.vmid} expires soon`,
+        desc: `It will ${verb} ${when} — extend from its Lifecycle settings.`,
+      });
+      qc.invalidateQueries({ queryKey: ["ttl"] });
       qc.invalidateQueries({ queryKey: ["resources"] });
     });
 

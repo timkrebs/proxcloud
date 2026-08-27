@@ -73,4 +73,11 @@ export const qk = {
   // id for project scope.
   schedule: (scope: "resource" | "project", id: string, tenantId?: string) =>
     ["schedule", tenantId, scope, id] as const,
+
+  // ── TTL / ephemeral resources (ADR-0020) ─────────────────────────────────
+  // Leading "ttl" segment so SSE ttl_warning can prefix-invalidate every entry.
+  // scope: "guest" (id = "{node}/{type}/{vmid}"), "policy" (id = project id),
+  // "list" (id = project id, the expiring-soon view).
+  ttl: (scope: "guest" | "policy" | "list", id: string, tenantId?: string) =>
+    ["ttl", tenantId, scope, id] as const,
 };

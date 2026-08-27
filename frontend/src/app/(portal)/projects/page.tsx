@@ -10,6 +10,7 @@ import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
 import { QuotaBars, QuotaBarsCard, allUnlimited } from "@/components/quota/QuotaBars";
 import { QuotaEditorFlyout } from "@/components/quota/QuotaEditorFlyout";
 import { ProjectScheduleFlyout } from "@/components/schedule/ProjectScheduleFlyout";
+import { ProjectTtlSection } from "@/components/ttl/ProjectTtlPanel";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -408,6 +409,8 @@ function ProjectQuotaPanel({ project, canManage }: { project: Project; canManage
       ) : null}
 
       <ProjectScheduleSection project={project} canManage={canManage} />
+
+      <ProjectTtlSection project={project} canManage={canManage} />
     </div>
   );
 }

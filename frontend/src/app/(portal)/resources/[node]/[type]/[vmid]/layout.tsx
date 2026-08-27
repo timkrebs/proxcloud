@@ -41,6 +41,7 @@ const MENU: { title?: string; items: MenuItem[] }[] = [
       { label: "Snapshots", icon: "camera", seg: "snapshots" },
       { label: "Size", icon: "resize", seg: "size" },
       { label: "Schedule", icon: "clock", seg: "schedule" },
+      { label: "Lifecycle", icon: "bolt", seg: "ttl" },
     ],
   },
   {

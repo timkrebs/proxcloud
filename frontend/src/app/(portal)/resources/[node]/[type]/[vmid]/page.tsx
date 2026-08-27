@@ -10,8 +10,10 @@ import { Sparkline } from "@/components/ui/Sparkline";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi } from "@/components/ui/icons";
 import { ScheduleBadge } from "@/components/schedule/ScheduleBadge";
+import { TtlBadge } from "@/components/ttl/TtlBadge";
 import { useGuest, useGuestInterfaces, useGuestMetrics } from "@/lib/api/guestQueries";
 import { useResourceSchedule } from "@/lib/api/scheduleQueries";
+import { useGuestTtl } from "@/lib/api/ttlQueries";
 import { useTasks } from "@/lib/api/queries";
 import { formatBytes, formatBytesPair, formatPct, formatRate, formatUptime, relativeTime } from "@/lib/format";
 import { statusLabel } from "@/lib/status";
@@ -47,6 +49,7 @@ export default function OverviewPage() {
   const metrics = useGuestMetrics(g);
   const interfaces = useGuestInterfaces(g, guest.data?.status === "running");
   const schedule = useResourceSchedule(g);
+  const ttl = useGuestTtl(g);
   const tasks = useTasks({ vmid: g.vmid });
   const [essOpen, setEssOpen] = useState(true);
 
@@ -151,6 +154,21 @@ export default function OverviewPage() {
                     <ScheduleBadge schedule={schedule.data} />
                   ) : (
                     <span className="text-ink-2">None</span>
+                  )
+                }
+              />
+              {/* TODO(backend): expose expiredAt on GuestDetail so this row (and
+                  the resources-list rows) can show an authoritative expiry
+                  without a second per-guest TTL fetch. */}
+              <EssRow
+                k="Lifecycle"
+                v={
+                  ttl.isPending ? (
+                    "…"
+                  ) : ttl.data ? (
+                    <TtlBadge ttl={ttl.data} />
+                  ) : (
+                    <span className="text-ink-2">Permanent</span>
                   )
                 }
               />
