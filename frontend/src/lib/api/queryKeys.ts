@@ -66,4 +66,11 @@ export const qk = {
   adminTenantQuota: (tenantId?: string) => ["adminTenantQuota", tenantId] as const,
   activity: (tenantId?: string, filters: ActivityFilters = {}) =>
     ["activity", tenantId, filters] as const,
+
+  // ── Auto-shutdown schedules (ADR-0019) ───────────────────────────────────
+  // Leading "schedule" segment so SSE schedule_warning can prefix-invalidate
+  // every entry; `id` is "{node}/{type}/{vmid}" for resource scope, the project
+  // id for project scope.
+  schedule: (scope: "resource" | "project", id: string, tenantId?: string) =>
+    ["schedule", tenantId, scope, id] as const,
 };

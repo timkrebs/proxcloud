@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatBytes,
   formatBytesPair,
+  formatCountdown,
   formatMoney,
   formatPct,
   formatRate,
@@ -55,6 +56,22 @@ describe("formatUptime", () => {
   ];
   it.each(cases)("%d → %s", (sec, want) => {
     expect(formatUptime(sec)).toBe(want);
+  });
+});
+
+describe("formatCountdown", () => {
+  const now = new Date("2026-08-27T12:00:00Z");
+  const at = (ms: number) => new Date(now.getTime() + ms).toISOString();
+  it("counts forward at formatUptime's grain", () => {
+    expect(formatCountdown(at(0), now)).toBe("now");
+    expect(formatCountdown(at(-60_000), now)).toBe("now");
+    expect(formatCountdown(at(30_000), now)).toBe("in <1m");
+    expect(formatCountdown(at(3 * 60_000), now)).toBe("in 3m");
+    expect(formatCountdown(at((2 * 3600 + 14 * 60) * 1000), now)).toBe("in 2h 14m");
+    expect(formatCountdown(at((3 * 86400 + 4 * 3600) * 1000), now)).toBe("in 3d 4h");
+  });
+  it("returns — for an unparseable timestamp", () => {
+    expect(formatCountdown("not-a-date", now)).toBe("—");
   });
 });
 

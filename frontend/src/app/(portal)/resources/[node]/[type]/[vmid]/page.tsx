@@ -9,7 +9,9 @@ import { Card } from "@/components/ui/Card";
 import { Sparkline } from "@/components/ui/Sparkline";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi } from "@/components/ui/icons";
+import { ScheduleBadge } from "@/components/schedule/ScheduleBadge";
 import { useGuest, useGuestInterfaces, useGuestMetrics } from "@/lib/api/guestQueries";
+import { useResourceSchedule } from "@/lib/api/scheduleQueries";
 import { useTasks } from "@/lib/api/queries";
 import { formatBytes, formatBytesPair, formatPct, formatRate, formatUptime, relativeTime } from "@/lib/format";
 import { statusLabel } from "@/lib/status";
@@ -44,6 +46,7 @@ export default function OverviewPage() {
   const guest = useGuest(g);
   const metrics = useGuestMetrics(g);
   const interfaces = useGuestInterfaces(g, guest.data?.status === "running");
+  const schedule = useResourceSchedule(g);
   const tasks = useTasks({ vmid: g.vmid });
   const [essOpen, setEssOpen] = useState(true);
 
@@ -139,6 +142,18 @@ export default function OverviewPage() {
               <EssRow k="OS type" v={d.osType || "—"} />
               <EssRow k="Boot disk" v={d.bootDisk || (d.type === "lxc" ? "rootfs" : "—")} />
               <EssRow k="Start on boot" v={d.onBoot ? "Yes" : "No"} />
+              <EssRow
+                k="Auto-shutdown"
+                v={
+                  schedule.isPending ? (
+                    "…"
+                  ) : schedule.data ? (
+                    <ScheduleBadge schedule={schedule.data} />
+                  ) : (
+                    <span className="text-ink-2">None</span>
+                  )
+                }
+              />
               <EssRow
                 k="Tags"
                 v={

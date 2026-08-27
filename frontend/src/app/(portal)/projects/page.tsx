@@ -9,6 +9,7 @@ import Link from "next/link";
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
 import { QuotaBars, QuotaBarsCard, allUnlimited } from "@/components/quota/QuotaBars";
 import { QuotaEditorFlyout } from "@/components/quota/QuotaEditorFlyout";
+import { ProjectScheduleFlyout } from "@/components/schedule/ProjectScheduleFlyout";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -25,9 +26,11 @@ import {
   useTenantQuota,
 } from "@/lib/api/quota";
 import { useMe, useResources } from "@/lib/api/queries";
+import { useProjectSchedule } from "@/lib/api/scheduleQueries";
 import { useCreateProject, useDeleteProject, useProjects, useRenameProject } from "@/lib/api/tenant";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { relativeTime } from "@/lib/format";
+import { scheduleSummary } from "@/lib/schedule";
 
 /** Client-side preview only — the backend derives and collision-suffixes the real slug. */
 function slugify(name: string): string {
@@ -315,6 +318,46 @@ function ProjectQuotaEditor({
   );
 }
 
+/** Expanded-row: the project's auto-shutdown summary + Owner "Edit schedule". */
+function ProjectScheduleSection({ project, canManage }: { project: Project; canManage: boolean }) {
+  const sched = useProjectSchedule(project.id);
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="mt-4 flex items-start justify-between gap-4 border-t border-line pt-4">
+      <div className="max-w-[560px]">
+        <div className="text-[13px] font-semibold">Auto-shutdown</div>
+        {sched.isPending ? (
+          <p className="mt-1 text-[12px] text-ink-2">Loading…</p>
+        ) : sched.isError ? (
+          <div className="mt-1">
+            <CardError err={sched.error} />
+            <div className="mt-2">
+              <Button variant="secondaryCompact" onClick={() => sched.refetch()}>
+                Retry
+              </Button>
+            </div>
+          </div>
+        ) : sched.data ? (
+          <p className="mt-1 text-[12px] text-ink-2">
+            {scheduleSummary(sched.data)}
+            {sched.data.enabled ? "" : " · paused"} — inherited by guests without an override.
+          </p>
+        ) : (
+          <p className="mt-1 text-[12px] text-ink-2">
+            No project schedule — guests use their own, or none.
+          </p>
+        )}
+      </div>
+      {canManage ? (
+        <Button variant="secondaryCompact" disabled={sched.isPending} onClick={() => setEditing(true)}>
+          {sched.data ? "Edit schedule" : "Set schedule"}
+        </Button>
+      ) : null}
+      {editing ? <ProjectScheduleFlyout project={project} onClose={() => setEditing(false)} /> : null}
+    </div>
+  );
+}
+
 /** Expanded-row body: the project's quota bars + Owner "Edit quota". */
 function ProjectQuotaPanel({ project, canManage }: { project: Project; canManage: boolean }) {
   const quota = useProjectQuota(project.id);
@@ -363,6 +406,8 @@ function ProjectQuotaPanel({ project, canManage }: { project: Project; canManage
           onClose={() => setEditing(false)}
         />
       ) : null}
+
+      <ProjectScheduleSection project={project} canManage={canManage} />
     </div>
   );
 }

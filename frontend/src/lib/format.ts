@@ -51,6 +51,23 @@ export function formatUptime(sec: number): string {
   return `${m}m`;
 }
 
+/** Forward countdown to an RFC3339 instant: "in 3d 4h" / "in 2h 14m" / "in 3m".
+ *  Mirrors formatUptime's grain; "now" once the target has passed, "in <1m" under
+ *  a minute, "—" for an unparseable timestamp. */
+export function formatCountdown(targetIso: string, now: Date = new Date()): string {
+  const t = new Date(targetIso);
+  if (Number.isNaN(t.getTime())) return "—";
+  const sec = Math.floor((t.getTime() - now.getTime()) / 1000);
+  if (sec <= 0) return "now";
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `in ${d}d ${h}h`;
+  if (h > 0) return `in ${h}h ${m}m`;
+  if (m > 0) return `in ${m}m`;
+  return "in <1m";
+}
+
 /** RFC3339 → design-style relative time: "Just now", "5 min ago", "2 h ago",
  *  "Yesterday", "3 d ago", then absolute "Mar 3, 2026 14:22". */
 export function relativeTime(iso: string, now: Date = new Date()): string {
