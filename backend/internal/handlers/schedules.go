@@ -193,7 +193,9 @@ func (d *Deps) DeleteResourceSchedule(w http.ResponseWriter, r *http.Request) {
 	// Delete the schedule and re-resolve the guest's jobs atomically: dropping a
 	// resource schedule may re-expose a project schedule, so MaterializeForGuest
 	// cancels the old jobs and emits the newly-effective set (or none). Without the
-	// feature active, just cancel the guest's jobs.
+	// feature active, cancel only this guest's auto-shutdown jobs (prefix-scoped —
+	// a broad cancel would drop the guest's TTL jobs if TTL is enabled while
+	// auto-shutdown is not).
 	err := d.Store.WithTx(r.Context(), func(txs store.Store) error {
 		if e := txs.DeleteResourceSchedule(r.Context(), ref.VMID); e != nil {
 			return e
@@ -208,7 +210,7 @@ func (d *Deps) DeleteResourceSchedule(w http.ResponseWriter, r *http.Request) {
 			}
 			return d.AutoShutdown.MaterializeForGuestWith(r.Context(), txs, *own)
 		}
-		_, e := txs.CancelJobsForVMID(r.Context(), ref.VMID)
+		_, e := txs.CancelJobsForVMIDByPrefix(r.Context(), ref.VMID, "autoshutdown.")
 		return e
 	})
 	if err != nil {

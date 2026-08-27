@@ -164,9 +164,16 @@ func (r *Registry) Lookup(upid proxmox.UPID) (*Tracked, bool) {
 }
 
 // Notify prepends a standalone notification to the ring — one not bound to a PVE
-// UPID (e.g. an auto-shutdown T-15m warning, ADR-0019). Missing ID/CreatedAt are
-// filled so callers can pass a partial notification. It reuses the same bounded
-// ring as tracked-task notifications.
+// UPID. Missing ID/CreatedAt are filled so callers can pass a partial
+// notification. It reuses the same bounded ring as tracked-task notifications.
+//
+// SECURITY: this ring is process-global and GET /api/notifications returns it
+// UNSCOPED to every authenticated user (a pre-existing gap). Do NOT pass
+// tenant-identifying content (guest names/VMIDs, schedule/TTL details) here until
+// the ring is tenant-scoped — it would leak one tenant's activity cross-tenant.
+// The scheduler warnings deliberately use the VMID-scoped SSE frames instead and
+// do NOT call this. Currently unused; kept as the standalone-notify primitive for
+// when the ring gains per-viewer scoping.
 func (r *Registry) Notify(n types.Notification) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

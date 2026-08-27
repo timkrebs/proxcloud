@@ -14,6 +14,11 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 )
 
+// maxTTLPolicyCeilingSeconds is the absolute ceiling on a project's max_ttl (10
+// years) — a sanity bound far above any real homelab TTL that keeps the value
+// well within int64-nanosecond time.Duration range.
+const maxTTLPolicyCeilingSeconds = 3650 * 24 * 60 * 60
+
 // ttlToWire converts a stored TTL into its wire form (durations as seconds).
 func ttlToWire(t *store.TTL) types.Ttl {
 	return types.Ttl{
@@ -310,6 +315,13 @@ func (d *Deps) PutProjectTTLPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxTtlSeconds <= 0 {
 		httpserver.WriteError(w, badRequest("maxTtlSeconds must be greater than 0."))
+		return
+	}
+	// Absolute ceiling on the policy max itself, so a pathological value can't
+	// overflow int64 nanoseconds when later read back as a time.Duration (and then
+	// produce a negative/undefined ceiling that a TTL would silently pass).
+	if req.MaxTtlSeconds > maxTTLPolicyCeilingSeconds {
+		httpserver.WriteError(w, badRequest("maxTtlSeconds is unreasonably large (max 10 years)."))
 		return
 	}
 	var defaultTTL *time.Duration

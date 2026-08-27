@@ -189,6 +189,11 @@ func TestPutProjectTTLPolicyValidation(t *testing.T) {
 	if rec := put(`{"maxTtlSeconds":3600,"defaultTtlSeconds":7200}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("default > max status = %d, want 400", rec.Code)
 	}
+	// An absurd max that would overflow time.Duration when read back is rejected
+	// (security review Low 1): 1e17 seconds is far past the 10-year ceiling.
+	if rec := put(`{"maxTtlSeconds":100000000000000000}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("overflow-large max status = %d, want 400", rec.Code)
+	}
 }
 
 func mustPID(t *testing.T, f *storetest.Fake) string {
