@@ -163,6 +163,23 @@ func (r *Registry) Lookup(upid proxmox.UPID) (*Tracked, bool) {
 	return tr, ok
 }
 
+// Notify prepends a standalone notification to the ring — one not bound to a PVE
+// UPID (e.g. an auto-shutdown T-15m warning, ADR-0019). Missing ID/CreatedAt are
+// filled so callers can pass a partial notification. It reuses the same bounded
+// ring as tracked-task notifications.
+func (r *Registry) Notify(n types.Notification) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n.ID == "" {
+		r.nextID++
+		n.ID = fmt.Sprintf("n%d", r.nextID)
+	}
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = r.now().UTC()
+	}
+	r.prependNotif(n)
+}
+
 // Notifications returns the ring, newest first.
 func (r *Registry) Notifications() []types.Notification {
 	r.mu.RLock()

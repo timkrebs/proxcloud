@@ -996,11 +996,35 @@ func (f *fakeStore) RescheduleRecurring(context.Context, string, time.Time) erro
 func (f *fakeStore) FailJob(context.Context, string, string, time.Time) (bool, error) {
 	return false, nil
 }
-func (f *fakeStore) CancelJobsForVMID(context.Context, int) (int, error) { return 0, nil }
-func (f *fakeStore) GetJob(context.Context, string) (*store.Job, error)  { return nil, store.ErrNotFound }
+func (f *fakeStore) BumpScheduledRunAt(context.Context, string, time.Time) error { return nil }
+func (f *fakeStore) CancelJobsForVMID(context.Context, int) (int, error)         { return 0, nil }
+func (f *fakeStore) GetJob(context.Context, string) (*store.Job, error) {
+	return nil, store.ErrNotFound
+}
 func (f *fakeStore) ListJobs(context.Context, store.JobFilter) ([]store.Job, error) {
 	return nil, nil
 }
+
+// --- schedules (ADR-0019) + auto_stopped: unused by auth tests; minimal stubs ---
+
+func (f *fakeStore) SetAutoStopped(context.Context, int, bool) error { return nil }
+func (f *fakeStore) UpsertResourceSchedule(context.Context, store.UpsertResourceScheduleParams) (*store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeStore) UpsertProjectSchedule(context.Context, store.UpsertProjectScheduleParams) (*store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetResourceSchedule(context.Context, int) (*store.Schedule, error) {
+	return nil, store.ErrNotFound
+}
+func (f *fakeStore) GetProjectSchedule(context.Context, string, string) (*store.Schedule, error) {
+	return nil, store.ErrNotFound
+}
+func (f *fakeStore) ListSchedulesByProject(context.Context, string) ([]store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeStore) DeleteResourceSchedule(context.Context, int) error           { return nil }
+func (f *fakeStore) DeleteProjectSchedule(context.Context, string, string) error { return nil }
 
 func cloneUser(u *store.User) *store.User {
 	c := *u

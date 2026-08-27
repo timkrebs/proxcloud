@@ -78,6 +78,24 @@ func (g *GoPVE) GuestAction(ctx context.Context, ref GuestRef, action string) (U
 	return UPID(upid), nil
 }
 
+// GuestShutdown implements Client. It posts timeout=graceSec + forceStop=true so
+// PVE performs one graceful-ACPI-then-force task: it waits graceSec for the guest
+// OS to power off, then hard-stops it. GuestAction cannot carry these params (it
+// posts an empty body), so the scheduler's grace policy needs this raw call
+// (lifecycle.md §1). Success is still confirmed against status/current, not the
+// task's exitstatus alone — the caller re-reads state after the task settles.
+func (g *GoPVE) GuestShutdown(ctx context.Context, ref GuestRef, graceSec int) (UPID, error) {
+	ctx, cancel := mutationCtx(ctx)
+	defer cancel()
+
+	var upid upidResult
+	body := map[string]any{"timeout": graceSec, "forceStop": true}
+	if err := g.c.Post(ctx, ref.path()+"/status/shutdown", body, &upid); err != nil {
+		return "", mapErr(fmt.Sprintf("shutdown %s/%d", ref.Type, ref.VMID), err)
+	}
+	return UPID(upid), nil
+}
+
 // DeleteGuest implements Client.
 func (g *GoPVE) DeleteGuest(ctx context.Context, ref GuestRef, purge bool) (UPID, error) {
 	ctx, cancel := mutationCtx(ctx)

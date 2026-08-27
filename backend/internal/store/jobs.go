@@ -165,6 +165,23 @@ func (s *PgStore) FailJob(ctx context.Context, id, lastErr string, retryAt time.
 	return status == "failed", nil
 }
 
+// BumpScheduledRunAt implements JobStore: advance a still-scheduled job's run_at
+// (the "skip next" primitive, ADR-0019). The `status = 'scheduled'` guard means a
+// job that is mid-run or terminal is left untouched — a lost race is ErrNotFound,
+// not a corruption. The claim + retry counters are untouched (this is not a run).
+func (s *PgStore) BumpScheduledRunAt(ctx context.Context, id string, runAt time.Time) error {
+	const q = `UPDATE jobs SET run_at = $2, updated_at = now()
+	           WHERE id = $1::uuid AND status = 'scheduled'`
+	tag, err := s.q.Exec(ctx, q, id, runAt)
+	if err != nil {
+		return fmt.Errorf("store: bump scheduled run_at: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CancelJobsForVMID implements JobStore: cancel every non-terminal job owned by
 // vmid — the destroy choke-point cleanup so no orphaned job acts on a gone VMID.
 // Idempotent: already-terminal jobs match nothing and it returns 0.

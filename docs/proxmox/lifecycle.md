@@ -109,6 +109,27 @@ still-running shutdown task rather than failing on the lock.
 > without exposing these params, so **raw `/api2/json` is required** to control
 > `timeout`/`forceStop`/`overrule-shutdown`.
 
+### As implemented (Part 2, ADR-0019)
+
+Auto-shutdown ships the **single-call variant**: a new `Client.GuestShutdown(ctx,
+ref, graceSec)` posts `status/shutdown` with `{"timeout": graceSec, "forceStop":
+true}`, so **PVE owns the graceful→force escalation in one task** — no separate
+`stop` and therefore no `overrule-shutdown` lock interleaving to manage. The
+handler still treats `status/current` as the **authoritative** success signal
+(§2): it awaits the task, then re-reads status and only marks the guest stopped
+when PVE confirms it. This deliberately takes the poll-then-force table's cons
+(the shutdown task holds the guest lock for the whole window; we can't tell a
+clean shutdown from a t=grace force-kill without the task log) in exchange for a
+much simpler, race-free handler with a single UPID to track.
+
+Two consequences follow and are enforced in code: (1) the await bound must exceed
+the grace window (`awaitFor(graceSec) = graceSec + 90s`, floored at 5m), or the
+verify step would fire while the shutdown task is still legitimately mid-grace;
+and (2) `grace_seconds` is capped at **300s** at input so the whole window stays
+well under the scheduler's per-handler timeout. If a future need arises to
+distinguish clean vs forced stops, or to abort/adjust mid-grace, revisit the
+poll-then-force strategy above (it remains the more observable design).
+
 ---
 
 ## 2. Detecting stopped vs. running

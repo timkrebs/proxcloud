@@ -775,6 +775,70 @@ export interface GuestSummary {
 }
 
 //////////
+// source: schedules.go
+
+/**
+ * Schedule is the wire representation of an auto-shutdown schedule (ADR-0019).
+ * VMID is set only for resource scope. Times are "HH:MM" 24h, local to Timezone;
+ * DaysOfWeek are 0..6 (Sun..Sat). Every value comes from the stored row — the UI
+ * never sees or types cron.
+ */
+export interface Schedule {
+  id: string;
+  scope: string; // "resource" | "project"
+  tenantId: string;
+  projectId: string;
+  vmid?: number /* int */;
+  shutdownTime: string; // "HH:MM"
+  autoStartTime?: string; // "HH:MM"; null = no auto-start
+  daysOfWeek: number /* int */[]; // 0..6 (Sun..Sat)
+  timezone: string; // IANA name
+  graceSeconds: number /* int */;
+  enabled: boolean;
+  optOut: boolean;
+  createdAt: string /* RFC3339 */;
+  updatedAt: string /* RFC3339 */;
+}
+/**
+ * ScheduleRequest is the PUT body for a resource or project schedule. The backend
+ * validates every field (HH:MM format, days 0..6 non-empty, timezone against the
+ * tz database, grace > 0) and derives the cron internally — cron is never
+ * user-entered. OptOut is honored on resource scope only.
+ */
+export interface ScheduleRequest {
+  shutdownTime: string;
+  autoStartTime?: string;
+  daysOfWeek: number /* int */[];
+  timezone: string;
+  graceSeconds: number /* int */;
+  enabled: boolean;
+  optOut?: boolean;
+}
+/**
+ * ScheduleSkipResult reports the outcome of POST …/schedule/skip: how many of the
+ * guest's next auto-shutdown job occurrences were advanced one boundary, and the
+ * new next-run of the stop job (nil when there is no active stop job to skip).
+ */
+export interface ScheduleSkipResult {
+  skipped: number /* int */;
+  nextRunAt?: string /* RFC3339 */;
+}
+/**
+ * ScheduleWarningEvent is the SSE "schedule_warning" payload: an advance heads-up
+ * (T-15m) that a guest is about to be auto-shut-down. It carries the owning VMID
+ * so events.deliver can scope it to the owning tenant (it is NOT broadcast).
+ */
+export interface ScheduleWarningEvent {
+  vmid: number /* int */;
+  node: string;
+  guestType: string; // qemu | lxc
+  kind: string; // "autoshutdown"
+  title: string;
+  detail: string;
+  scheduledAt: string /* RFC3339 */; // when the shutdown fires
+}
+
+//////////
 // source: storage.go
 
 /**

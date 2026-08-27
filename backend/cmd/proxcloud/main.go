@@ -29,6 +29,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/lifecycle"
 	"github.com/timkrebs9/proxcloud/backend/internal/mail"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/reconciler"
@@ -208,8 +209,15 @@ func runServe(log *slog.Logger) {
 		return st.ReleaseOwnership(ctx, ownershipID)
 	}
 	authzMW := &authz.Middleware{Store: st, Log: log}
+	// Auto-shutdown service (ADR-0019): shared by the HTTP schedule handlers (to
+	// materialize on edit) and the scheduler (to run the stop/warn/start handlers).
+	autoShutdown := &lifecycle.AutoShutdown{
+		Store: st, PVE: pve, Registry: registry, Broker: broker, Log: log,
+		DefaultGrace: cfg.AutoShutdownDefaultGrace,
+	}
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW,
-		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL}
+		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL,
+		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive()}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {
@@ -286,6 +294,13 @@ func runServe(log *slog.Logger) {
 			Log:        log,
 			Interval:   cfg.SchedulerInterval,
 			InstanceID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
+		}
+		// Register the auto-shutdown handlers BEFORE Run, only when the feature is
+		// active (its own flag AND the scheduler engine). Nothing registers otherwise.
+		if cfg.AutoShutdownActive() {
+			sched.Register(lifecycle.HandlerStop, autoShutdown.AutoShutdownStop)
+			sched.Register(lifecycle.HandlerWarn, autoShutdown.AutoShutdownWarn)
+			sched.Register(lifecycle.HandlerStart, autoShutdown.AutoShutdownStart)
 		}
 		startWorker(sched.Run)
 		log.Info("scheduler enabled", "interval", cfg.SchedulerInterval.String(),

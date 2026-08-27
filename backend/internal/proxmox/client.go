@@ -62,6 +62,13 @@ type Client interface {
 	// reboot | reset) via /status/{action} and returns the task UPID.
 	GuestAction(ctx context.Context, ref GuestRef, action string) (UPID, error)
 
+	// GuestShutdown gracefully shuts a guest down via /status/shutdown with a
+	// bounded grace period, escalating to a force-stop once graceSec elapses
+	// (forceStop=true). Unlike GuestAction (which posts an empty body) it carries
+	// the timeout/forceStop params PVE needs for the scheduler's auto-shutdown
+	// grace policy (ADR-0019, lifecycle.md §1), so raw /api2/json is required.
+	GuestShutdown(ctx context.Context, ref GuestRef, graceSec int) (UPID, error)
+
 	// DeleteGuest deletes a guest; purge also removes it from backup jobs
 	// and destroys unreferenced disks.
 	DeleteGuest(ctx context.Context, ref GuestRef, purge bool) (UPID, error)

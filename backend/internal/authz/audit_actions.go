@@ -26,6 +26,9 @@ var auditActions = map[routeKey]string{
 	{http.MethodDelete, "/api/tenants/{tenantId}/projects/{projectId}"}:    "project.delete",
 	{http.MethodPut, "/api/tenants/{tenantId}/projects/{projectId}/quota"}: "project.quota.update",
 
+	{http.MethodPut, "/api/tenants/{tenantId}/projects/{projectId}/schedule"}:    "project.schedule.update",
+	{http.MethodDelete, "/api/tenants/{tenantId}/projects/{projectId}/schedule"}: "project.schedule.delete",
+
 	{http.MethodPost, "/api/tenants/{tenantId}/invitations"}:                  "invitation.create",
 	{http.MethodDelete, "/api/tenants/{tenantId}/invitations/{invitationId}"}: "invitation.revoke",
 
@@ -37,6 +40,9 @@ var auditActions = map[routeKey]string{
 	{http.MethodDelete, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/snapshots/{name}"}:        "guest.snapshot.delete",
 	{http.MethodPut, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/firewall/options"}:           "guest.firewall.update",
 	{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/console"}:                   "guest.console.open",
+	{http.MethodPut, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/schedule"}:                   "guest.schedule.update",
+	{http.MethodDelete, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/schedule"}:                "guest.schedule.delete",
+	{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/schedule/skip"}:             "guest.schedule.skip",
 	{http.MethodPost, guestActionPattern}:                                                              "guest.action",
 	{http.MethodDelete, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}"}:                         "guest.delete",
 }

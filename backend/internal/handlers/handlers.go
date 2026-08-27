@@ -21,6 +21,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/lifecycle"
 	"github.com/timkrebs9/proxcloud/backend/internal/mail"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
@@ -62,6 +63,13 @@ type Deps struct {
 	Mailer         mail.Mailer
 	FrontendOrigin string
 	InvitationTTL  time.Duration
+
+	// AutoShutdown materializes schedules into scheduler jobs (ADR-0019). Nil-safe:
+	// without it the schedule CRUD still persists but no jobs are (re)materialized.
+	// AutoShutdownEnabled gates materialization on cfg.AutoShutdownActive() so the
+	// routes always mount (and persist) but only project jobs when the feature is on.
+	AutoShutdown        *lifecycle.AutoShutdown
+	AutoShutdownEnabled bool
 }
 
 // MountAccount attaches the tenant-agnostic, per-user account routes (paths
@@ -137,6 +145,8 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Get(p+"/guests/{node}/{type}/{vmid}/snapshots", d.ListSnapshots)
 	r.Get(p+"/guests/{node}/{type}/{vmid}/firewall", d.GetGuestFirewall)
 	r.Get(p+"/guests/{node}/{type}/{vmid}/acl", d.GetGuestACL)
+	r.Get(p+"/guests/{node}/{type}/{vmid}/schedule", d.GetResourceSchedule)
+	r.Get(p+"/projects/{projectId}/schedule", d.GetProjectSchedule)
 
 	r.Get(p+"/deployments/{id}", d.GetDeployment)
 	r.Get(p+"/tasks", d.ListTenantTasks)
@@ -151,6 +161,8 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Patch(p+"/projects/{projectId}", d.RenameProject)
 	r.Delete(p+"/projects/{projectId}", d.DeleteProject)
 	r.Put(p+"/projects/{projectId}/quota", d.PutProjectQuota)
+	r.Put(p+"/projects/{projectId}/schedule", d.PutProjectSchedule)
+	r.Delete(p+"/projects/{projectId}/schedule", d.DeleteProjectSchedule)
 
 	r.Post(p+"/guests", d.CreateGuest)
 	r.Patch(p+"/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)
@@ -160,6 +172,9 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Delete(p+"/guests/{node}/{type}/{vmid}/snapshots/{name}", d.DeleteSnapshot)
 	r.Put(p+"/guests/{node}/{type}/{vmid}/firewall/options", d.SetGuestFirewall)
 	r.Post(p+"/guests/{node}/{type}/{vmid}/console", d.OpenConsole)
+	r.Put(p+"/guests/{node}/{type}/{vmid}/schedule", d.PutResourceSchedule)
+	r.Delete(p+"/guests/{node}/{type}/{vmid}/schedule", d.DeleteResourceSchedule)
+	r.Post(p+"/guests/{node}/{type}/{vmid}/schedule/skip", d.SkipNextSchedule)
 	r.Post(p+"/guests/{node}/{type}/{vmid}/{action}", d.GuestAction)
 	r.Delete(p+"/guests/{node}/{type}/{vmid}", d.DeleteGuest)
 }

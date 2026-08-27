@@ -27,6 +27,7 @@ type MockClient struct {
 	OnStorageContent   func(ctx context.Context, node, storage, content string) ([]types.StorageContentItem, error)
 	OnGuestStatus      func(ctx context.Context, ref pmx.GuestRef) (*pmx.GuestStatusInfo, error)
 	OnGuestAction      func(ctx context.Context, ref pmx.GuestRef, action string) (pmx.UPID, error)
+	OnGuestShutdown    func(ctx context.Context, ref pmx.GuestRef, graceSec int) (pmx.UPID, error)
 	OnDeleteGuest      func(ctx context.Context, ref pmx.GuestRef, purge bool) (pmx.UPID, error)
 	OnClusterTasks     func(ctx context.Context) ([]pmx.TaskInfo, error)
 	OnTaskStatus       func(ctx context.Context, upid pmx.UPID) (*pmx.TaskInfo, error)
@@ -66,6 +67,13 @@ func (m *MockClient) GuestAction(ctx context.Context, ref pmx.GuestRef, action s
 		panic(unstubbed("GuestAction"))
 	}
 	return m.OnGuestAction(ctx, ref, action)
+}
+
+func (m *MockClient) GuestShutdown(ctx context.Context, ref pmx.GuestRef, graceSec int) (pmx.UPID, error) {
+	if m.OnGuestShutdown == nil {
+		panic(unstubbed("GuestShutdown"))
+	}
+	return m.OnGuestShutdown(ctx, ref, graceSec)
 }
 
 func (m *MockClient) DeleteGuest(ctx context.Context, ref pmx.GuestRef, purge bool) (pmx.UPID, error) {

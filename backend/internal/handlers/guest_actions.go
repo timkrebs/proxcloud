@@ -72,6 +72,16 @@ func (d *Deps) GuestAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A user-initiated start clears the scheduler's auto_stopped marker, so a guest
+	// a user turned back on is no longer treated as "stopped by schedule" (its
+	// paired autoshutdown.start would otherwise re-own the power state). Best-effort:
+	// a failure here must not fail the action the user asked for (ADR-0019).
+	if action == "start" && d.Store != nil {
+		if err := d.Store.SetAutoStopped(r.Context(), ref.VMID, false); err != nil && !errors.Is(err, store.ErrNotFound) {
+			d.logger().Warn("clear auto_stopped on manual start", "vmid", ref.VMID, "err", err)
+		}
+	}
+
 	label := spec.labelQemu
 	if ref.Type == "lxc" {
 		label = spec.labelLXC
@@ -173,6 +183,12 @@ func (d *Deps) tombstoneOwnershipAfterDestroy(vmid int, upid proxmox.UPID) {
 	}
 	if err := d.Store.TombstoneOwnership(ctx, own.ID); err != nil {
 		d.logger().Warn("tombstone ownership after destroy", "vmid", vmid, "err", err)
+	}
+	// Cancel the guest's scheduler jobs (auto-shutdown, ADR-0019): a user-deleted
+	// guest must never leave an orphaned job that acts on a reused VMID. Best-effort;
+	// the handlers' defensive owner re-read is the backstop if this is missed.
+	if _, err := d.Store.CancelJobsForVMID(ctx, vmid); err != nil {
+		d.logger().Warn("cancel jobs after destroy", "vmid", vmid, "err", err)
 	}
 }
 

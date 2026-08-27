@@ -56,6 +56,7 @@ type Store interface {
 	RecoveryCodeStore
 	LoginChallengeStore
 	JobStore
+	ScheduleStore
 }
 
 // UserStore is the users aggregate.
@@ -127,6 +128,11 @@ type OwnershipStore interface {
 	// TombstoneOwnership marks a row tombstoned (the Phase-4 reconciler's verdict
 	// for a guest that vanished from Proxmox). ErrNotFound if the row is missing.
 	TombstoneOwnership(ctx context.Context, id string) error
+	// SetAutoStopped flips the auto_stopped marker on a VMID's ownership row
+	// (ADR-0019): autoshutdown.stop sets it true, autoshutdown.start and any
+	// user-initiated start clear it — so a user-stopped guest is never auto-started.
+	// ErrNotFound if the VMID has no ownership row.
+	SetAutoStopped(ctx context.Context, vmid int, v bool) error
 	// ListOwnershipByTenant returns the tenant's ownership rows (tenant filter in
 	// SQL), ordered by VMID.
 	ListOwnershipByTenant(ctx context.Context, tenantID string) ([]ResourceOwnership, error)
@@ -348,6 +354,12 @@ type JobStore interface {
 	// max_attempts) or dead-letters to status='failed'. deadLettered reports which
 	// branch ran. retryAt is ignored when dead-lettered.
 	FailJob(ctx context.Context, id, lastErr string, retryAt time.Time) (deadLettered bool, err error)
+	// BumpScheduledRunAt advances a still-scheduled job's run_at to runAt (guarded
+	// by WHERE status='scheduled'), the "skip next" primitive (ADR-0019): the next
+	// occurrence is moved to the following cron boundary without disabling the
+	// schedule. ErrNotFound if there is no scheduled row to bump (already running or
+	// terminal — a lost race, not an error the caller must surface).
+	BumpScheduledRunAt(ctx context.Context, id string, runAt time.Time) error
 	// CancelJobsForVMID cancels (status='cancelled') every non-terminal job owned
 	// by vmid — the choke-point cleanup when a guest is destroyed so no orphaned
 	// job acts on a gone VMID. Returns the count cancelled. Idempotent.
@@ -358,6 +370,89 @@ type JobStore interface {
 	// admin view. TenantID scopes a tenant Owner to their tenant; empty TenantID
 	// (platform-admin) spans all tenants. Status/VMID narrow further.
 	ListJobs(ctx context.Context, f JobFilter) ([]Job, error)
+}
+
+// ScheduleStore is the auto-shutdown schedule aggregate (ADR-0019): the durable,
+// editable schedule definitions (never user-entered cron) the scheduler projects
+// into `jobs` rows. Resource-scope rows target one guest (win outright, or opt
+// out); one project-scope row applies to every guest in a project. The partial
+// unique indexes (one resource row per (tenant, vmid); one project row per
+// (tenant, project)) make each upsert a clean ON CONFLICT.
+type ScheduleStore interface {
+	// UpsertResourceSchedule inserts or replaces the resource-scope schedule for a
+	// VMID (INSERT … ON CONFLICT (tenant_id, vmid) WHERE scope='resource') and
+	// returns the stored row.
+	UpsertResourceSchedule(ctx context.Context, p UpsertResourceScheduleParams) (*Schedule, error)
+	// UpsertProjectSchedule inserts or replaces the project-scope schedule for a
+	// (tenant, project) (INSERT … ON CONFLICT (tenant_id, project_id) WHERE
+	// scope='project') and returns the stored row.
+	UpsertProjectSchedule(ctx context.Context, p UpsertProjectScheduleParams) (*Schedule, error)
+	// GetResourceSchedule returns the resource-scope schedule for a VMID, or
+	// ErrNotFound.
+	GetResourceSchedule(ctx context.Context, vmid int) (*Schedule, error)
+	// GetProjectSchedule returns the project-scope schedule for a (tenant,
+	// project), or ErrNotFound.
+	GetProjectSchedule(ctx context.Context, tenantID, projectID string) (*Schedule, error)
+	// ListSchedulesByProject returns every schedule (project + resource scope)
+	// belonging to a project, so an edit can re-materialize the whole project.
+	ListSchedulesByProject(ctx context.Context, projectID string) ([]Schedule, error)
+	// DeleteResourceSchedule removes a VMID's resource-scope schedule. ErrNotFound
+	// if there is none.
+	DeleteResourceSchedule(ctx context.Context, vmid int) error
+	// DeleteProjectSchedule removes a (tenant, project)'s project-scope schedule.
+	// ErrNotFound if there is none.
+	DeleteProjectSchedule(ctx context.Context, tenantID, projectID string) error
+}
+
+// Schedule is one durable auto-shutdown definition (ADR-0019). VMID is set only
+// for resource scope (nil for project scope). Times are "HH:MM" 24h local to
+// Timezone; DaysOfWeek are 0..6 (Sun..Sat). OptOut on a resource row exempts the
+// guest from the project schedule (emits no jobs).
+type Schedule struct {
+	ID            string
+	Scope         string // "resource" | "project"
+	TenantID      string
+	ProjectID     string
+	VMID          *int
+	ShutdownTime  string  // "HH:MM"
+	AutoStartTime *string // "HH:MM"; nil = no auto-start
+	DaysOfWeek    []int   // 0..6 (Sun..Sat)
+	Timezone      string  // IANA name
+	GraceSeconds  int
+	Enabled       bool
+	OptOut        bool
+	CreatedBy     *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// UpsertResourceScheduleParams are the inputs to UpsertResourceSchedule.
+type UpsertResourceScheduleParams struct {
+	TenantID      string
+	ProjectID     string
+	VMID          int
+	ShutdownTime  string
+	AutoStartTime *string
+	DaysOfWeek    []int
+	Timezone      string
+	GraceSeconds  int
+	Enabled       bool
+	OptOut        bool
+	CreatedBy     *string
+}
+
+// UpsertProjectScheduleParams are the inputs to UpsertProjectSchedule. A project
+// schedule cannot opt out (opt_out is a resource-row concept), so it is not a field.
+type UpsertProjectScheduleParams struct {
+	TenantID      string
+	ProjectID     string
+	ShutdownTime  string
+	AutoStartTime *string
+	DaysOfWeek    []int
+	Timezone      string
+	GraceSeconds  int
+	Enabled       bool
+	CreatedBy     *string
 }
 
 // CreateUserParams are the inputs to CreateUser; generated columns (id,
@@ -563,8 +658,12 @@ type ResourceOwnership struct {
 	ReservedVCPU   *int
 	ReservedRAMMB  *int64
 	ReservedDiskGB *int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// AutoStopped marks a guest the scheduler powered down (ADR-0019). The paired
+	// autoshutdown.start job only starts a guest whose AutoStopped is true, so a
+	// user-stopped guest is never auto-started; a user-initiated start clears it.
+	AutoStopped bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // Quota holds per-scope limits; a nil field means unlimited.
@@ -678,8 +777,8 @@ type AuditEntry struct {
 // recurring jobs; one-shot jobs fire once at RunAt.
 type Job struct {
 	ID           string
-	Kind         string  // "recurring" | "one_shot"
-	Handler      string  // dispatch key -> a registered handler
+	Kind         string // "recurring" | "one_shot"
+	Handler      string // dispatch key -> a registered handler
 	TenantID     *string
 	ProjectID    *string
 	VMID         *int
