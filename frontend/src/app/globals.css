@@ -64,6 +64,26 @@
   --shadow-toast: 0 6px 16px rgba(0, 0, 0, 0.18);
   --shadow-palette: 0 12px 40px rgba(0, 0, 0, 0.3);
 
+  /*
+   * Marketing-only surfaces — the design's --pc-* tokens reconciled onto this
+   * ONE theme. The design maps 1:1 onto the portal names above where they match
+   * (--pc-accent→--color-accent, --pc-canvas→--color-canvas, --pc-card→
+   * --color-card, --pc-text→--color-ink, --pc-text2→--color-ink-2, --pc-text3→
+   * --color-ink-3, --pc-line→--color-line, --pc-accent-h→--color-accent-hover,
+   * --pc-accent-p→--color-accent-active). These are the tokens the design needs
+   * that had no portal equivalent; they get [data-theme="dark"] overrides below,
+   * scoped to the (marketing) tree only. The portal never sets data-theme, so it
+   * always resolves the light values here and is visually unaffected.
+   */
+  --color-page: #ffffff; /* --pc-page: outer bg + hero / services / how sections */
+  --color-alt: #f3f2f1; /* --pc-alt: subtle raised fills inside mocks */
+  --color-border: #c8c6c4; /* --pc-border: secondary-button / input borders */
+  --color-tint: #eff6fc; /* --pc-tint: accent-tinted section + badge fills */
+  --color-tint2: #deecf9; /* --pc-tint2: deeper accent tint (badge borders) */
+  --color-nav: rgba(255, 255, 255, 0.94); /* --pc-nav: translucent sticky header */
+  --shadow-pc: 0 1.6px 3.6px rgba(0, 0, 0, 0.13), 0 0.3px 0.9px rgba(0, 0, 0, 0.11); /* --pc-shadow */
+  --shadow-pc-lift: 0 8px 20px rgba(0, 0, 0, 0.13), 0 1.2px 3.6px rgba(0, 0, 0, 0.1); /* --pc-shadow-lift */
+
   /* Motion */
   --animate-pcspin: pcspin 1s linear infinite;
   --animate-pcslide: pcslide 0.18s ease;
@@ -139,4 +159,65 @@ textarea::placeholder {
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/*
+ * Marketing dark theme — overrides the SAME --color-* names with the design's
+ * dark palette. Scoped to the marketing root wrapper itself
+ * (.pc-marketing[data-theme="dark"]) so the scope is enforced by the selector,
+ * not just by convention: custom properties inherit, so descendants of the
+ * marketing tree resolve dark values while the light-only portal — which carries
+ * neither .pc-marketing nor data-theme — keeps the :root values untouched.
+ */
+.pc-marketing[data-theme="dark"] {
+  --color-page: #1b1a19; /* --pc-page */
+  --color-canvas: #201f1e; /* --pc-canvas */
+  --color-alt: #252423; /* --pc-alt */
+  --color-card: #252423; /* --pc-card */
+  --color-ink: #f3f2f1; /* --pc-text */
+  --color-ink-2: #c8c6c4; /* --pc-text2 */
+  --color-ink-3: #8a8886; /* --pc-text3 */
+  --color-line: #3b3a39; /* --pc-line */
+  --color-border: #484644; /* --pc-border */
+  --color-accent: #479ef5; /* --pc-accent */
+  --color-accent-hover: #62abf5; /* --pc-accent-h */
+  --color-accent-active: #2e8ce6; /* --pc-accent-p */
+  --color-tint: #22303c; /* --pc-tint */
+  --color-tint2: #173a54; /* --pc-tint2 */
+  --color-nav: rgba(27, 26, 25, 0.94); /* --pc-nav */
+  --shadow-pc: 0 1.6px 3.6px rgba(0, 0, 0, 0.4);
+  --shadow-pc-lift: 0 8px 20px rgba(0, 0, 0, 0.5);
+}
+
+/* Marketing-only chrome: accent focus ring, smooth in-page anchor scroll, and
+   the IntersectionObserver scroll-reveal — all gated on prefers-reduced-motion
+   and scoped so the portal is never affected. */
+.pc-marketing :focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-fluent);
+}
+html:has(.pc-marketing) {
+  scroll-behavior: smooth;
+}
+.pc-reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition:
+    opacity 0.5s ease,
+    transform 0.5s ease;
+}
+.pc-reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  html:has(.pc-marketing) {
+    scroll-behavior: auto;
+  }
+  .pc-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
 }
