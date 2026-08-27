@@ -45,6 +45,16 @@ func TestDeliverTenantScoping(t *testing.T) {
 		{"deployment tenant foreign vmid blocked", depFor(100), false, false},
 		{"deployment tenant wrong payload type blocked", Event{Name: "deployment", Data: "garbage"}, false, false},
 
+		{"schedule_warning admin bypass (foreign vmid)", Event{Name: "schedule_warning", Data: types.ScheduleWarningEvent{VMID: 9012}}, true, true},
+		{"schedule_warning tenant owned vmid", Event{Name: "schedule_warning", Data: types.ScheduleWarningEvent{VMID: 200}}, false, true},
+		{"schedule_warning tenant foreign vmid blocked", Event{Name: "schedule_warning", Data: types.ScheduleWarningEvent{VMID: 100}}, false, false},
+		{"schedule_warning tenant wrong payload type blocked", Event{Name: "schedule_warning", Data: "garbage"}, false, false},
+
+		{"ttl_warning admin bypass (foreign vmid)", Event{Name: "ttl_warning", Data: types.TtlWarningEvent{VMID: 9012}}, true, true},
+		{"ttl_warning tenant owned vmid", Event{Name: "ttl_warning", Data: types.TtlWarningEvent{VMID: 200}}, false, true},
+		{"ttl_warning tenant foreign vmid blocked", Event{Name: "ttl_warning", Data: types.TtlWarningEvent{VMID: 100}}, false, false},
+		{"ttl_warning tenant wrong payload type blocked", Event{Name: "ttl_warning", Data: "garbage"}, false, false},
+
 		{"unknown frame passes through", Event{Name: "hello", Data: nil}, false, true},
 	}
 

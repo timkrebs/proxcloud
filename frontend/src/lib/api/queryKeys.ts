@@ -66,4 +66,18 @@ export const qk = {
   adminTenantQuota: (tenantId?: string) => ["adminTenantQuota", tenantId] as const,
   activity: (tenantId?: string, filters: ActivityFilters = {}) =>
     ["activity", tenantId, filters] as const,
+
+  // ── Auto-shutdown schedules (ADR-0019) ───────────────────────────────────
+  // Leading "schedule" segment so SSE schedule_warning can prefix-invalidate
+  // every entry; `id` is "{node}/{type}/{vmid}" for resource scope, the project
+  // id for project scope.
+  schedule: (scope: "resource" | "project", id: string, tenantId?: string) =>
+    ["schedule", tenantId, scope, id] as const,
+
+  // ── TTL / ephemeral resources (ADR-0020) ─────────────────────────────────
+  // Leading "ttl" segment so SSE ttl_warning can prefix-invalidate every entry.
+  // scope: "guest" (id = "{node}/{type}/{vmid}"), "policy" (id = project id),
+  // "list" (id = project id, the expiring-soon view).
+  ttl: (scope: "guest" | "policy" | "list", id: string, tenantId?: string) =>
+    ["ttl", tenantId, scope, id] as const,
 };

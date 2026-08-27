@@ -135,6 +135,32 @@ func deliver(e Event, admin bool, owned map[int]bool) bool {
 			return false
 		}
 		return owned[dep.VMID]
+	case "schedule_warning":
+		// Auto-shutdown T-15m warning (ADR-0019). MUST be scoped like task frames:
+		// a warning names the owning VMID and reaches only the owning tenant (and
+		// platform-admin). It must NOT fall through to the default broadcast case,
+		// which would leak one tenant's guest activity to every subscriber.
+		if admin {
+			return true
+		}
+		ev, ok := e.Data.(types.ScheduleWarningEvent)
+		if !ok {
+			return false
+		}
+		return owned[ev.VMID]
+	case "ttl_warning":
+		// TTL heads-up (T-24h / T-1h, ADR-0020). Scoped exactly like task frames:
+		// it names the owning VMID and reaches only the owning tenant (and
+		// platform-admin). It must NOT fall through to the default broadcast case,
+		// which would leak one tenant's guest activity to every subscriber.
+		if admin {
+			return true
+		}
+		ev, ok := e.Data.(types.TtlWarningEvent)
+		if !ok {
+			return false
+		}
+		return owned[ev.VMID]
 	default:
 		// No other frame types exist; deliver to everyone rather than silently
 		// drop a future benign frame.

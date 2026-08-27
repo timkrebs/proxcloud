@@ -775,6 +775,70 @@ export interface GuestSummary {
 }
 
 //////////
+// source: schedules.go
+
+/**
+ * Schedule is the wire representation of an auto-shutdown schedule (ADR-0019).
+ * VMID is set only for resource scope. Times are "HH:MM" 24h, local to Timezone;
+ * DaysOfWeek are 0..6 (Sun..Sat). Every value comes from the stored row — the UI
+ * never sees or types cron.
+ */
+export interface Schedule {
+  id: string;
+  scope: string; // "resource" | "project"
+  tenantId: string;
+  projectId: string;
+  vmid?: number /* int */;
+  shutdownTime: string; // "HH:MM"
+  autoStartTime?: string; // "HH:MM"; null = no auto-start
+  daysOfWeek: number /* int */[]; // 0..6 (Sun..Sat)
+  timezone: string; // IANA name
+  graceSeconds: number /* int */;
+  enabled: boolean;
+  optOut: boolean;
+  createdAt: string /* RFC3339 */;
+  updatedAt: string /* RFC3339 */;
+}
+/**
+ * ScheduleRequest is the PUT body for a resource or project schedule. The backend
+ * validates every field (HH:MM format, days 0..6 non-empty, timezone against the
+ * tz database, grace > 0) and derives the cron internally — cron is never
+ * user-entered. OptOut is honored on resource scope only.
+ */
+export interface ScheduleRequest {
+  shutdownTime: string;
+  autoStartTime?: string;
+  daysOfWeek: number /* int */[];
+  timezone: string;
+  graceSeconds: number /* int */;
+  enabled: boolean;
+  optOut?: boolean;
+}
+/**
+ * ScheduleSkipResult reports the outcome of POST …/schedule/skip: how many of the
+ * guest's next auto-shutdown job occurrences were advanced one boundary, and the
+ * new next-run of the stop job (nil when there is no active stop job to skip).
+ */
+export interface ScheduleSkipResult {
+  skipped: number /* int */;
+  nextRunAt?: string /* RFC3339 */;
+}
+/**
+ * ScheduleWarningEvent is the SSE "schedule_warning" payload: an advance heads-up
+ * (T-15m) that a guest is about to be auto-shut-down. It carries the owning VMID
+ * so events.deliver can scope it to the owning tenant (it is NOT broadcast).
+ */
+export interface ScheduleWarningEvent {
+  vmid: number /* int */;
+  node: string;
+  guestType: string; // qemu | lxc
+  kind: string; // "autoshutdown"
+  title: string;
+  detail: string;
+  scheduledAt: string /* RFC3339 */; // when the shutdown fires
+}
+
+//////////
 // source: storage.go
 
 /**
@@ -1019,6 +1083,78 @@ export interface LoginTOTPRequest {
  */
 export interface RecoveryCodesResponse {
   recoveryCodes: string[]; // 10 × "XXXXX-XXXXX"
+}
+
+//////////
+// source: ttl.go
+
+/**
+ * Ttl is the wire representation of a guest's TTL / ephemeral-expiry (ADR-0020).
+ * Every value comes from the stored row. Action is "stop" (reversible: the guest
+ * is powered off and marked expired) or "delete" (irreversible destroy).
+ * OriginalDurationSeconds is the TTL length as chosen, used to size an extend.
+ */
+export interface Ttl {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  vmid: number /* int */;
+  expiresAt: string /* RFC3339 */;
+  action: string; // "stop" | "delete"
+  warned24h: boolean;
+  warned1h: boolean;
+  originalDurationSeconds: number /* int64 */;
+  createdAt: string /* RFC3339 */;
+  updatedAt: string /* RFC3339 */;
+}
+/**
+ * TtlRequest is the PUT body for a guest TTL. The backend validates action,
+ * ttlSeconds (> 0 and <= the project max), and — when action is "delete" —
+ * requires confirmName to match the guest's name (typed-confirmation, enforced
+ * server-side: a destructive TTL cannot be set without naming the guest).
+ */
+export interface TtlRequest {
+  action: string; // "stop" | "delete"
+  ttlSeconds: number /* int64 */; // TTL length in seconds
+  confirmName?: string; // required only when action == "delete"
+}
+/**
+ * TtlPolicy is a project's TTL governance (ADR-0020). DefaultTtlSeconds is null
+ * when the project applies no default (a guest is permanent unless opted in);
+ * MaxTtlSeconds is the hard ceiling on any TTL at create or extend.
+ */
+export interface TtlPolicy {
+  defaultTtlSeconds?: number /* int64 */;
+  maxTtlSeconds: number /* int64 */;
+}
+/**
+ * TtlPolicyRequest is the PUT body for a project TTL policy. A null
+ * defaultTtlSeconds clears the default (→ permanent by default).
+ */
+export interface TtlPolicyRequest {
+  defaultTtlSeconds?: number /* int64 */;
+  maxTtlSeconds: number /* int64 */;
+}
+/**
+ * TtlExtendResult is the POST …/ttl/extend response: the new (capped) expiry.
+ */
+export interface TtlExtendResult {
+  expiresAt: string /* RFC3339 */;
+}
+/**
+ * TtlWarningEvent is the SSE "ttl_warning" payload: an advance heads-up (T-24h or
+ * T-1h) that a guest's TTL is about to fire. It carries the owning VMID so
+ * events.deliver can scope it to the owning tenant (it is NOT broadcast). Which
+ * is the warning tier ("24h" | "1h"); Action tells the UI whether the guest will
+ * be stopped or destroyed (so it can offer a one-click extend).
+ */
+export interface TtlWarningEvent {
+  vmid: number /* int */;
+  node: string;
+  guestType: string; // qemu | lxc
+  which: string; // "24h" | "1h"
+  expiresAt: string /* RFC3339 */;
+  action: string; // "stop" | "delete"
 }
 
 //////////

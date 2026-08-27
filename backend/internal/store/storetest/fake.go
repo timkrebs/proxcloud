@@ -39,6 +39,16 @@ type Fake struct {
 	recovery    []*fakeRecoveryCode          // append-only; single-use via UsedAt
 	challenges  map[string]*fakeChallenge    // by id
 	chalByHash  map[string]string            // token_hash -> challenge id
+
+	// Scheduler (ADR-0018) job store.
+	jobs map[string]*store.Job // by id
+
+	// Auto-shutdown schedules (ADR-0019).
+	schedules map[string]*store.Schedule // by id
+
+	// TTL / ephemeral resources (ADR-0020).
+	ttls        map[int]*store.TTL                 // by vmid
+	ttlPolicies map[string]*store.ProjectTTLPolicy // by tenantID|projectID
 }
 
 // fakeRecoveryCode is one stored recovery code (hashed, single-use).
@@ -75,6 +85,10 @@ func New() *Fake {
 		recovery:    []*fakeRecoveryCode{},
 		challenges:  map[string]*fakeChallenge{},
 		chalByHash:  map[string]string{},
+		jobs:        map[string]*store.Job{},
+		schedules:   map[string]*store.Schedule{},
+		ttls:        map[int]*store.TTL{},
+		ttlPolicies: map[string]*store.ProjectTTLPolicy{},
 	}
 }
 
@@ -242,6 +256,22 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	for k, v := range f.chalByHash {
 		chalByHash[k] = v
 	}
+	jobs := make(map[string]*store.Job, len(f.jobs))
+	for k, v := range f.jobs {
+		jobs[k] = v
+	}
+	schedules := make(map[string]*store.Schedule, len(f.schedules))
+	for k, v := range f.schedules {
+		schedules[k] = v
+	}
+	ttls := make(map[int]*store.TTL, len(f.ttls))
+	for k, v := range f.ttls {
+		ttls[k] = v
+	}
+	ttlPolicies := make(map[string]*store.ProjectTTLPolicy, len(f.ttlPolicies))
+	for k, v := range f.ttlPolicies {
+		ttlPolicies[k] = v
+	}
 	f.mu.Unlock()
 
 	if err := fn(f); err != nil {
@@ -255,6 +285,10 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 		f.recovery = recovery
 		f.challenges = challenges
 		f.chalByHash = chalByHash
+		f.jobs = jobs
+		f.schedules = schedules
+		f.ttls = ttls
+		f.ttlPolicies = ttlPolicies
 		f.mu.Unlock()
 		return err
 	}
@@ -736,6 +770,36 @@ func (f *Fake) TombstoneOwnership(_ context.Context, id string) error {
 	return store.ErrNotFound
 }
 
+func (f *Fake) SetAutoStopped(_ context.Context, vmid int, v bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("SetAutoStopped"); err != nil {
+		return err
+	}
+	o, ok := f.ownership[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	o.AutoStopped = v
+	o.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) SetExpiredAt(_ context.Context, vmid int, at *time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("SetExpiredAt"); err != nil {
+		return err
+	}
+	o, ok := f.ownership[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	o.ExpiredAt = at
+	o.UpdatedAt = f.Now()
+	return nil
+}
+
 func (f *Fake) ListOwnershipByTenant(_ context.Context, tenantID string) ([]store.ResourceOwnership, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -950,7 +1014,8 @@ func (f *Fake) InsertAuditIntent(_ context.Context, a store.AuditIntent) (string
 	}
 	id := f.next("audit")
 	f.audit = append(f.audit, &store.AuditEntry{
-		ID: id, TS: f.Now(), ActorUserID: a.ActorUserID, TenantID: a.TenantID, ProjectID: a.ProjectID,
+		ID: id, TS: f.Now(), ActorUserID: a.ActorUserID, ActorSystem: a.ActorSystem,
+		TenantID: a.TenantID, ProjectID: a.ProjectID,
 		Action: a.Action, TargetType: a.TargetType, TargetID: a.TargetID, Outcome: "pending", IP: a.IP,
 	})
 	return id, nil
@@ -1331,4 +1396,553 @@ func (f *Fake) RecordChallengeFailure(_ context.Context, id string, maxAttempts 
 		return true, nil
 	}
 	return false, nil
+}
+
+// --- jobs (scheduler, ADR-0018) ---
+
+// AllJobs returns a copy of every job row (test convenience), unordered.
+func (f *Fake) AllJobs() []store.Job {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.Job, 0, len(f.jobs))
+	for _, j := range f.jobs {
+		out = append(out, *j)
+	}
+	return out
+}
+
+// JobStatus returns the current status of the job with id, or "" if none — a
+// convenience for claim/complete/fail assertions.
+func (f *Fake) JobStatus(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j, ok := f.jobs[id]; ok {
+		return j.Status
+	}
+	return ""
+}
+
+func (f *Fake) EnqueueJob(_ context.Context, p store.EnqueueJobParams) (*store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("EnqueueJob"); err != nil {
+		return nil, err
+	}
+	maxAttempts := p.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	missed := p.MissedPolicy
+	if missed == "" {
+		missed = "catch_up"
+	}
+	id := f.next("job")
+	j := &store.Job{
+		ID: id, Kind: p.Kind, Handler: p.Handler, TenantID: p.TenantID, ProjectID: p.ProjectID,
+		VMID: p.VMID, Payload: p.Payload, Cron: p.Cron, Timezone: p.Timezone, RunAt: p.RunAt,
+		Status: "scheduled", Attempts: 0, MaxAttempts: maxAttempts, MissedPolicy: missed,
+		CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	f.jobs[id] = j
+	c := *j
+	return &c, nil
+}
+
+func (f *Fake) ClaimDueJobs(_ context.Context, now time.Time, limit int, lockedBy string) ([]store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ClaimDueJobs"); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	var due []*store.Job
+	for _, j := range f.jobs {
+		if j.Status == "scheduled" && !j.RunAt.After(now) {
+			due = append(due, j)
+		}
+	}
+	sort.Slice(due, func(i, j int) bool { return due[i].RunAt.Before(due[j].RunAt) })
+	out := []store.Job{}
+	for _, j := range due {
+		if len(out) >= limit {
+			break
+		}
+		t := now
+		lb := lockedBy
+		j.Status = "running"
+		j.LockedAt = &t
+		j.LockedBy = &lb
+		j.UpdatedAt = f.Now()
+		out = append(out, *j)
+	}
+	return out, nil
+}
+
+func (f *Fake) ReclaimStaleRunning(_ context.Context, olderThan time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, j := range f.jobs {
+		if j.Status == "running" && j.LockedAt != nil && j.LockedAt.Before(olderThan) {
+			j.Status = "scheduled"
+			j.LockedAt = nil
+			j.LockedBy = nil
+			j.UpdatedAt = f.Now()
+			n++
+		}
+	}
+	return n, nil
+}
+
+// CompleteJob no-ops unless the job is still 'running' (mirrors the Pg
+// `status='running'` guard): a job cancelled mid-run is never resurrected.
+func (f *Fake) CompleteJob(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.jobs[id]
+	if !ok || j.Status != "running" {
+		return nil // missing or raced to cancelled/terminal — no-op
+	}
+	j.Status = "succeeded"
+	j.LockedAt = nil
+	j.LockedBy = nil
+	j.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) RescheduleRecurring(_ context.Context, id string, nextRunAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, ok := f.jobs[id]
+	if !ok || j.Status != "running" {
+		return nil // guarded: never re-arm a cancelled/terminal job
+	}
+	j.Status = "scheduled"
+	j.RunAt = nextRunAt
+	j.Attempts = 0
+	j.LastError = nil
+	j.LockedAt = nil
+	j.LockedBy = nil
+	j.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) FailJob(_ context.Context, id, lastErr string, retryAt time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("FailJob"); err != nil {
+		return false, err
+	}
+	j, ok := f.jobs[id]
+	if !ok || j.Status != "running" {
+		return false, nil // guarded: raced to cancelled/terminal — no-op
+	}
+	j.Attempts++
+	le := lastErr
+	j.LastError = &le
+	j.LockedAt = nil
+	j.LockedBy = nil
+	j.UpdatedAt = f.Now()
+	if j.Attempts >= j.MaxAttempts {
+		j.Status = "failed"
+		return true, nil
+	}
+	j.Status = "scheduled"
+	j.RunAt = retryAt
+	return false, nil
+}
+
+func (f *Fake) BumpScheduledRunAt(_ context.Context, id string, runAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("BumpScheduledRunAt"); err != nil {
+		return err
+	}
+	j, ok := f.jobs[id]
+	if !ok || j.Status != "scheduled" {
+		return store.ErrNotFound
+	}
+	j.RunAt = runAt
+	j.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) CancelJobsForVMID(_ context.Context, vmid int) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CancelJobsForVMID"); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, j := range f.jobs {
+		if j.VMID != nil && *j.VMID == vmid && (j.Status == "scheduled" || j.Status == "running") {
+			j.Status = "cancelled"
+			j.LockedAt = nil
+			j.LockedBy = nil
+			j.UpdatedAt = f.Now()
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *Fake) CancelJobsForVMIDByPrefix(_ context.Context, vmid int, prefix string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CancelJobsForVMIDByPrefix"); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, j := range f.jobs {
+		if j.VMID != nil && *j.VMID == vmid && strings.HasPrefix(j.Handler, prefix) &&
+			(j.Status == "scheduled" || j.Status == "running") {
+			j.Status = "cancelled"
+			j.LockedAt = nil
+			j.LockedBy = nil
+			j.UpdatedAt = f.Now()
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *Fake) GetJob(_ context.Context, id string) (*store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if j, ok := f.jobs[id]; ok {
+		c := *j
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) ListJobs(_ context.Context, fl store.JobFilter) ([]store.Job, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListJobs"); err != nil {
+		return nil, err
+	}
+	var matched []store.Job
+	for _, j := range f.jobs {
+		if fl.TenantID != "" && (j.TenantID == nil || *j.TenantID != fl.TenantID) {
+			continue
+		}
+		if fl.Status != "" && j.Status != fl.Status {
+			continue
+		}
+		if fl.VMID != nil && (j.VMID == nil || *j.VMID != *fl.VMID) {
+			continue
+		}
+		matched = append(matched, *j)
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].RunAt.Equal(matched[j].RunAt) {
+			return matched[i].RunAt.After(matched[j].RunAt)
+		}
+		return matched[i].ID > matched[j].ID
+	})
+	limit := fl.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	out := []store.Job{}
+	out = append(out, matched...)
+	return out, nil
+}
+
+// --- schedules (auto-shutdown, ADR-0019) ---
+
+// AllSchedules returns a copy of every schedule row (test convenience), unordered.
+func (f *Fake) AllSchedules() []store.Schedule {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]store.Schedule, 0, len(f.schedules))
+	for _, s := range f.schedules {
+		out = append(out, *s)
+	}
+	return out
+}
+
+// findResourceScheduleLocked returns the resource-scope schedule for vmid (caller
+// holds f.mu).
+func (f *Fake) findResourceScheduleLocked(vmid int) *store.Schedule {
+	for _, s := range f.schedules {
+		if s.Scope == "resource" && s.VMID != nil && *s.VMID == vmid {
+			return s
+		}
+	}
+	return nil
+}
+
+// findProjectScheduleLocked returns the project-scope schedule for (tenant,
+// project) (caller holds f.mu).
+func (f *Fake) findProjectScheduleLocked(tenantID, projectID string) *store.Schedule {
+	for _, s := range f.schedules {
+		if s.Scope == "project" && s.TenantID == tenantID && s.ProjectID == projectID {
+			return s
+		}
+	}
+	return nil
+}
+
+func (f *Fake) UpsertResourceSchedule(_ context.Context, p store.UpsertResourceScheduleParams) (*store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertResourceSchedule"); err != nil {
+		return nil, err
+	}
+	vmid := p.VMID
+	s := f.findResourceScheduleLocked(vmid)
+	if s == nil {
+		s = &store.Schedule{ID: f.next("sched"), Scope: "resource", VMID: &vmid, CreatedAt: f.Now()}
+		f.schedules[s.ID] = s
+	}
+	s.TenantID, s.ProjectID = p.TenantID, p.ProjectID
+	s.ShutdownTime, s.AutoStartTime = p.ShutdownTime, p.AutoStartTime
+	s.DaysOfWeek = append([]int(nil), p.DaysOfWeek...)
+	s.Timezone, s.GraceSeconds = p.Timezone, p.GraceSeconds
+	s.Enabled, s.OptOut, s.CreatedBy = p.Enabled, p.OptOut, p.CreatedBy
+	s.UpdatedAt = f.Now()
+	c := *s
+	return &c, nil
+}
+
+func (f *Fake) UpsertProjectSchedule(_ context.Context, p store.UpsertProjectScheduleParams) (*store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertProjectSchedule"); err != nil {
+		return nil, err
+	}
+	s := f.findProjectScheduleLocked(p.TenantID, p.ProjectID)
+	if s == nil {
+		s = &store.Schedule{ID: f.next("sched"), Scope: "project", CreatedAt: f.Now()}
+		f.schedules[s.ID] = s
+	}
+	s.TenantID, s.ProjectID = p.TenantID, p.ProjectID
+	s.VMID = nil
+	s.ShutdownTime, s.AutoStartTime = p.ShutdownTime, p.AutoStartTime
+	s.DaysOfWeek = append([]int(nil), p.DaysOfWeek...)
+	s.Timezone, s.GraceSeconds = p.Timezone, p.GraceSeconds
+	s.Enabled, s.OptOut, s.CreatedBy = p.Enabled, false, p.CreatedBy
+	s.UpdatedAt = f.Now()
+	c := *s
+	return &c, nil
+}
+
+func (f *Fake) GetResourceSchedule(_ context.Context, vmid int) (*store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetResourceSchedule"); err != nil {
+		return nil, err
+	}
+	if s := f.findResourceScheduleLocked(vmid); s != nil {
+		c := *s
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) GetProjectSchedule(_ context.Context, tenantID, projectID string) (*store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetProjectSchedule"); err != nil {
+		return nil, err
+	}
+	if s := f.findProjectScheduleLocked(tenantID, projectID); s != nil {
+		c := *s
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) ListSchedulesByProject(_ context.Context, projectID string) ([]store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListSchedulesByProject"); err != nil {
+		return nil, err
+	}
+	out := []store.Schedule{}
+	for _, s := range f.schedules {
+		if s.ProjectID == projectID {
+			out = append(out, *s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Scope != out[j].Scope {
+			return out[i].Scope < out[j].Scope
+		}
+		vi, vj := 0, 0
+		if out[i].VMID != nil {
+			vi = *out[i].VMID
+		}
+		if out[j].VMID != nil {
+			vj = *out[j].VMID
+		}
+		return vi < vj
+	})
+	return out, nil
+}
+
+func (f *Fake) DeleteResourceSchedule(_ context.Context, vmid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("DeleteResourceSchedule"); err != nil {
+		return err
+	}
+	if s := f.findResourceScheduleLocked(vmid); s != nil {
+		delete(f.schedules, s.ID)
+		return nil
+	}
+	return store.ErrNotFound
+}
+
+func (f *Fake) DeleteProjectSchedule(_ context.Context, tenantID, projectID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("DeleteProjectSchedule"); err != nil {
+		return err
+	}
+	if s := f.findProjectScheduleLocked(tenantID, projectID); s != nil {
+		delete(f.schedules, s.ID)
+		return nil
+	}
+	return store.ErrNotFound
+}
+
+// --- TTL / ephemeral resources (ADR-0020) ---
+
+func ttlPolicyKey(tenantID, projectID string) string { return tenantID + "|" + projectID }
+
+// TTLByVMID returns a copy of a guest's TTL, or nil (test convenience).
+func (f *Fake) TTLByVMID(vmid int) *store.TTL {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.ttls[vmid]; ok {
+		c := *t
+		return &c
+	}
+	return nil
+}
+
+func (f *Fake) UpsertTTL(_ context.Context, p store.UpsertTTLParams) (*store.TTL, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertTTL"); err != nil {
+		return nil, err
+	}
+	existing, ok := f.ttls[p.VMID]
+	id := f.next("ttl")
+	created := f.Now()
+	if ok {
+		id = existing.ID
+		created = existing.CreatedAt
+	}
+	t := &store.TTL{
+		ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID,
+		ExpiresAt: p.ExpiresAt, Action: p.Action, Warned24h: false, Warned1h: false,
+		OriginalDuration: p.OriginalDuration, CreatedBy: p.CreatedBy,
+		CreatedAt: created, UpdatedAt: f.Now(),
+	}
+	f.ttls[p.VMID] = t
+	c := *t
+	return &c, nil
+}
+
+func (f *Fake) GetTTL(_ context.Context, vmid int) (*store.TTL, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if t, ok := f.ttls[vmid]; ok {
+		c := *t
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) DeleteTTL(_ context.Context, vmid int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.ttls[vmid]; !ok {
+		return store.ErrNotFound
+	}
+	delete(f.ttls, vmid)
+	return nil
+}
+
+func (f *Fake) SetTTLWarned(_ context.Context, vmid int, which string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.ttls[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if which == "1h" {
+		t.Warned1h = true
+	} else {
+		t.Warned24h = true
+	}
+	t.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) UpdateTTLExpiry(_ context.Context, vmid int, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.ttls[vmid]
+	if !ok {
+		return store.ErrNotFound
+	}
+	t.ExpiresAt = expiresAt
+	t.Warned24h = false
+	t.Warned1h = false
+	t.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) ListTTLsByProject(_ context.Context, projectID string) ([]store.TTL, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []store.TTL{}
+	for _, t := range f.ttls {
+		if t.ProjectID == projectID {
+			out = append(out, *t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ExpiresAt.Before(out[j].ExpiresAt) })
+	return out, nil
+}
+
+func (f *Fake) GetProjectTTLPolicy(_ context.Context, tenantID, projectID string) (*store.ProjectTTLPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p, ok := f.ttlPolicies[ttlPolicyKey(tenantID, projectID)]; ok {
+		c := *p
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) UpsertProjectTTLPolicy(_ context.Context, p store.UpsertProjectTTLPolicyParams) (*store.ProjectTTLPolicy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertProjectTTLPolicy"); err != nil {
+		return nil, err
+	}
+	key := ttlPolicyKey(p.TenantID, p.ProjectID)
+	created := f.Now()
+	if existing, ok := f.ttlPolicies[key]; ok {
+		created = existing.CreatedAt
+	}
+	pol := &store.ProjectTTLPolicy{
+		TenantID: p.TenantID, ProjectID: p.ProjectID,
+		DefaultTTL: p.DefaultTTL, MaxTTL: p.MaxTTL,
+		CreatedAt: created, UpdatedAt: f.Now(),
+	}
+	f.ttlPolicies[key] = pol
+	c := *pol
+	return &c, nil
 }

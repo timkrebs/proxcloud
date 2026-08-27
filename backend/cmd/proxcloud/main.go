@@ -5,12 +5,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA tz database so timezone-aware schedules (ADR-0019) resolve on any base image
 
 	"github.com/joho/godotenv"
 
@@ -26,9 +29,11 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/handlers"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
+	"github.com/timkrebs9/proxcloud/backend/internal/lifecycle"
 	"github.com/timkrebs9/proxcloud/backend/internal/mail"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
 	"github.com/timkrebs9/proxcloud/backend/internal/reconciler"
+	"github.com/timkrebs9/proxcloud/backend/internal/scheduler"
 	"github.com/timkrebs9/proxcloud/backend/internal/secrets"
 	"github.com/timkrebs9/proxcloud/backend/internal/store"
 	"github.com/timkrebs9/proxcloud/backend/internal/tasks"
@@ -204,8 +209,22 @@ func runServe(log *slog.Logger) {
 		return st.ReleaseOwnership(ctx, ownershipID)
 	}
 	authzMW := &authz.Middleware{Store: st, Log: log}
+	// Auto-shutdown service (ADR-0019): shared by the HTTP schedule handlers (to
+	// materialize on edit) and the scheduler (to run the stop/warn/start handlers).
+	autoShutdown := &lifecycle.AutoShutdown{
+		Store: st, PVE: pve, Registry: registry, Broker: broker, Log: log,
+		DefaultGrace: cfg.AutoShutdownDefaultGrace,
+	}
+	// TTL / ephemeral-resource service (ADR-0020): shared by the HTTP TTL handlers
+	// (materialize on edit) and the scheduler (run the warn/expire handlers).
+	ttlSvc := &lifecycle.TTL{
+		Store: st, PVE: pve, Registry: registry, Broker: broker, Log: log,
+		DefaultGrace: cfg.AutoShutdownDefaultGrace,
+	}
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW,
-		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL}
+		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL,
+		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive(),
+		TTL: ttlSvc, TTLEnabled: cfg.TTLActive()}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {
@@ -250,20 +269,58 @@ func runServe(log *slog.Logger) {
 		log.Info("console disabled — set PROXMOX_CONSOLE_USER/PASSWORD to enable")
 	}
 
-	// Background loops: node-metrics poller (idle without SSE subscribers)
-	// and the tracked-task watcher. Both stop on shutdown via bgCtx.
+	// Background loops: node-metrics poller (idle without SSE subscribers) and
+	// the tracked-task watcher. All background workers register in bgWG so
+	// shutdown can drain them (cancel-then-join) rather than tearing an
+	// at-least-once handler down mid-action.
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
-	go (&events.MetricsPoller{PVE: pve, Broker: broker, Log: log}).Run(bgCtx)
-	go (&tasks.Watcher{PVE: pve, Registry: registry, Broker: broker, Log: log}).Run(bgCtx)
+	var bgWG sync.WaitGroup
+	startWorker := func(run func(context.Context)) {
+		bgWG.Go(func() { run(bgCtx) })
+	}
+	startWorker((&events.MetricsPoller{PVE: pve, Broker: broker, Log: log}).Run)
+	startWorker((&tasks.Watcher{PVE: pve, Registry: registry, Broker: broker, Log: log}).Run)
 	// Stale-pending reservation reclaim (ADR-0012 §2.3): frees quota leaked by a
 	// backend that died mid-create. Runs after backfill, stops with bgCtx on shutdown.
-	go (&reconciler.Reconciler{
+	startWorker((&reconciler.Reconciler{
 		Store:    st,
 		Log:      log,
 		Interval: cfg.ReconcilerInterval,
 		TTL:      cfg.ReservationTTL,
-	}).Run(bgCtx)
+	}).Run)
+
+	// Job scheduler (ADR-0018): the persistent, tenant-aware engine behind
+	// auto-shutdown + TTL. Off by default; handlers are registered by the feature
+	// wiring (Part 2/3) only when their own flag is also on. locked_by is unique
+	// per instance so a claim is attributable across a blue/green pair.
+	if cfg.SchedulerEnabled {
+		hostname, _ := os.Hostname()
+		sched := &scheduler.Scheduler{
+			Store:      st,
+			Log:        log,
+			Interval:   cfg.SchedulerInterval,
+			InstanceID: fmt.Sprintf("%s-%d", hostname, os.Getpid()),
+		}
+		// Register the auto-shutdown handlers BEFORE Run, only when the feature is
+		// active (its own flag AND the scheduler engine). Nothing registers otherwise.
+		if cfg.AutoShutdownActive() {
+			sched.Register(lifecycle.HandlerStop, autoShutdown.AutoShutdownStop)
+			sched.Register(lifecycle.HandlerWarn, autoShutdown.AutoShutdownWarn)
+			sched.Register(lifecycle.HandlerStart, autoShutdown.AutoShutdownStart)
+		}
+		// TTL warn/expire handlers register only when the TTL feature is active (its
+		// own flag AND the scheduler engine). Nothing registers otherwise.
+		if cfg.TTLActive() {
+			sched.Register(lifecycle.HandlerTTLWarn, ttlSvc.TTLWarn)
+			sched.Register(lifecycle.HandlerTTLExpire, ttlSvc.TTLExpire)
+		}
+		startWorker(sched.Run)
+		log.Info("scheduler enabled", "interval", cfg.SchedulerInterval.String(),
+			"autoshutdown", cfg.AutoShutdownActive(), "ttl", cfg.TTLActive())
+	} else {
+		log.Info("scheduler disabled — set SCHEDULER_ENABLED=true to enable")
+	}
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,
@@ -298,6 +355,17 @@ func runServe(log *slog.Logger) {
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("shutdown", "err", err)
+	}
+	// Drain background workers: stop accepting new work (bgCancel) then join,
+	// bounded, so an in-flight scheduler handler finishes (or is left 'running'
+	// for re-claim) instead of being torn down mid-action.
+	bgCancel()
+	drained := make(chan struct{})
+	go func() { bgWG.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(15 * time.Second):
+		log.Warn("background workers did not drain in time")
 	}
 	log.Info("stopped")
 }

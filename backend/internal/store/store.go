@@ -55,6 +55,9 @@ type Store interface {
 	TOTPStore
 	RecoveryCodeStore
 	LoginChallengeStore
+	JobStore
+	ScheduleStore
+	TTLStore
 }
 
 // UserStore is the users aggregate.
@@ -126,6 +129,15 @@ type OwnershipStore interface {
 	// TombstoneOwnership marks a row tombstoned (the Phase-4 reconciler's verdict
 	// for a guest that vanished from Proxmox). ErrNotFound if the row is missing.
 	TombstoneOwnership(ctx context.Context, id string) error
+	// SetAutoStopped flips the auto_stopped marker on a VMID's ownership row
+	// (ADR-0019): autoshutdown.stop sets it true, autoshutdown.start and any
+	// user-initiated start clear it — so a user-stopped guest is never auto-started.
+	// ErrNotFound if the VMID has no ownership row.
+	SetAutoStopped(ctx context.Context, vmid int, v bool) error
+	// SetExpiredAt sets (or clears, when at is nil) the expired_at marker on a
+	// VMID's ownership row (ADR-0020): a TTL stop-expiry stamps it, a user start
+	// clears it. ErrNotFound if the VMID has no ownership row.
+	SetExpiredAt(ctx context.Context, vmid int, at *time.Time) error
 	// ListOwnershipByTenant returns the tenant's ownership rows (tenant filter in
 	// SQL), ordered by VMID.
 	ListOwnershipByTenant(ctx context.Context, tenantID string) ([]ResourceOwnership, error)
@@ -317,6 +329,221 @@ type LoginChallengeStore interface {
 	RecordChallengeFailure(ctx context.Context, id string, maxAttempts int) (locked bool, err error)
 }
 
+// JobStore is the scheduler's job aggregate (ADR-0018): a persistent, tenant-
+// aware work queue claimed with SELECT … FOR UPDATE SKIP LOCKED so a second
+// backend instance never double-fires. Handlers are idempotent + defensive; the
+// store gives at-least-once delivery, retry→backoff→dead-letter, and the stale-
+// running reclaim that makes a crash mid-handler recoverable.
+type JobStore interface {
+	// EnqueueJob inserts a scheduled job and returns the stored row.
+	EnqueueJob(ctx context.Context, p EnqueueJobParams) (*Job, error)
+	// ClaimDueJobs atomically claims up to limit jobs whose run_at <= now and
+	// status='scheduled', flipping them to 'running' with locked_at=now and
+	// locked_by=owner. It is a single UPDATE whose subquery uses SELECT … FOR
+	// UPDATE SKIP LOCKED (atomic on its own, no explicit WithTx needed), so
+	// concurrent instances claim disjoint sets (no double-fire). Returns the
+	// claimed rows (already 'running').
+	ClaimDueJobs(ctx context.Context, now time.Time, limit int, lockedBy string) ([]Job, error)
+	// ReclaimStaleRunning resets jobs stuck in 'running' with locked_at strictly
+	// before olderThan (a backend that crashed mid-handler) back to 'scheduled'
+	// so they are re-claimed — the at-least-once recovery path. Returns the count
+	// reclaimed. olderThan MUST exceed the longest handler grace window.
+	ReclaimStaleRunning(ctx context.Context, olderThan time.Time) (int, error)
+	// CompleteJob marks a claimed job succeeded (one_shot) — terminal.
+	CompleteJob(ctx context.Context, id string) error
+	// RescheduleRecurring returns a claimed recurring job to 'scheduled' with a
+	// new run_at (its next cron boundary) and clears the claim + attempts.
+	RescheduleRecurring(ctx context.Context, id string, nextRunAt time.Time) error
+	// FailJob records a handler error: increments attempts, stores lastErr, and
+	// either reschedules to retryAt with status='scheduled' (attempts <
+	// max_attempts) or dead-letters to status='failed'. deadLettered reports which
+	// branch ran. retryAt is ignored when dead-lettered.
+	FailJob(ctx context.Context, id, lastErr string, retryAt time.Time) (deadLettered bool, err error)
+	// BumpScheduledRunAt advances a still-scheduled job's run_at to runAt (guarded
+	// by WHERE status='scheduled'), the "skip next" primitive (ADR-0019): the next
+	// occurrence is moved to the following cron boundary without disabling the
+	// schedule. ErrNotFound if there is no scheduled row to bump (already running or
+	// terminal — a lost race, not an error the caller must surface).
+	BumpScheduledRunAt(ctx context.Context, id string, runAt time.Time) error
+	// CancelJobsForVMID cancels (status='cancelled') every non-terminal job owned
+	// by vmid — the choke-point cleanup when a guest is destroyed so no orphaned
+	// job acts on a gone VMID. Returns the count cancelled. Idempotent.
+	CancelJobsForVMID(ctx context.Context, vmid int) (int, error)
+	// CancelJobsForVMIDByPrefix cancels only the vmid's non-terminal jobs whose
+	// handler starts with prefix (e.g. "autoshutdown." or "ttl."). It is the
+	// re-materialization cleanup: a feature rewrites ONLY its own job projection,
+	// leaving the other feature's jobs (e.g. a TTL expiry) untouched. Returns the
+	// count cancelled. Idempotent.
+	CancelJobsForVMIDByPrefix(ctx context.Context, vmid int, prefix string) (int, error)
+	// GetJob returns the job with the given id, or ErrNotFound.
+	GetJob(ctx context.Context, id string) (*Job, error)
+	// ListJobs returns jobs matching the filter, newest run_at first, for the
+	// admin view. TenantID scopes a tenant Owner to their tenant; empty TenantID
+	// (platform-admin) spans all tenants. Status/VMID narrow further.
+	ListJobs(ctx context.Context, f JobFilter) ([]Job, error)
+}
+
+// ScheduleStore is the auto-shutdown schedule aggregate (ADR-0019): the durable,
+// editable schedule definitions (never user-entered cron) the scheduler projects
+// into `jobs` rows. Resource-scope rows target one guest (win outright, or opt
+// out); one project-scope row applies to every guest in a project. The partial
+// unique indexes (one resource row per (tenant, vmid); one project row per
+// (tenant, project)) make each upsert a clean ON CONFLICT.
+type ScheduleStore interface {
+	// UpsertResourceSchedule inserts or replaces the resource-scope schedule for a
+	// VMID (INSERT … ON CONFLICT (tenant_id, vmid) WHERE scope='resource') and
+	// returns the stored row.
+	UpsertResourceSchedule(ctx context.Context, p UpsertResourceScheduleParams) (*Schedule, error)
+	// UpsertProjectSchedule inserts or replaces the project-scope schedule for a
+	// (tenant, project) (INSERT … ON CONFLICT (tenant_id, project_id) WHERE
+	// scope='project') and returns the stored row.
+	UpsertProjectSchedule(ctx context.Context, p UpsertProjectScheduleParams) (*Schedule, error)
+	// GetResourceSchedule returns the resource-scope schedule for a VMID, or
+	// ErrNotFound.
+	GetResourceSchedule(ctx context.Context, vmid int) (*Schedule, error)
+	// GetProjectSchedule returns the project-scope schedule for a (tenant,
+	// project), or ErrNotFound.
+	GetProjectSchedule(ctx context.Context, tenantID, projectID string) (*Schedule, error)
+	// ListSchedulesByProject returns every schedule (project + resource scope)
+	// belonging to a project, so an edit can re-materialize the whole project.
+	ListSchedulesByProject(ctx context.Context, projectID string) ([]Schedule, error)
+	// DeleteResourceSchedule removes a VMID's resource-scope schedule. ErrNotFound
+	// if there is none.
+	DeleteResourceSchedule(ctx context.Context, vmid int) error
+	// DeleteProjectSchedule removes a (tenant, project)'s project-scope schedule.
+	// ErrNotFound if there is none.
+	DeleteProjectSchedule(ctx context.Context, tenantID, projectID string) error
+}
+
+// Schedule is one durable auto-shutdown definition (ADR-0019). VMID is set only
+// for resource scope (nil for project scope). Times are "HH:MM" 24h local to
+// Timezone; DaysOfWeek are 0..6 (Sun..Sat). OptOut on a resource row exempts the
+// guest from the project schedule (emits no jobs).
+type Schedule struct {
+	ID            string
+	Scope         string // "resource" | "project"
+	TenantID      string
+	ProjectID     string
+	VMID          *int
+	ShutdownTime  string  // "HH:MM"
+	AutoStartTime *string // "HH:MM"; nil = no auto-start
+	DaysOfWeek    []int   // 0..6 (Sun..Sat)
+	Timezone      string  // IANA name
+	GraceSeconds  int
+	Enabled       bool
+	OptOut        bool
+	CreatedBy     *string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+// UpsertResourceScheduleParams are the inputs to UpsertResourceSchedule.
+type UpsertResourceScheduleParams struct {
+	TenantID      string
+	ProjectID     string
+	VMID          int
+	ShutdownTime  string
+	AutoStartTime *string
+	DaysOfWeek    []int
+	Timezone      string
+	GraceSeconds  int
+	Enabled       bool
+	OptOut        bool
+	CreatedBy     *string
+}
+
+// UpsertProjectScheduleParams are the inputs to UpsertProjectSchedule. A project
+// schedule cannot opt out (opt_out is a resource-row concept), so it is not a field.
+type UpsertProjectScheduleParams struct {
+	TenantID      string
+	ProjectID     string
+	ShutdownTime  string
+	AutoStartTime *string
+	DaysOfWeek    []int
+	Timezone      string
+	GraceSeconds  int
+	Enabled       bool
+	CreatedBy     *string
+}
+
+// TTLStore is the TTL / ephemeral-resource aggregate (ADR-0020): a guest's
+// optional expiry (stop or delete), the warning-flag bookkeeping, and the
+// per-project policy (default/max). One TTL per guest (unique vmid).
+type TTLStore interface {
+	// UpsertTTL inserts or replaces a guest's TTL (ON CONFLICT (vmid)) and returns
+	// the stored row. Re-setting a TTL resets the warning flags (fresh row).
+	UpsertTTL(ctx context.Context, p UpsertTTLParams) (*TTL, error)
+	// GetTTL returns the TTL for a VMID, or ErrNotFound.
+	GetTTL(ctx context.Context, vmid int) (*TTL, error)
+	// DeleteTTL removes a guest's TTL (clearing expiry). ErrNotFound if none.
+	DeleteTTL(ctx context.Context, vmid int) error
+	// SetTTLWarned marks one warning sent (which is "24h" or "1h"), guarding the
+	// at-least-once handler against a double-send. ErrNotFound if the VMID has none.
+	SetTTLWarned(ctx context.Context, vmid int, which string) error
+	// UpdateTTLExpiry sets a new expires_at and RESETS both warning flags (the
+	// extend path: a later expiry re-arms the warnings). ErrNotFound if none.
+	UpdateTTLExpiry(ctx context.Context, vmid int, expiresAt time.Time) error
+	// ListTTLsByProject returns a project's TTLs ordered by expires_at (the
+	// "expiring soon / expired" project view). Tenant-scoped by the project.
+	ListTTLsByProject(ctx context.Context, projectID string) ([]TTL, error)
+	// GetProjectTTLPolicy returns a project's TTL policy, or ErrNotFound (the
+	// caller then treats it as default none / max 30d — the migration default).
+	GetProjectTTLPolicy(ctx context.Context, tenantID, projectID string) (*ProjectTTLPolicy, error)
+	// UpsertProjectTTLPolicy inserts or replaces a project's TTL policy
+	// (ON CONFLICT (tenant_id, project_id)) and returns the stored row.
+	UpsertProjectTTLPolicy(ctx context.Context, p UpsertProjectTTLPolicyParams) (*ProjectTTLPolicy, error)
+}
+
+// TTL is a guest's durable expiry state (ADR-0020). OriginalDuration is the TTL
+// length as chosen (used to size an extend); Warned24h/Warned1h guard the
+// at-least-once warnings.
+type TTL struct {
+	ID               string
+	TenantID         string
+	ProjectID        string
+	VMID             int
+	ExpiresAt        time.Time
+	Action           string // "stop" | "delete"
+	Warned24h        bool
+	Warned1h         bool
+	OriginalDuration time.Duration
+	CreatedBy        *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+// UpsertTTLParams are the inputs to UpsertTTL.
+type UpsertTTLParams struct {
+	TenantID         string
+	ProjectID        string
+	VMID             int
+	ExpiresAt        time.Time
+	Action           string // "stop" | "delete"
+	OriginalDuration time.Duration
+	CreatedBy        *string
+}
+
+// ProjectTTLPolicy is a project's TTL governance (ADR-0020): DefaultTTL is the
+// TTL applied when a creator picks nothing (nil = permanent by default); MaxTTL
+// is the hard ceiling on any TTL at create or extend (default 30 days).
+type ProjectTTLPolicy struct {
+	TenantID   string
+	ProjectID  string
+	DefaultTTL *time.Duration // nil = no default
+	MaxTTL     time.Duration
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// UpsertProjectTTLPolicyParams are the inputs to UpsertProjectTTLPolicy. A nil
+// DefaultTTL clears the default (→ permanent by default).
+type UpsertProjectTTLPolicyParams struct {
+	TenantID   string
+	ProjectID  string
+	DefaultTTL *time.Duration
+	MaxTTL     time.Duration
+}
+
 // CreateUserParams are the inputs to CreateUser; generated columns (id,
 // timestamps, flags defaulting false) are filled by the database.
 type CreateUserParams struct {
@@ -428,6 +655,10 @@ type ReserveOwnershipParams struct {
 // TargetID are nil for creates whose id is not yet known.
 type AuditIntent struct {
 	ActorUserID *string
+	// ActorSystem names a non-user actor ("system:scheduler") for mutations the
+	// scheduler initiates. actor_user_id stays nil; the two are mutually
+	// exclusive in practice (ADR-0018). nil for ordinary user mutations.
+	ActorSystem *string
 	TenantID    *string
 	ProjectID   *string
 	Action      string
@@ -516,8 +747,16 @@ type ResourceOwnership struct {
 	ReservedVCPU   *int
 	ReservedRAMMB  *int64
 	ReservedDiskGB *int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// AutoStopped marks a guest the scheduler powered down (ADR-0019). The paired
+	// autoshutdown.start job only starts a guest whose AutoStopped is true, so a
+	// user-stopped guest is never auto-started; a user-initiated start clears it.
+	AutoStopped bool
+	// ExpiredAt marks a guest a TTL stop-expiry powered down (ADR-0020) — distinct
+	// from a user-stop and an auto-shutdown stop; nil = not expired. Reversible:
+	// a user-initiated start clears it.
+	ExpiredAt *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Quota holds per-scope limits; a nil field means unlimited.
@@ -615,6 +854,7 @@ type AuditEntry struct {
 	ID          string
 	TS          time.Time
 	ActorUserID *string
+	ActorSystem *string // "system:scheduler" for scheduler-initiated mutations (ADR-0018)
 	TenantID    *string
 	ProjectID   *string
 	Action      string
@@ -623,4 +863,56 @@ type AuditEntry struct {
 	Outcome     string
 	IP          *string
 	Detail      []byte // jsonb
+}
+
+// Job is one scheduler work item (ADR-0018). Tenant/Project/VMID identify the
+// owning resource (nil for non-resource jobs). Cron/Timezone are set only on
+// recurring jobs; one-shot jobs fire once at RunAt.
+type Job struct {
+	ID           string
+	Kind         string // "recurring" | "one_shot"
+	Handler      string // dispatch key -> a registered handler
+	TenantID     *string
+	ProjectID    *string
+	VMID         *int
+	Payload      []byte // jsonb
+	Cron         *string
+	Timezone     *string // IANA
+	RunAt        time.Time
+	Status       string // "scheduled" | "running" | "failed" | "succeeded" | "cancelled"
+	Attempts     int
+	MaxAttempts  int
+	LastError    *string
+	LockedAt     *time.Time
+	LockedBy     *string
+	MissedPolicy string // "catch_up" | "skip" | "run_late"
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// EnqueueJobParams are the inputs to EnqueueJob. Status defaults to 'scheduled'
+// and Attempts to 0 in the DB; MaxAttempts defaults to 5 when zero. Cron/Timezone
+// are nil for one-shot jobs; VMID/Tenant/Project are nil for non-resource jobs.
+type EnqueueJobParams struct {
+	Kind         string
+	Handler      string
+	TenantID     *string
+	ProjectID    *string
+	VMID         *int
+	Payload      []byte
+	Cron         *string
+	Timezone     *string
+	RunAt        time.Time
+	MaxAttempts  int    // 0 -> DB default (5)
+	MissedPolicy string // "" -> DB default ('catch_up')
+}
+
+// JobFilter narrows ListJobs for the admin view. TenantID scopes a tenant Owner
+// (empty = platform-admin, all tenants). Status/VMID are optional narrowing
+// filters; Limit is clamped by the caller.
+type JobFilter struct {
+	TenantID string // "" = all tenants (platform-admin)
+	Status   string // "" = any status
+	VMID     *int   // nil = any VMID
+	Limit    int
 }

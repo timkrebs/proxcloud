@@ -40,6 +40,8 @@ const MENU: { title?: string; items: MenuItem[] }[] = [
       { label: "Disks", icon: "disk", seg: "disks" },
       { label: "Snapshots", icon: "camera", seg: "snapshots" },
       { label: "Size", icon: "resize", seg: "size" },
+      { label: "Schedule", icon: "clock", seg: "schedule" },
+      { label: "Lifecycle", icon: "bolt", seg: "ttl" },
     ],
   },
   {

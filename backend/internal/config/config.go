@@ -47,6 +47,22 @@ type Config struct {
 	// leaked). Default 45m > the 30m clone stepTimeout + margin (ADR-0012 §2.3).
 	ReservationTTL time.Duration
 
+	// Job scheduler & lifecycle features (ADR-0018/0019/0020). All three flags
+	// default OFF (opt-in): a half-landed or misbehaving feature is inert until
+	// explicitly enabled on the live deployment. AutoShutdown and TTL each also
+	// require SchedulerEnabled — their workers/routes register only when both
+	// their own flag AND the scheduler are on (see SchedulerFeatures predicates).
+	SchedulerEnabled    bool
+	AutoShutdownEnabled bool
+	TTLEnabled          bool
+	// SchedulerInterval is the scheduler's claim-tick period (how often it polls
+	// for due jobs). Default 30s. A non-positive value disables the loop (logged).
+	SchedulerInterval time.Duration
+	// AutoShutdownDefaultGrace is how long a scheduled shutdown waits after the
+	// graceful ACPI request before force-stopping a guest that has not powered
+	// off. Default 120s; a per-schedule grace_seconds overrides it.
+	AutoShutdownDefaultGrace time.Duration
+
 	// Outbound email (Phase 5 invitations, ADR-0013). When SMTPHost is empty the
 	// server uses the dev LogMailer (prints the accept link to stdout); when set,
 	// an SMTPMailer delivers real mail. Credentials are never logged. If SMTPHost
@@ -169,6 +185,11 @@ func Load() (*Config, error) {
 	cfg.SessionAbsoluteTTL = parseDuration("SESSION_ABSOLUTE_TTL", 720*time.Hour, &problems)
 	cfg.ReconcilerInterval = parseDuration("RECONCILER_INTERVAL", 5*time.Minute, &problems)
 	cfg.ReservationTTL = parseDuration("RESERVATION_TTL", 45*time.Minute, &problems)
+	cfg.SchedulerEnabled = envBool("SCHEDULER_ENABLED", false)
+	cfg.AutoShutdownEnabled = envBool("AUTOSHUTDOWN_ENABLED", false)
+	cfg.TTLEnabled = envBool("TTL_ENABLED", false)
+	cfg.SchedulerInterval = parseDuration("SCHEDULER_INTERVAL", 30*time.Second, &problems)
+	cfg.AutoShutdownDefaultGrace = parseDuration("AUTOSHUTDOWN_DEFAULT_GRACE", 120*time.Second, &problems)
 	cfg.InvitationTTL = parseDuration("INVITATION_TTL", 72*time.Hour, &problems)
 	cfg.LoginChallengeTTL = parseDuration("LOGIN_CHALLENGE_TTL", 5*time.Minute, &problems)
 	// Email: a configured SMTP host must carry a From address (else the accept
@@ -237,6 +258,14 @@ func envBool(key string, def bool) bool {
 // SMTPEnabled reports whether a real SMTP driver is configured (SMTP_HOST set).
 // main.go selects SMTPMailer when true, else the dev LogMailer.
 func (c *Config) SMTPEnabled() bool { return c.SMTPHost != "" }
+
+// AutoShutdownActive reports whether auto-shutdown schedules should run: the
+// feature flag AND the scheduler engine it rides on must both be enabled.
+func (c *Config) AutoShutdownActive() bool { return c.SchedulerEnabled && c.AutoShutdownEnabled }
+
+// TTLActive reports whether TTL/ephemeral resources should run: the feature flag
+// AND the scheduler engine it rides on must both be enabled.
+func (c *Config) TTLActive() bool { return c.SchedulerEnabled && c.TTLEnabled }
 
 // decodeSecretsKey parses SECRETS_KEY from hex (64 chars) or base64 and
 // requires exactly 32 bytes (AES-256). Returns a problem description on error.
