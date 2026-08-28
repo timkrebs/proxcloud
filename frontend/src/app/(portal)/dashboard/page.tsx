@@ -30,8 +30,9 @@ function AdminDashboard() {
       <p className="mt-1 text-[13px] text-ink-2">
         {cluster.data ? (
           <>
-            Cluster <span className="font-semibold text-ink">{cluster.data.name || "standalone"}</span> · PVE{" "}
-            {cluster.data.pveVersion} · All pools
+            Cluster{" "}
+            <span className="font-semibold text-ink">{cluster.data.name || "standalone"}</span> ·
+            PVE {cluster.data.pveVersion} · All pools
           </>
         ) : (
           "Connecting to Proxmox…"
@@ -62,7 +63,8 @@ function TenantDashboard({ tenantName }: { tenantName?: string }) {
       <p className="mt-1 text-[13px] text-ink-2">
         {tenantName ? (
           <>
-            Directory <span className="font-semibold text-ink">{tenantName}</span> · your projects and resources
+            Directory <span className="font-semibold text-ink">{tenantName}</span> · your projects
+            and resources
           </>
         ) : (
           "Loading your directory…"

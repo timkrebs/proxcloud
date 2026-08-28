@@ -176,12 +176,8 @@ export function SignInCard() {
             onChange={(e) => setEmail(e.target.value)}
             className={UNDERLINE_INPUT}
           />
-          {notice && (
-            <div className="mt-[6px] text-[12px] text-ink-2">{notice}</div>
-          )}
-          {error && (
-            <div className="mt-[6px] text-[12px] text-err-text">{error}</div>
-          )}
+          {notice && <div className="mt-[6px] text-[12px] text-ink-2">{notice}</div>}
+          {error && <div className="mt-[6px] text-[12px] text-err-text">{error}</div>}
           <div className="mt-[26px] flex justify-end">
             <button type="submit" className={`${PRIMARY_BTN} px-8`}>
               Next
@@ -214,9 +210,7 @@ export function SignInCard() {
             <Mi name="chevronLeft" size={12} color="currentColor" />
             {email}
           </button>
-          <h2 className="mb-4 text-[24px] font-semibold text-ink">
-            Enter password
-          </h2>
+          <h2 className="mb-4 text-[24px] font-semibold text-ink">Enter password</h2>
           <label htmlFor="signin-password" className="sr-only">
             Password
           </label>
@@ -231,15 +225,9 @@ export function SignInCard() {
             onChange={(e) => setPassword(e.target.value)}
             className={UNDERLINE_INPUT}
           />
-          {error && (
-            <div className="mt-[6px] text-[12px] text-err-text">{error}</div>
-          )}
+          {error && <div className="mt-[6px] text-[12px] text-err-text">{error}</div>}
           <div className="mt-[26px] flex justify-end">
-            <button
-              type="submit"
-              disabled={pending}
-              className={`${PRIMARY_BTN} px-7`}
-            >
+            <button type="submit" disabled={pending} className={`${PRIMARY_BTN} px-7`}>
               Sign in
             </button>
           </div>
@@ -254,9 +242,7 @@ export function SignInCard() {
             <Mi name="chevronLeft" size={12} color="currentColor" />
             {email}
           </button>
-          <h2 className="mb-1 text-[24px] font-semibold text-ink">
-            Two-step verification
-          </h2>
+          <h2 className="mb-1 text-[24px] font-semibold text-ink">Two-step verification</h2>
           <p className="mb-4 text-[13px] leading-[1.5] text-ink-2">
             {useRecovery
               ? "Enter one of your saved recovery codes."
@@ -282,9 +268,7 @@ export function SignInCard() {
             }}
             className={`${UNDERLINE_INPUT} tabular-nums tracking-[0.2em]`}
           />
-          {error && (
-            <div className="mt-[6px] text-[12px] text-err-text">{error}</div>
-          )}
+          {error && <div className="mt-[6px] text-[12px] text-err-text">{error}</div>}
           <div className="mt-[26px] flex items-center justify-between">
             <button
               type="button"
@@ -297,11 +281,7 @@ export function SignInCard() {
             >
               {useRecovery ? "Use your authenticator app instead" : "Use a recovery code instead"}
             </button>
-            <button
-              type="submit"
-              disabled={pending}
-              className={`${PRIMARY_BTN} px-7`}
-            >
+            <button type="submit" disabled={pending} className={`${PRIMARY_BTN} px-7`}>
               Verify
             </button>
           </div>

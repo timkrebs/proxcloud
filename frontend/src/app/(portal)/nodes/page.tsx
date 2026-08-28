@@ -34,11 +34,17 @@ export default function NodesPage() {
         <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-4">
           {nodes.data.map((n) => (
             <Card key={n.node} hoverable className="p-4">
-              <Link href={`/nodes/${n.node}`} className="flex items-center gap-2 text-ink hover:no-underline">
+              <Link
+                href={`/nodes/${n.node}`}
+                className="flex items-center gap-2 text-ink hover:no-underline"
+              >
                 <Svc name="node" size={24} />
                 <span className="text-[16px] font-semibold">{n.node}</span>
                 <span className="ml-auto">
-                  <StatusDot status={n.online ? "online" : "offline"} label={n.online ? "Online" : "Offline"} />
+                  <StatusDot
+                    status={n.online ? "online" : "offline"}
+                    label={n.online ? "Online" : "Offline"}
+                  />
                 </span>
               </Link>
               <p className="mt-1 text-[12px] text-ink-2">
@@ -55,16 +61,26 @@ export default function NodesPage() {
                 <div>
                   <div className="flex justify-between">
                     <span>RAM</span>
-                    <span className="tabular-nums text-ink-2">{formatBytesPair(n.memUsed, n.memTotal)}</span>
+                    <span className="tabular-nums text-ink-2">
+                      {formatBytesPair(n.memUsed, n.memTotal)}
+                    </span>
                   </div>
-                  <ProgressBar pct={n.memTotal > 0 ? (n.memUsed / n.memTotal) * 100 : 0} className="mt-1" />
+                  <ProgressBar
+                    pct={n.memTotal > 0 ? (n.memUsed / n.memTotal) * 100 : 0}
+                    className="mt-1"
+                  />
                 </div>
                 <div>
                   <div className="flex justify-between">
                     <span>Root FS</span>
-                    <span className="tabular-nums text-ink-2">{formatBytesPair(n.diskUsed, n.diskTotal)}</span>
+                    <span className="tabular-nums text-ink-2">
+                      {formatBytesPair(n.diskUsed, n.diskTotal)}
+                    </span>
                   </div>
-                  <ProgressBar pct={n.diskTotal > 0 ? (n.diskUsed / n.diskTotal) * 100 : 0} className="mt-1" />
+                  <ProgressBar
+                    pct={n.diskTotal > 0 ? (n.diskUsed / n.diskTotal) * 100 : 0}
+                    className="mt-1"
+                  />
                 </div>
               </div>
             </Card>

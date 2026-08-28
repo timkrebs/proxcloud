@@ -1,0 +1,110 @@
+# Proxcloud QA — a single full stack (ADR-0022, mirrors ADR-0014 §4.1): backend +
+# frontend + Postgres + Caddy, no blue/green (QA is disposable). Deployed with
+# `-p proxcloud-qa` and IMAGE_REF exported to the target SHA. All services share
+# one compose network and resolve each other by container name.
+#
+# Kept prod-like on purpose (PROXCLOUD_ENV=production + Postgres TLS) so a
+# production-only config regression is caught by QA smoke BEFORE staging and the
+# prod gate. TLS cert in ./tls is created by bootstrap.sh (gen-postgres-cert.sh).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: proxcloud-qa-postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-proxcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /opt/proxcloud/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-proxcloud}
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgres-tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgres-tls/server.key
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./tls:/etc/postgres-tls:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proxcloud} -d ${POSTGRES_DB:-proxcloud}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  backend:
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    container_name: proxcloud-qa-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PROXCLOUD_ENV: production
+      LISTEN_ADDR: ":8080"
+    ports:
+      - "127.0.0.1:8080:8080"   # loopback only — health checks + smoke, not public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    container_name: proxcloud-qa-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"   # loopback only
+    depends_on:
+      - backend
+
+  migrator:
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    restart: "no"
+    profiles: ["migrate"]
+    env_file: .env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # One-shot idempotent smoke seed (ADR-0016 §4). Mirrors the migrator: same
+  # image, one-shot, started ONLY via `docker compose run --rm seed` from
+  # deploy.sh under SMOKE_SEED. Upserts the least-privilege smoke tenant/project/
+  # user from SMOKE_EMAIL/SMOKE_PASSWORD (both read from .env). Runs AFTER the
+  # schema exists so seed-smoke's store writes land; safe to re-run every deploy.
+  seed:
+    image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
+    restart: "no"
+    profiles: ["seed"]
+    env_file: .env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "seed-smoke"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: proxcloud-qa-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  pgdata:
+    name: proxcloud-qa-pgdata
+  caddy-data:
+    name: proxcloud-qa-caddy-data
+  caddy-config:
+    name: proxcloud-qa-caddy-config

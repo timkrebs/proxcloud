@@ -7,7 +7,12 @@ export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   invalid?: boolean;
 }
 
-export function Input({ variant = "standard", invalid = false, className = "", ...rest }: InputProps) {
+export function Input({
+  variant = "standard",
+  invalid = false,
+  className = "",
+  ...rest
+}: InputProps) {
   const shape =
     variant === "underline"
       ? // §4.2 underline (auth only): 34px, border-bottom only, 15px, transparent bg

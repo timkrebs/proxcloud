@@ -245,8 +245,8 @@ function NewAccountForm({ token, details }: { token: string; details: Invitation
       <BrandRow />
       <h2 className="mb-1 text-[24px] font-semibold text-ink">Create your account</h2>
       <p className="mb-5 text-[13px] leading-[1.5] text-ink-2">
-        You&apos;ve been invited to <strong>{details.tenantName}</strong>. Set a name and password to
-        finish creating your account.
+        You&apos;ve been invited to <strong>{details.tenantName}</strong>. Set a name and password
+        to finish creating your account.
       </p>
       <InviteFacts details={details} />
 
@@ -297,7 +297,9 @@ function NewAccountForm({ token, details }: { token: string; details: Invitation
           confirmBad ? "border-err" : "border-line-input focus:border-accent"
         }`}
       />
-      {confirmBad ? <p className="mt-1 text-[12px] text-err-text">Passwords do not match.</p> : null}
+      {confirmBad ? (
+        <p className="mt-1 text-[12px] text-err-text">Passwords do not match.</p>
+      ) : null}
 
       {err ? <ErrorLine err={err} token={token} /> : null}
 
@@ -416,7 +418,9 @@ export default function InviteAcceptPage() {
       .catch((err) => {
         if (cancelled) return;
         // Enumeration-safe: an unknown/expired/used token is a generic 404.
-        setStatus(err instanceof ApiError && err.status === 404 ? { kind: "invalid" } : { kind: "error" });
+        setStatus(
+          err instanceof ApiError && err.status === 404 ? { kind: "invalid" } : { kind: "error" },
+        );
       });
     return () => {
       cancelled = true;

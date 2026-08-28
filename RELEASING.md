@@ -10,10 +10,12 @@ and **ADR-0016** (smoke scope); this file is the operator's map.
 
 ```
   PR ─▶ ci.yml            (ubuntu-latest · permissions: contents:read · UNTRUSTED code)
-         backend · frontend · contract · docker-build · gitleaks
+         Source: source (gofmt+prettier) · gitleaks · commitlint
+         Build:  backend (unit, no DB) · frontend (lint/typecheck/unit+coverage/build) · docker-build
+         Test:   integration (Postgres · -tags=integration · COVERAGE GATE ≥ floor)
               │ conclusion=success  AND  head_branch = main | v*
               ▼  workflow_run
-       publish.yml         (ubuntu-latest · packages:write · id-token:write)   ◀── built now
+       publish.yml         (ubuntu-latest · packages:write · id-token:write)   ◀── Release
          build --target prod @ head_sha  (immutable 40-char commit, regex-validated)
          push  ghcr.io/timkrebs/proxcloud-backend   : <full-SHA>   (+ : <semver> on v*)
                ghcr.io/timkrebs/proxcloud-frontend  : <full-SHA>   (+ : <semver> on v*)
@@ -21,12 +23,31 @@ and **ADR-0016** (smoke scope); this file is the operator's map.
               │ conclusion=success  ·  workflow_run
               ▼
        deploy.yml          (runs-on: [self-hosted, homelab] · serial group deploy-pve01)
-         deploy-staging ─▶ smoke-staging ─▶ gate-production (reviewer: timkrebs)
+         deploy-qa ─▶ smoke-qa ─▶ deploy-staging ─▶ smoke-staging ─▶ gate-production (reviewer: timkrebs)
               ─▶ deploy-prod (blue/green cutover) ─▶ smoke-prod ─▶ [auto-rollback on fail]
          writes state/last-cutover
               ▼
        soak.yml            (schedule hourly · shares group deploy-pve01 · soak-only key)
          stop retired color older than 24h · prune local images keeping last 10
+```
+
+The same shape as a Mermaid graph (Source → Build → Test → Release → QA →
+Staging → Production, ADR-0014/0022/0023/0024):
+
+```mermaid
+flowchart LR
+  subgraph CI["ci.yml — UNTRUSTED PR code (contents:read)"]
+    direction TB
+    S["Source<br/>source · gitleaks · commitlint"]
+    B["Build<br/>backend (unit, no DB)<br/>frontend (+coverage)<br/>docker-build"]
+    T["Test<br/>integration (Postgres, -tags=integration)<br/>+ coverage gate ≥ floor"]
+    S --> B --> T
+  end
+  T -->|"green + main/v*"| R["Release — publish.yml<br/>GHCR :SHA (+:semver)<br/>SBOM · cosign · never :latest"]
+  R --> QA["QA — deploy-qa → smoke-qa<br/>(fresh deploy, first gate)"]
+  QA --> STG["Staging — deploy-staging → smoke-staging<br/>(production-like)"]
+  STG --> GATE{{"Production gate<br/>reviewer: timkrebs"}}
+  GATE --> PROD["Production — deploy-prod<br/>blue/green cutover → smoke-prod<br/>auto-rollback on fail"]
 ```
 
 Each arrow between workflows is a `workflow_run` edge: a separate run with its
@@ -36,9 +57,10 @@ or `deploy.yml`, which only fire on completed runs of the **base-repo** workflow
 (ADR-0014 §2). `latest` is never a deploy source; deploy resolves the exact
 `workflow_run.head_sha`, so what CI went green on is exactly what ships.
 
-**What exists today:** `ci.yml`, `publish.yml`, `deploy.yml` (the CD wave —
-staging → smoke → prod gate → blue/green cutover → prod smoke → auto-rollback,
-plus a `v*` release job and an ntfy summary), and `soak.yml` (the hourly
+**What exists today:** `ci.yml` (Source/Build/Test stages with a ratcheting
+coverage gate, ADR-0023/0024), `publish.yml`, `deploy.yml` (the CD wave —
+QA → smoke → staging → smoke → prod gate → blue/green cutover → prod smoke →
+auto-rollback, plus a `v*` release job and an ntfy summary), and `soak.yml` (the hourly
 soak/prune sweep — stops the retired color past 24h and prunes local images
 keeping the last 10, via a dedicated soak-only SSH key). The `deploy/` on-guest
 scripts remain the manual path for a from-scratch bring-up or an out-of-band fix.
@@ -58,12 +80,14 @@ staging-rebuild, disaster-recovery, failure-drills).
 
 ## Normal release — just merge to `main`
 
-1. Open a PR. `ci.yml` runs the five required checks on untrusted code.
+1. Open a PR. `ci.yml` runs the required checks on untrusted code:
+   `source`, `backend`, `integration` (with the coverage gate), `frontend`,
+   `docker-build`, `gitleaks`, `commitlint`.
 2. Get a CODEOWNERS review and merge. The push to `main` re-runs `ci.yml`.
 3. On green, `publish.yml` fires automatically: it builds both images at the
    merge commit and pushes `ghcr.io/timkrebs/proxcloud-{backend,frontend}:<SHA>`.
-4. `deploy.yml` (once wired) deploys staging, runs staging smoke, then **waits at
-   the `production` gate** for approval.
+4. `deploy.yml` deploys **QA** first (smoke-qa), then **staging** (smoke-staging),
+   then **waits at the `production` gate** for approval.
 
 No tag is needed for a normal release; `main` flows on its own up to the gate.
 

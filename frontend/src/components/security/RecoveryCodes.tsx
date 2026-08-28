@@ -55,10 +55,16 @@ export function RecoveryCodes({ codes, onDone, doneLabel = "Done" }: RecoveryCod
   return (
     <div>
       <div className="mb-3 flex gap-[10px] rounded-fluent border border-ok bg-ok-bg px-3 py-[10px] text-[13px] leading-[1.5]">
-        <Mi name="checkC" size={16} color="var(--color-ok)" style={{ flexShrink: 0, marginTop: 2 }} />
+        <Mi
+          name="checkC"
+          size={16}
+          color="var(--color-ok)"
+          style={{ flexShrink: 0, marginTop: 2 }}
+        />
         <span>
           Two-step verification is on. Save these <strong>recovery codes</strong> somewhere safe —
-          each works once if you lose your authenticator, and they are shown <strong>only now</strong>.
+          each works once if you lose your authenticator, and they are shown{" "}
+          <strong>only now</strong>.
         </span>
       </div>
 
@@ -69,10 +75,7 @@ export function RecoveryCodes({ codes, onDone, doneLabel = "Done" }: RecoveryCod
       </ul>
 
       <div className="mb-4 flex gap-2">
-        <Button
-          variant="secondaryCompact"
-          onClick={async () => setCopied(await copyText(asText))}
-        >
+        <Button variant="secondaryCompact" onClick={async () => setCopied(await copyText(asText))}>
           {copied ? "Copied" : "Copy codes"}
         </Button>
         <Button
@@ -84,7 +87,11 @@ export function RecoveryCodes({ codes, onDone, doneLabel = "Done" }: RecoveryCod
       </div>
 
       <label className="mb-4 flex cursor-pointer items-start gap-2 text-[13px] text-ink">
-        <Checkbox checked={saved} onChange={setSaved} aria-label="I've saved these recovery codes" />
+        <Checkbox
+          checked={saved}
+          onChange={setSaved}
+          aria-label="I've saved these recovery codes"
+        />
         <span>I&apos;ve saved these recovery codes in a safe place.</span>
       </label>
 

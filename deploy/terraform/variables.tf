@@ -98,6 +98,16 @@ variable "staging_gateway" {
   type        = string
   default     = null
 }
+variable "qa_static_ipv4_cidr" {
+  description = "Static IPv4 CIDR for qa when ip_mode='static' (e.g. 192.168.1.22/24)."
+  type        = string
+  default     = null
+}
+variable "qa_gateway" {
+  description = "Default gateway for qa when ip_mode='static'."
+  type        = string
+  default     = null
+}
 variable "prod_static_ipv4_cidr" {
   description = "Static IPv4 CIDR for prod when ip_mode='static'."
   type        = string
@@ -119,7 +129,7 @@ variable "ubuntu_cloud_image_url" {
 variable "lxc_template_url" {
   description = "URL of the Debian LXC template for staging (Proxmox CDN). Alternatively pre-download with `pveam` and point at the local vztmpl."
   type        = string
-  default     = "http://download.proxmox.com/images/system/debian-12-standard_12.7-1_amd64.tar.zst"
+  default     = "http://download.proxmox.com/images/system/debian-13-standard_13.6-1_amd64.tar.zst"
 }
 
 # ── Guest sizing (Tim-approved defaults) ─────────────────────────────────────
@@ -133,6 +143,19 @@ variable "staging_memory" {
   default     = 4096
 }
 variable "staging_disk_gb" {
+  type    = number
+  default = 32
+}
+variable "qa_cores" {
+  type    = number
+  default = 2
+}
+variable "qa_memory" {
+  description = "QA RAM in MiB."
+  type        = number
+  default     = 4096
+}
+variable "qa_disk_gb" {
   type    = number
   default = 32
 }
@@ -155,6 +178,11 @@ variable "vmid_staging" {
   type        = number
   default     = 8001
 }
+variable "vmid_qa" {
+  description = "VMID for the qa LXC (null = let Proxmox pick). 8001/8002 are taken by staging/prod."
+  type        = number
+  default     = 8003
+}
 variable "vmid_prod" {
   description = "VMID for the prod VM (null = let Proxmox pick)."
   type        = number
@@ -175,7 +203,31 @@ variable "provision_ssh_username" {
 }
 
 variable "ci_deploy_public_key" {
-  description = "The CI deploy PUBLIC key. bootstrap.sh installs it into the deploy user's authorized_keys with the forced-command wrapper. Public key = safe to keep here; the private half lives only in the GitHub environment secret."
+  description = "Shared fallback CI deploy PUBLIC key. bootstrap.sh installs it into the deploy user's authorized_keys with the forced-command wrapper. Public key = safe to keep here; the private half lives only in the GitHub environment secret. Used for an environment when its per-env key below is empty."
+  type        = string
+  default     = ""
+}
+
+# Per-environment deploy PUBLIC keys. The security model uses a DISTINCT key per
+# environment (ADR-0014 §5/§7): the workflow authenticates to staging with the
+# repo STAGING_SSH_KEY and to prod with the production-environment PROD_SSH_KEY,
+# so each guest must trust the PUBLIC half of its own key. Set these to the
+# public half of STAGING_SSH_KEY / PROD_SSH_KEY respectively. When empty, the
+# guest falls back to ci_deploy_public_key (single-key setups still work).
+variable "staging_ci_deploy_public_key" {
+  description = "Staging deploy PUBLIC key (public half of STAGING_SSH_KEY). Empty => fall back to ci_deploy_public_key."
+  type        = string
+  default     = ""
+}
+
+variable "qa_ci_deploy_public_key" {
+  description = "QA deploy PUBLIC key (public half of QA_SSH_KEY). Empty => fall back to ci_deploy_public_key."
+  type        = string
+  default     = ""
+}
+
+variable "prod_ci_deploy_public_key" {
+  description = "Prod deploy PUBLIC key (public half of PROD_SSH_KEY). Empty => fall back to ci_deploy_public_key."
   type        = string
   default     = ""
 }
@@ -198,6 +250,11 @@ variable "run_provisioners" {
 # the *_static_ipv4_cidr host part.
 variable "staging_provision_host" {
   description = "Host/IP Terraform provisioners SSH to for staging (default: DNS name)."
+  type        = string
+  default     = ""
+}
+variable "qa_provision_host" {
+  description = "Host/IP Terraform provisioners SSH to for qa (default: DNS name)."
   type        = string
   default     = ""
 }

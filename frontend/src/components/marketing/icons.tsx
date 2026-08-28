@@ -20,7 +20,10 @@ const SVC_SHAPES: Record<string, Shape[]> = {
     ["circle", { cx: 10, cy: 4.8, r: 1.4, fill: "#50E6FF" }],
     ["circle", { cx: 5.2, cy: 12.8, r: 1.4, fill: "#50E6FF" }],
     ["circle", { cx: 14.8, cy: 12.8, r: 1.4, fill: "#50E6FF" }],
-    ["path", { d: "M10 6.2v1.8M6.4 12.1l1.8-1M13.6 12.1l-1.8-1", stroke: "#C3F1FF", strokeWidth: 1.1 }],
+    [
+      "path",
+      { d: "M10 6.2v1.8M6.4 12.1l1.8-1M13.6 12.1l-1.8-1", stroke: "#C3F1FF", strokeWidth: 1.1 },
+    ],
   ],
   db: [
     ["path", { d: "M3 4.6v10.8c0 1.55 3.1 2.8 7 2.8s7-1.25 7-2.8V4.6", fill: "#0078D4" }],
@@ -46,12 +49,28 @@ const SVC_SHAPES: Record<string, Shape[]> = {
   ],
   secrets: [
     ["rect", { x: 3.5, y: 8.5, width: 13, height: 9.5, rx: 1.2, fill: "#0078D4" }],
-    ["path", { d: "M6.6 8.5V6.2a3.4 3.4 0 0 1 6.8 0v2.3", stroke: "#005BA1", strokeWidth: 1.8, fill: "none" }],
+    [
+      "path",
+      {
+        d: "M6.6 8.5V6.2a3.4 3.4 0 0 1 6.8 0v2.3",
+        stroke: "#005BA1",
+        strokeWidth: 1.8,
+        fill: "none",
+      },
+    ],
     ["circle", { cx: 10, cy: 13, r: 1.7, fill: "#C3F1FF" }],
   ],
   dns: [
     ["circle", { cx: 10, cy: 10, r: 8, fill: "#0078D4" }],
-    ["path", { d: "M2 10h16M10 2c-4.2 4.4-4.2 11.6 0 16 4.2-4.4 4.2-11.6 0-16", stroke: "#C3F1FF", strokeWidth: 1.2, fill: "none" }],
+    [
+      "path",
+      {
+        d: "M2 10h16M10 2c-4.2 4.4-4.2 11.6 0 16 4.2-4.4 4.2-11.6 0-16",
+        stroke: "#C3F1FF",
+        strokeWidth: 1.2,
+        fill: "none",
+      },
+    ],
   ],
 };
 

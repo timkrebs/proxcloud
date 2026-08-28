@@ -27,10 +27,7 @@ interface NavItem {
   ownerOnly?: boolean;
 }
 
-type Row =
-  | { kind: "item"; item: NavItem }
-  | { kind: "divider" }
-  | { kind: "label"; text: string };
+type Row = { kind: "item"; item: NavItem } | { kind: "divider" } | { kind: "label"; text: string };
 
 const prefix =
   (base: string) =>
@@ -92,20 +89,18 @@ const ROWS: Row[] = [
     <Svc name="lxc" size={17} />,
     (p, t) => p === "/resources" && t === "lxc",
   ),
-  item("Nodes", "/nodes", <Svc name="node" size={17} />, (p) => prefix("/nodes")(p), { adminOnly: true }),
-  item("Storage", "/storage", <Svc name="vol" size={17} />, (p) => prefix("/storage")(p), { adminOnly: true }),
+  item("Nodes", "/nodes", <Svc name="node" size={17} />, (p) => prefix("/nodes")(p), {
+    adminOnly: true,
+  }),
+  item("Storage", "/storage", <Svc name="vol" size={17} />, (p) => prefix("/storage")(p), {
+    adminOnly: true,
+  }),
   { kind: "divider" },
-  item(
-    "Activity log",
-    "/activity",
-    <Mi name="clock" size={16} color="var(--color-ink-2)" />,
-    (p) => prefix("/activity")(p),
+  item("Activity log", "/activity", <Mi name="clock" size={16} color="var(--color-ink-2)" />, (p) =>
+    prefix("/activity")(p),
   ),
-  item(
-    "Settings",
-    "/settings",
-    <Mi name="gear" size={16} color="var(--color-ink-2)" />,
-    (p) => prefix("/settings")(p),
+  item("Settings", "/settings", <Mi name="gear" size={16} color="var(--color-ink-2)" />, (p) =>
+    prefix("/settings")(p),
   ),
 ];
 
@@ -162,15 +157,47 @@ function Rows({
 // useSearchParams requires a Suspense boundary during prerendering, so the
 // param-aware list lives behind one; the fallback renders the same rows
 // without a type filter (only /resources?type= items lose their highlight).
-function RowsWithParams({ collapsed, isAdmin, isOwner }: { collapsed: boolean; isAdmin: boolean; isOwner: boolean }) {
+function RowsWithParams({
+  collapsed,
+  isAdmin,
+  isOwner,
+}: {
+  collapsed: boolean;
+  isAdmin: boolean;
+  isOwner: boolean;
+}) {
   const pathname = usePathname();
   const type = useSearchParams().get("type");
-  return <Rows collapsed={collapsed} pathname={pathname} type={type} isAdmin={isAdmin} isOwner={isOwner} />;
+  return (
+    <Rows
+      collapsed={collapsed}
+      pathname={pathname}
+      type={type}
+      isAdmin={isAdmin}
+      isOwner={isOwner}
+    />
+  );
 }
 
-function RowsFallback({ collapsed, isAdmin, isOwner }: { collapsed: boolean; isAdmin: boolean; isOwner: boolean }) {
+function RowsFallback({
+  collapsed,
+  isAdmin,
+  isOwner,
+}: {
+  collapsed: boolean;
+  isAdmin: boolean;
+  isOwner: boolean;
+}) {
   const pathname = usePathname();
-  return <Rows collapsed={collapsed} pathname={pathname} type={null} isAdmin={isAdmin} isOwner={isOwner} />;
+  return (
+    <Rows
+      collapsed={collapsed}
+      pathname={pathname}
+      type={null}
+      isAdmin={isAdmin}
+      isOwner={isOwner}
+    />
+  );
 }
 
 export default function SideNav() {
@@ -187,7 +214,9 @@ export default function SideNav() {
         collapsed ? "w-12" : "w-[220px]"
       }`}
     >
-      <Suspense fallback={<RowsFallback collapsed={collapsed} isAdmin={isAdmin} isOwner={isOwner} />}>
+      <Suspense
+        fallback={<RowsFallback collapsed={collapsed} isAdmin={isAdmin} isOwner={isOwner} />}
+      >
         <RowsWithParams collapsed={collapsed} isAdmin={isAdmin} isOwner={isOwner} />
       </Suspense>
     </nav>

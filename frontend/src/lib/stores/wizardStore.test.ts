@@ -103,22 +103,30 @@ describe("validateWizard", () => {
     expect(errs.some((e) => e.field === "projectId" && e.tab === 0)).toBe(true);
     // Choosing a project clears the error.
     useWizardStore.getState().set({ projectId: "p-web" });
-    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "projectId")).toBe(false);
+    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "projectId")).toBe(
+      false,
+    );
   });
 
   it("requires a template for LXC", () => {
     validLxc();
     useWizardStore.getState().set({ vztmplVolId: "" });
-    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "vztmplVolId")).toBe(true);
+    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "vztmplVolId")).toBe(
+      true,
+    );
   });
 
   it("requires ISO xor clone source for VM", () => {
     validVm();
     useWizardStore.getState().set({ isoVolId: "" });
-    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "isoVolId")).toBe(true);
+    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "isoVolId")).toBe(
+      true,
+    );
 
     useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: null });
-    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "cloneVmid")).toBe(true);
+    expect(validateWizard(useWizardStore.getState()).some((e) => e.field === "cloneVmid")).toBe(
+      true,
+    );
 
     useWizardStore.getState().set({ cloneVmid: 9000 });
     expect(validateWizard(useWizardStore.getState()).some((e) => e.tab === 1)).toBe(false);
@@ -161,7 +169,9 @@ describe("validateWizard", () => {
 
   it("skips disk/storage/bridge checks for clones", () => {
     validVm();
-    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, storage: "", bridge: "", diskGb: "" });
+    useWizardStore
+      .getState()
+      .set({ sourceMode: "clone", cloneVmid: 9000, storage: "", bridge: "", diskGb: "" });
     expect(validateWizard(useWizardStore.getState())).toEqual([]);
   });
 });
@@ -177,7 +187,9 @@ describe("validateWizard — quota (over-quota client feedback)", () => {
   it("passes when remaining dimensions are unlimited (null)", () => {
     validVm();
     useWizardStore.getState().set({ cores: "64", memoryMb: "999999", diskGb: "9999" });
-    const quotaErrs = validateWizard(useWizardStore.getState(), [], unlimited).filter((e) => e.tab === 2 && e.field !== "cores");
+    const quotaErrs = validateWizard(useWizardStore.getState(), [], unlimited).filter(
+      (e) => e.tab === 2 && e.field !== "cores",
+    );
     // cores 64 is within the 1–128 base bound, so only quota (none here) matters.
     expect(quotaErrs).toEqual([]);
   });
@@ -186,7 +198,11 @@ describe("validateWizard — quota (over-quota client feedback)", () => {
     validVm();
     useWizardStore.getState().set({ cores: "8" });
     const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, vcpu: 4 });
-    expect(errs.some((e) => e.field === "cores" && e.tab === 2 && e.message.includes("4 vCPU remaining"))).toBe(true);
+    expect(
+      errs.some(
+        (e) => e.field === "cores" && e.tab === 2 && e.message.includes("4 vCPU remaining"),
+      ),
+    ).toBe(true);
   });
 
   it("allows cores exactly at the remaining vCPU", () => {
@@ -212,14 +228,23 @@ describe("validateWizard — quota (over-quota client feedback)", () => {
 
   it("skips the disk quota check for clones (disk is template-derived)", () => {
     validVm();
-    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, diskGb: "100", storage: "", bridge: "" });
+    useWizardStore
+      .getState()
+      .set({ sourceMode: "clone", cloneVmid: 9000, diskGb: "100", storage: "", bridge: "" });
     const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, diskGb: 1 });
     expect(errs.some((e) => e.field === "diskGb")).toBe(false);
   });
 
   it("skips vCPU and RAM quota checks for clones (delta is template-derived)", () => {
     validVm();
-    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, cores: "8", memoryMb: "8192", storage: "", bridge: "" });
+    useWizardStore.getState().set({
+      sourceMode: "clone",
+      cloneVmid: 9000,
+      cores: "8",
+      memoryMb: "8192",
+      storage: "",
+      bridge: "",
+    });
     const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, vcpu: 1, ramMb: 1 });
     expect(errs.some((e) => e.field === "cores")).toBe(false);
     expect(errs.some((e) => e.field === "memoryMb")).toBe(false);
@@ -227,7 +252,9 @@ describe("validateWizard — quota (over-quota client feedback)", () => {
 
   it("still flags an exhausted guest-count quota for clones", () => {
     validVm();
-    useWizardStore.getState().set({ sourceMode: "clone", cloneVmid: 9000, storage: "", bridge: "" });
+    useWizardStore
+      .getState()
+      .set({ sourceMode: "clone", cloneVmid: 9000, storage: "", bridge: "" });
     const errs = validateWizard(useWizardStore.getState(), [], { ...unlimited, count: 0 });
     expect(errs.some((e) => e.field === "quota" && e.tab === 2)).toBe(true);
   });

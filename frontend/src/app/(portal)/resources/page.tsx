@@ -73,12 +73,18 @@ function ResourcesPageInner() {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "vmid", dir: 1 });
   const [selected, setSelected] = useState<Record<string, boolean>>({});
 
-  const resources = useResources({ type, projectId: projectFilter ?? undefined, node: node || undefined });
+  const resources = useResources({
+    type,
+    projectId: projectFilter ?? undefined,
+    node: node || undefined,
+  });
   const projects = useProjects();
   const action = useGuestAction();
 
   const activeProjectName =
-    projectFilter === null ? "all" : (projects.data ?? []).find((p) => p.id === projectFilter)?.name ?? "…";
+    projectFilter === null
+      ? "all"
+      : ((projects.data ?? []).find((p) => p.id === projectFilter)?.name ?? "…");
 
   const rows = useMemo(() => {
     const list = (resources.data ?? []).filter(
@@ -102,7 +108,10 @@ function ResourcesPageInner() {
     return [...list].sort((a, b) => {
       const av = val(a);
       const bv = val(b);
-      const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+      const cmp =
+        typeof av === "number" && typeof bv === "number"
+          ? av - bv
+          : String(av).localeCompare(String(bv));
       return cmp * sort.dir;
     });
   }, [resources.data, search, sort]);
@@ -113,11 +122,18 @@ function ResourcesPageInner() {
   const bulk = (act: "start" | "stop", eligible: (g: GuestSummary) => boolean) => {
     const targets = selectedRows.filter((g) => !g.template && eligible(g));
     if (targets.length === 0) {
-      pushToast({ kind: "info", title: "Nothing to do", desc: `No selected guest can ${act} right now.` });
+      pushToast({
+        kind: "info",
+        title: "Nothing to do",
+        desc: `No selected guest can ${act} right now.`,
+      });
       return;
     }
     for (const g of targets) {
-      action.mutate({ target: { node: g.node, type: g.type as "qemu" | "lxc", vmid: g.vmid, name: g.name }, action: act });
+      action.mutate({
+        target: { node: g.node, type: g.type as "qemu" | "lxc", vmid: g.vmid, name: g.name },
+        action: act,
+      });
     }
     setSelected({});
   };
@@ -125,12 +141,16 @@ function ResourcesPageInner() {
   const sortHeader = (key: SortKey, label: string, extra = "") => (
     <th
       key={key}
-      onClick={() => setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }))}
+      onClick={() =>
+        setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }))
+      }
       className={`cursor-pointer border-b border-line bg-hover px-3 py-2 text-left font-semibold select-none ${extra}`}
       title={`Sort by ${label}`}
     >
       {label}
-      {sort.key === key ? <span className="ml-1 text-ink-2">{sort.dir === 1 ? "↑" : "↓"}</span> : null}
+      {sort.key === key ? (
+        <span className="ml-1 text-ink-2">{sort.dir === 1 ? "↑" : "↓"}</span>
+      ) : null}
     </th>
   );
 
@@ -159,9 +179,7 @@ function ResourcesPageInner() {
 
       {/* filter pills + search */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <FilterPill onClick={() => setPane("tenant")}>
-          Project == {activeProjectName}
-        </FilterPill>
+        <FilterPill onClick={() => setPane("tenant")}>Project == {activeProjectName}</FilterPill>
         {(projects.data ?? []).length > 0 ? (
           <select
             value={projectFilter ?? ""}
@@ -276,19 +294,28 @@ function ResourcesPageInner() {
                   {sortHeader("name", "Name")}
                   {sortHeader("vmid", "VMID")}
                   {sortHeader("type", "Type")}
-                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">Project</th>
+                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">
+                    Project
+                  </th>
                   {sortHeader("node", "Node")}
                   {sortHeader("status", "Status")}
                   {sortHeader("cpuPct", "CPU")}
                   {sortHeader("mem", "RAM")}
                   {sortHeader("uptimeSec", "Uptime")}
-                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">Creator</th>
-                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">Tags</th>
+                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">
+                    Creator
+                  </th>
+                  <th className="border-b border-line bg-hover px-3 py-2 text-left font-semibold">
+                    Tags
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((g) => (
-                  <tr key={g.id} className={`border-b border-line-row ${selected[g.id] ? "bg-selected" : ""}`}>
+                  <tr
+                    key={g.id}
+                    className={`border-b border-line-row ${selected[g.id] ? "bg-selected" : ""}`}
+                  >
                     <td className="h-10 px-2">
                       <Checkbox
                         size="table"
@@ -298,7 +325,10 @@ function ResourcesPageInner() {
                       />
                     </td>
                     <td className="px-3">
-                      <Link href={`/resources/${g.node}/${g.id}`} className="inline-flex items-center gap-2">
+                      <Link
+                        href={`/resources/${g.node}/${g.id}`}
+                        className="inline-flex items-center gap-2"
+                      >
                         <Svc name={g.type === "qemu" ? "vm" : "lxc"} size={18} />
                         {g.name}
                       </Link>
@@ -309,11 +339,16 @@ function ResourcesPageInner() {
                       ) : null}
                     </td>
                     <td className="px-3 text-ink-2 tabular-nums">{g.vmid}</td>
-                    <td className="px-3 text-ink-2">{g.type === "qemu" ? "Virtual machine" : "LXC container"}</td>
+                    <td className="px-3 text-ink-2">
+                      {g.type === "qemu" ? "Virtual machine" : "LXC container"}
+                    </td>
                     <td className="px-3 text-ink-2">{g.projectName || "—"}</td>
                     <td className="px-3 text-ink-2">{g.node}</td>
                     <td className="px-3">
-                      <StatusDot status={g.status} label={g.status.charAt(0).toUpperCase() + g.status.slice(1)} />
+                      <StatusDot
+                        status={g.status}
+                        label={g.status.charAt(0).toUpperCase() + g.status.slice(1)}
+                      />
                     </td>
                     <td className="px-3 text-ink-2 tabular-nums">
                       {g.status === "running" ? formatPct(g.cpuPct, 1) : "—"}

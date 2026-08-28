@@ -112,7 +112,9 @@ export function nextRun(
 
 /** [1,2,3,4,5] → "Mon–Fri"; [0,6] → "Sun, Sat"; all seven → "Every day"; [] → "". */
 export function formatDays(daysOfWeek: number[]): string {
-  const uniq = Array.from(new Set(daysOfWeek.filter((d) => d >= 0 && d <= 6))).sort((a, b) => a - b);
+  const uniq = Array.from(new Set(daysOfWeek.filter((d) => d >= 0 && d <= 6))).sort(
+    (a, b) => a - b,
+  );
   if (uniq.length === 0) return "";
   if (uniq.length === 7) return "Every day";
 

@@ -1,7 +1,13 @@
 "use client";
 // Guest activity blade — design §3.5.2: real tasks scoped to this VMID.
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
-import { BladeHeading, BladeTable, bladeCell, bladeCellMuted, useGuestParams } from "@/components/guest/common";
+import {
+  BladeHeading,
+  BladeTable,
+  bladeCell,
+  bladeCellMuted,
+  useGuestParams,
+} from "@/components/guest/common";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { useTasks } from "@/lib/api/queries";
 import { relativeTime } from "@/lib/format";

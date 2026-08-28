@@ -79,7 +79,9 @@ describe("Invite accept — branching", () => {
     await screen.findByText("Create your account");
     fireEvent.change(screen.getByLabelText("Full name"), { target: { value: "New Person" } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "a-strong-password" } });
-    fireEvent.change(screen.getByLabelText("Confirm password"), { target: { value: "a-strong-password" } });
+    fireEvent.change(screen.getByLabelText("Confirm password"), {
+      target: { value: "a-strong-password" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Create account & accept" }));
 
     await waitFor(() => expect(push).toHaveBeenCalledWith("/dashboard"));
@@ -103,7 +105,9 @@ describe("Invite accept — branching", () => {
 
   it("attach branch shows a one-click Accept and maps account_exists", async () => {
     resolveDetails({ ...DETAILS, requiresAccount: false, signedInMatches: true });
-    mockFetch.mockRejectedValueOnce(new ApiError(409, { code: "account_exists", message: "exists" }));
+    mockFetch.mockRejectedValueOnce(
+      new ApiError(409, { code: "account_exists", message: "exists" }),
+    );
     render(<InviteAcceptPage />);
 
     const accept = await screen.findByRole("button", { name: "Accept invitation" });
@@ -118,6 +122,8 @@ describe("Invite accept — branching", () => {
     render(<InviteAcceptPage />);
 
     const link = await screen.findByRole("link", { name: "Sign in to accept" });
-    expect(link.getAttribute("href")).toBe(`/signin?returnTo=${encodeURIComponent("/invite/tok-123")}`);
+    expect(link.getAttribute("href")).toBe(
+      `/signin?returnTo=${encodeURIComponent("/invite/tok-123")}`,
+    );
   });
 });

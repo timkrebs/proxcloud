@@ -13,7 +13,15 @@ import { Mi, Svc, type SvcName } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
 import type { GuestSummary } from "@/lib/api/generated/types";
 import { useTenantQuota } from "@/lib/api/quota";
-import { useCluster, useHealth, useMe, useNodeMetrics, useNodes, usePricing, useResources } from "@/lib/api/queries";
+import {
+  useCluster,
+  useHealth,
+  useMe,
+  useNodeMetrics,
+  useNodes,
+  usePricing,
+  useResources,
+} from "@/lib/api/queries";
 import { useTenantSummary } from "@/lib/api/tenant";
 import { formatBytesPair, formatMoney, formatPct, formatUptime, relativeTime } from "@/lib/format";
 import { listRecent } from "@/lib/stores/recent";
@@ -133,7 +141,9 @@ export function RecentResourcesCard() {
                     {r.name}
                   </Link>
                 </td>
-                <td className="px-4 text-ink-2">{r.type === "qemu" ? "Virtual machine" : "LXC container"}</td>
+                <td className="px-4 text-ink-2">
+                  {r.type === "qemu" ? "Virtual machine" : "LXC container"}
+                </td>
                 <td className="px-4 text-ink-2">{r.node}</td>
                 <td className="px-4 text-ink-2 tabular-nums">{relativeTime(r.viewedAt)}</td>
               </tr>
@@ -176,7 +186,10 @@ export function NodesCard() {
                 <Link href={`/nodes/${n.node}`} className="font-semibold">
                   {n.node}
                 </Link>
-                <StatusDot status={n.online ? "online" : "offline"} label={n.online ? "Online" : "Offline"} />
+                <StatusDot
+                  status={n.online ? "online" : "offline"}
+                  label={n.online ? "Online" : "Offline"}
+                />
               </div>
               <div className="mt-[2px] text-[12px] text-ink-2">
                 {n.pveVersion || "—"} · up {formatUptime(n.uptimeSec)}
@@ -190,9 +203,14 @@ export function NodesCard() {
               </div>
               <div className="mt-2 flex items-center justify-between text-[12px]">
                 <span className="text-ink-2">RAM</span>
-                <span className="tabular-nums text-ink-2">{formatBytesPair(n.memUsed, n.memTotal)}</span>
+                <span className="tabular-nums text-ink-2">
+                  {formatBytesPair(n.memUsed, n.memTotal)}
+                </span>
               </div>
-              <ProgressBar pct={n.memTotal > 0 ? (n.memUsed / n.memTotal) * 100 : 0} className="mt-1" />
+              <ProgressBar
+                pct={n.memTotal > 0 ? (n.memUsed / n.memTotal) * 100 : 0}
+                className="mt-1"
+              />
             </div>
           ))}
         </div>
@@ -263,8 +281,20 @@ export function GuestsCard() {
     );
   const g = cluster.data.guests;
   const rows = [
-    { icon: "vm" as const, label: "Virtual machines", running: g.vmsRunning, total: g.vmsTotal, href: "/resources?type=qemu" },
-    { icon: "lxc" as const, label: "LXC containers", running: g.lxcsRunning, total: g.lxcsTotal, href: "/resources?type=lxc" },
+    {
+      icon: "vm" as const,
+      label: "Virtual machines",
+      running: g.vmsRunning,
+      total: g.vmsTotal,
+      href: "/resources?type=qemu",
+    },
+    {
+      icon: "lxc" as const,
+      label: "LXC containers",
+      running: g.lxcsRunning,
+      total: g.lxcsTotal,
+      href: "/resources?type=lxc",
+    },
   ];
   return (
     <Card className="p-4">
@@ -392,7 +422,9 @@ export function CostCard() {
         <CardError err={resources.error} />
       ) : (
         <>
-          <div className="text-[26px] font-semibold tabular-nums">{formatMoney(total, p.currency)}</div>
+          <div className="text-[26px] font-semibold tabular-nums">
+            {formatMoney(total, p.currency)}
+          </div>
           <p className="mt-1 text-[12px] text-ink-2">
             Estimate · flat price model · {guests.length} guest{guests.length === 1 ? "" : "s"}
           </p>

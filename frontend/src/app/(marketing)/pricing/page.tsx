@@ -34,7 +34,9 @@ export default function PricingPage() {
               {c.kicker}
             </div>
             <div className="mt-[10px] text-[22px] font-semibold">{c.title}</div>
-            <div className="mt-[10px] text-[15px] leading-[1.55] text-ink-2 text-pretty">{c.desc}</div>
+            <div className="mt-[10px] text-[15px] leading-[1.55] text-ink-2 text-pretty">
+              {c.desc}
+            </div>
             <div className="mt-4 flex flex-col gap-2">
               {c.items.map((i) => (
                 <div key={i} className="flex items-start gap-[9px] text-[14.5px] leading-[1.5]">
@@ -47,9 +49,9 @@ export default function PricingPage() {
         ))}
       </div>
       <p className="mt-8 max-w-[640px] text-[15px] leading-[1.6] text-ink-2 text-pretty">
-        Detailed showback configuration — flat prices per resource type, cost roll-ups by
-        tenant, project, and tag, and monthly usage exports — lives inside the portal once
-        your cluster is connected.
+        Detailed showback configuration — flat prices per resource type, cost roll-ups by tenant,
+        project, and tag, and monthly usage exports — lives inside the portal once your cluster is
+        connected.
       </p>
       <div className="mt-8">
         <Link

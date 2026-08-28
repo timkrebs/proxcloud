@@ -1,0 +1,63 @@
+# Local pre-commit hooks (ADR-0022). Advisory — CI is the authoritative gate; a
+# contributor who skips these is still caught by the `source`/`gitleaks`/
+# `commitlint` CI jobs. Install with `make hooks` (needs the `pre-commit` tool).
+#
+# These mirror the CI Source stage: Go + frontend formatting, secret scan, and
+# conventional-commit message linting. Pinned revs; the tygo-generated frontend
+# types are excluded (they are machine-authored from the Go structs).
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^frontend/src/lib/api/generated/
+      - id: end-of-file-fixer
+        exclude: ^frontend/src/lib/api/generated/
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  # Secret scan of staged changes, reusing the repo's .gitleaks.toml.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # Conventional-commit message linting (reuses commitlint.config.mjs at root).
+  - repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+    rev: v9.20.0
+    hooks:
+      - id: commitlint
+        stages: [commit-msg]
+        additional_dependencies: ["@commitlint/config-conventional"]
+
+  # Go + frontend formatting via the system toolchains (no extra downloads).
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        types: [go]
+      - id: goimports
+        name: goimports (optional)
+        # No-op when goimports isn't installed, so the hook never blocks a commit
+        # on a missing optional tool; CI's gofmt gate is the backstop.
+        entry: bash -c 'command -v goimports >/dev/null 2>&1 && goimports -w "$@" || true' --
+        language: system
+        types: [go]
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd backend && go vet ./...' --
+        language: system
+        types: [go]
+        pass_filenames: false
+      - id: prettier
+        name: prettier
+        entry: frontend/node_modules/.bin/prettier --write --ignore-unknown
+        language: system
+        files: ^frontend/.*\.(ts|tsx|css|mjs)$
+        exclude: ^frontend/src/lib/api/generated/

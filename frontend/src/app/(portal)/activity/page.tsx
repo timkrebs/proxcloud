@@ -97,8 +97,8 @@ export default function ActivityPage() {
       </nav>
       <h1 className="mb-1 text-[24px] font-semibold">Activity log</h1>
       <p className="mb-3 text-[12px] text-ink-2">
-        Every control-plane action on your resources — Proxcloud&apos;s own audit trail overlaid with
-        Proxmox&apos;s live task history.
+        Every control-plane action on your resources — Proxcloud&apos;s own audit trail overlaid
+        with Proxmox&apos;s live task history.
       </p>
 
       {/* Filters */}
@@ -108,7 +108,9 @@ export default function ActivityPage() {
           <Select
             value={filters.source ?? ""}
             aria-label="Filter by source"
-            onChange={(e) => patch({ source: (e.target.value || undefined) as ActivityFilters["source"] })}
+            onChange={(e) =>
+              patch({ source: (e.target.value || undefined) as ActivityFilters["source"] })
+            }
           >
             <option value="">All</option>
             <option value="audit">Proxcloud</option>
@@ -186,11 +188,16 @@ export default function ActivityPage() {
             <table className="w-full border-collapse text-[13px]">
               <thead>
                 <tr>
-                  {["Source", "Operation", "Target", "Project", "Actor", "Outcome", "Time"].map((h) => (
-                    <th key={h} className="border-b border-line bg-hover px-4 py-2 text-left font-semibold">
-                      {h}
-                    </th>
-                  ))}
+                  {["Source", "Operation", "Target", "Project", "Actor", "Outcome", "Time"].map(
+                    (h) => (
+                      <th
+                        key={h}
+                        className="border-b border-line bg-hover px-4 py-2 text-left font-semibold"
+                      >
+                        {h}
+                      </th>
+                    ),
+                  )}
                 </tr>
               </thead>
               <tbody>

@@ -4,7 +4,13 @@
 import { useState } from "react";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
-import { BladeHeading, BladeTable, bladeCell, bladeCellMuted, useGuestParams } from "@/components/guest/common";
+import {
+  BladeHeading,
+  BladeTable,
+  bladeCell,
+  bladeCellMuted,
+  useGuestParams,
+} from "@/components/guest/common";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Input } from "@/components/ui/Input";
@@ -27,14 +33,24 @@ export default function GuestSnapshotsPage() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [err, setErr] = useState("");
-  const [confirm, setConfirm] = useState<{ action: "rollback" | "delete"; name: string } | null>(null);
+  const [confirm, setConfirm] = useState<{ action: "rollback" | "delete"; name: string } | null>(
+    null,
+  );
 
   const submit = () => {
     if (!NAME_RE.test(name)) {
       setErr("Start with a letter or digit; letters, digits, . - _ only (max 40).");
       return;
     }
-    create.mutate({ name }, { onSuccess: () => { setCreating(false); setName(""); } });
+    create.mutate(
+      { name },
+      {
+        onSuccess: () => {
+          setCreating(false);
+          setName("");
+        },
+      },
+    );
   };
 
   const startCreate = () => {
@@ -123,10 +139,16 @@ export default function GuestSnapshotsPage() {
                   </span>
                 ) : (
                   <span className="flex gap-3">
-                    <Button variant="link" onClick={() => setConfirm({ action: "rollback", name: s.name })}>
+                    <Button
+                      variant="link"
+                      onClick={() => setConfirm({ action: "rollback", name: s.name })}
+                    >
                       Roll back
                     </Button>
-                    <Button variant="link" onClick={() => setConfirm({ action: "delete", name: s.name })}>
+                    <Button
+                      variant="link"
+                      onClick={() => setConfirm({ action: "delete", name: s.name })}
+                    >
                       Delete
                     </Button>
                   </span>

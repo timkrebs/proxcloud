@@ -80,7 +80,9 @@ function RadioRow({
       <Radio active={active} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-semibold">{title}</span>
-        {subtitle ? <span className="block truncate text-[11px] text-ink-2">{subtitle}</span> : null}
+        {subtitle ? (
+          <span className="block truncate text-[11px] text-ink-2">{subtitle}</span>
+        ) : null}
       </span>
       {meta ? <span className="flex-none text-[11px] text-ink-2 capitalize">{meta}</span> : null}
     </button>

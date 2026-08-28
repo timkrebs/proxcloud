@@ -67,22 +67,63 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
 
   useEffect(() => {
     if (guest.data) {
-      recordRecent({ id: guest.data.id, type: g.type, vmid: g.vmid, name: guest.data.name, node: g.node });
+      recordRecent({
+        id: guest.data.id,
+        type: g.type,
+        vmid: g.vmid,
+        name: guest.data.name,
+        node: g.node,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [guest.data?.id]);
 
-  const run = (act: GuestAction) =>
-    action.mutate({ target: { ...g, name }, action: act });
+  const run = (act: GuestAction) => action.mutate({ target: { ...g, name }, action: act });
 
   const commands = useMemo(
     () => [
-      { label: "Connect", icon: <Mi name="console" size={14} />, enabled: bar.connect, onClick: () => router.push(`${basePath}/console`), sep: false },
-      { label: "Start", icon: <Fi name="play" size={13} color="currentColor" />, enabled: bar.start, onClick: () => run("start"), sep: true },
-      { label: "Restart", icon: <Mi name="restart" size={14} />, enabled: bar.restart, onClick: () => run("reboot"), sep: false },
-      { label: "Stop", icon: <Fi name="stop" size={13} color="currentColor" />, enabled: bar.stop, onClick: () => run("stop"), sep: false },
-      { label: "Delete", icon: <Mi name="trash" size={14} />, enabled: bar.delete, onClick: () => setFlyout("delete"), sep: true },
-      { label: "Refresh", icon: <Mi name="restart" size={14} />, enabled: true, onClick: () => guest.refetch(), sep: true },
+      {
+        label: "Connect",
+        icon: <Mi name="console" size={14} />,
+        enabled: bar.connect,
+        onClick: () => router.push(`${basePath}/console`),
+        sep: false,
+      },
+      {
+        label: "Start",
+        icon: <Fi name="play" size={13} color="currentColor" />,
+        enabled: bar.start,
+        onClick: () => run("start"),
+        sep: true,
+      },
+      {
+        label: "Restart",
+        icon: <Mi name="restart" size={14} />,
+        enabled: bar.restart,
+        onClick: () => run("reboot"),
+        sep: false,
+      },
+      {
+        label: "Stop",
+        icon: <Fi name="stop" size={13} color="currentColor" />,
+        enabled: bar.stop,
+        onClick: () => run("stop"),
+        sep: false,
+      },
+      {
+        label: "Delete",
+        icon: <Mi name="trash" size={14} />,
+        enabled: bar.delete,
+        onClick: () => setFlyout("delete"),
+        sep: true,
+      },
+      {
+        label: "Refresh",
+        icon: <Mi name="restart" size={14} />,
+        enabled: true,
+        onClick: () => guest.refetch(),
+        sep: true,
+      },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [bar.connect, bar.start, bar.restart, bar.stop, bar.delete, name],
@@ -90,7 +131,9 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
 
   const menuGroups = MENU.map((grp) => ({
     ...grp,
-    items: grp.items.filter((it) => filter === "" || it.label.toLowerCase().includes(filter.toLowerCase())),
+    items: grp.items.filter(
+      (it) => filter === "" || it.label.toLowerCase().includes(filter.toLowerCase()),
+    ),
   })).filter((grp) => grp.items.length > 0);
 
   return (
@@ -117,7 +160,9 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
         <div className="mt-3 flex items-center border-b border-line">
           {commands.map((c) => (
             <span key={c.label} className="flex items-center">
-              {c.sep ? <span className="mx-1 h-[18px] w-px self-center bg-line" aria-hidden /> : null}
+              {c.sep ? (
+                <span className="mx-1 h-[18px] w-px self-center bg-line" aria-hidden />
+              ) : null}
               <button
                 type="button"
                 disabled={!c.enabled}
@@ -165,7 +210,11 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
                       active ? "bg-nav-active" : ""
                     }`}
                   >
-                    <Mi name={it.icon} size={16} color={active ? "var(--color-accent)" : "var(--color-ink-2)"} />
+                    <Mi
+                      name={it.icon}
+                      size={16}
+                      color={active ? "var(--color-accent)" : "var(--color-ink-2)"}
+                    />
                     {it.label}
                   </Link>
                 );
@@ -175,12 +224,23 @@ export default function GuestBladeLayout({ children }: { children: React.ReactNo
         </aside>
 
         <section className="min-w-0 flex-1 px-7 pt-[18px] pb-10">
-          {guest.isError ? <CardError err={guest.error} /> : guest.isPending ? <Skeleton className="h-40" /> : children}
+          {guest.isError ? (
+            <CardError err={guest.error} />
+          ) : guest.isPending ? (
+            <Skeleton className="h-40" />
+          ) : (
+            children
+          )}
         </section>
       </div>
 
       {flyout === "delete" ? (
-        <DeleteFlyout guest={g} name={name} running={status === "running"} onClose={() => setFlyout(null)} />
+        <DeleteFlyout
+          guest={g}
+          name={name}
+          running={status === "running"}
+          onClose={() => setFlyout(null)}
+        />
       ) : null}
       {flyout === "json" ? (
         <Flyout title="Resource JSON" width={440} onClose={() => setFlyout(null)}>

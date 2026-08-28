@@ -124,7 +124,9 @@ describe("SignInCard — TOTP step", () => {
     fireEvent.click(screen.getByRole("button", { name: "Verify" }));
 
     // Back to the email step, with a visible notice (no toast host in (auth)).
-    expect(await screen.findByText("Your sign-in timed out. Enter your password again.")).toBeTruthy();
+    expect(
+      await screen.findByText("Your sign-in timed out. Enter your password again."),
+    ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
     expect(push).not.toHaveBeenCalled();
   });

@@ -3,7 +3,15 @@
 // (useSwitchTenant → PATCH /api/auth/active-tenant → persist active tenant +
 // invalidate scoped queries). apiFetch is mocked so no network is touched.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Project, TenantMembership } from "@/lib/api/generated/types";
@@ -38,8 +46,24 @@ const tenants: TenantMembership[] = [
 ];
 
 const projects: Project[] = [
-  { id: "p-web", tenantId: "t-acme", name: "Web", slug: "web", poolId: "pc-acme-web", createdAt: "", updatedAt: "" },
-  { id: "p-data", tenantId: "t-acme", name: "Data", slug: "data", poolId: "pc-acme-data", createdAt: "", updatedAt: "" },
+  {
+    id: "p-web",
+    tenantId: "t-acme",
+    name: "Web",
+    slug: "web",
+    poolId: "pc-acme-web",
+    createdAt: "",
+    updatedAt: "",
+  },
+  {
+    id: "p-data",
+    tenantId: "t-acme",
+    name: "Data",
+    slug: "data",
+    poolId: "pc-acme-data",
+    createdAt: "",
+    updatedAt: "",
+  },
 ];
 
 afterEach(() => {
@@ -93,7 +117,9 @@ describe("TenantPane — project filter", () => {
     const onSelectProject = vi.fn();
     render(<TenantPane {...paneProps({ onSelectProject })} />);
 
-    expect(screen.getByRole("radio", { name: "All projects" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "All projects" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
     fireEvent.click(screen.getByRole("radio", { name: "Project Web" }));
     expect(onSelectProject).toHaveBeenCalledWith("p-web");
 

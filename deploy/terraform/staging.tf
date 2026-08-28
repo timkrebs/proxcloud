@@ -57,7 +57,6 @@ resource "proxmox_virtual_environment_container" "staging" {
 
   features {
     nesting = true
-    keyctl  = true
   }
 
   start_on_boot = true
@@ -79,7 +78,7 @@ resource "null_resource" "staging_provision" {
     common_hash  = local.common_hash
     staging_hash = local.staging_hash
     host         = local.staging_host
-    ci_deploy    = sha1(var.ci_deploy_public_key)
+    ci_deploy    = sha1(local.ci_deploy_staging)
   }
 
   connection {
@@ -87,6 +86,10 @@ resource "null_resource" "staging_provision" {
     host  = local.staging_host
     user  = "root"
     agent = true
+  }
+
+  provisioner "remote-exec" {
+    inline = ["mkdir -p /tmp/proxcloud-common /tmp/proxcloud-host"]
   }
 
   provisioner "file" {
@@ -100,7 +103,7 @@ resource "null_resource" "staging_provision" {
   }
 
   provisioner "file" {
-    content     = var.ci_deploy_public_key
+    content     = local.ci_deploy_staging
     destination = "/tmp/ci-deploy-key.pub"
   }
 

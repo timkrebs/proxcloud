@@ -41,7 +41,9 @@ export function CodeBlock() {
               aria-controls="code-panel"
               onClick={() => setTab(i)}
               className={`-mb-px cursor-pointer border-none border-b-2 bg-transparent px-[18px] py-3 text-[14px] hover:text-[#F3F2F1] ${
-                on ? "border-[#479EF5] font-semibold text-[#F3F2F1]" : "border-transparent font-normal text-[#A19F9D]"
+                on
+                  ? "border-[#479EF5] font-semibold text-[#F3F2F1]"
+                  : "border-transparent font-normal text-[#A19F9D]"
               }`}
             >
               {c.label}

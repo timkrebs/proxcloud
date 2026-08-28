@@ -27,7 +27,11 @@ import { qk, type ResourceFilters } from "@/lib/api/queryKeys";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 
 export function useMe() {
-  return useQuery({ queryKey: qk.me, queryFn: () => apiFetch<Me>("/api/auth/me"), staleTime: 5 * 60_000 });
+  return useQuery({
+    queryKey: qk.me,
+    queryFn: () => apiFetch<Me>("/api/auth/me"),
+    staleTime: 5 * 60_000,
+  });
 }
 
 /** True only once /api/auth/me has loaded and the caller is a platform admin. */
@@ -83,7 +87,9 @@ export function useNodeMetrics(node: string, timeframe = "hour") {
   return useQuery({
     queryKey: qk.nodeMetrics(node, timeframe),
     queryFn: () =>
-      apiFetch<MetricsResponse>(`/api/admin/nodes/${encodeURIComponent(node)}/metrics?timeframe=${timeframe}`),
+      apiFetch<MetricsResponse>(
+        `/api/admin/nodes/${encodeURIComponent(node)}/metrics?timeframe=${timeframe}`,
+      ),
     refetchInterval: 60_000,
     enabled: enabled && node !== "",
   });
@@ -105,7 +111,8 @@ export function useResources(filters: ResourceFilters = {}) {
   const tenantId = useActiveTenantId();
   return useQuery({
     queryKey: qk.resources({ ...filters, tenantId: tenantId ?? undefined }),
-    queryFn: () => apiFetch<GuestSummary[]>(`/api/tenants/${tenantId}/resources${resourceQuery(filters)}`),
+    queryFn: () =>
+      apiFetch<GuestSummary[]>(`/api/tenants/${tenantId}/resources${resourceQuery(filters)}`),
     refetchInterval: 10_000,
     enabled: tenantId !== null,
   });

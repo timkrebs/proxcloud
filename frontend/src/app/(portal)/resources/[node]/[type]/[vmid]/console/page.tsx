@@ -136,7 +136,11 @@ function TermConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
       if (!el.current) return;
       el.current.innerHTML = "";
 
-      const term = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: "Cascadia Code, Consolas, monospace" });
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: "Cascadia Code, Consolas, monospace",
+      });
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(el.current);
@@ -164,7 +168,8 @@ function TermConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
       };
 
       term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(`0:${new TextEncoder().encode(data).length}:${data}`);
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(`0:${new TextEncoder().encode(data).length}:${data}`);
       });
       const ping = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send("2");
@@ -206,7 +211,10 @@ function TermConsole({ g, tenantId }: { g: GuestParams; tenantId: string }) {
         </div>
       ) : null}
       {phase === "error" ? <ConsoleError err={error} retry={connect} /> : null}
-      <div ref={el} className="h-[70vh] min-h-[420px] w-full rounded-fluent border border-line bg-[#000] p-1" />
+      <div
+        ref={el}
+        className="h-[70vh] min-h-[420px] w-full rounded-fluent border border-line bg-[#000] p-1"
+      />
     </div>
   );
 }
@@ -263,7 +271,11 @@ export default function ConsolePage() {
   return (
     <div>
       <BladeHeading sub={g.type === "qemu" ? "noVNC" : "xterm.js"}>Console</BladeHeading>
-      {g.type === "qemu" ? <VncConsole g={g} tenantId={tenantId} /> : <TermConsole g={g} tenantId={tenantId} />}
+      {g.type === "qemu" ? (
+        <VncConsole g={g} tenantId={tenantId} />
+      ) : (
+        <TermConsole g={g} tenantId={tenantId} />
+      )}
     </div>
   );
 }

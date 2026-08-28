@@ -70,9 +70,7 @@ export function HeroMock(): ReactElement {
         </div>
         <div className="min-w-0 flex-1 px-[14px] py-3">
           <div className="text-[13px] font-semibold">Good morning, Alex</div>
-          <div className="mt-[2px] text-[9.5px] text-ink-2">
-            Tenant aurora-labs · All projects
-          </div>
+          <div className="mt-[2px] text-[9.5px] text-ink-2">Tenant aurora-labs · All projects</div>
           <div className="mt-3 flex gap-[7px]">
             {HERO_TILES.map(([t, v]) => (
               <div
@@ -117,7 +115,15 @@ function WizardField({ label, value }: { label: string; value: string }): ReactE
   );
 }
 
-function WizardSize({ name, spec, on }: { name: string; spec: string; on?: boolean }): ReactElement {
+function WizardSize({
+  name,
+  spec,
+  on,
+}: {
+  name: string;
+  spec: string;
+  on?: boolean;
+}): ReactElement {
   return (
     <div
       className={`flex-1 rounded-[2px] px-2 py-[7px] ${
@@ -142,9 +148,7 @@ export function WizardMock(): ReactElement {
             <span
               key={tab}
               className={`-mb-px border-b-2 pb-[6px] text-[9.5px] ${
-                i === 0
-                  ? "border-accent font-semibold text-ink"
-                  : "border-transparent text-ink-2"
+                i === 0 ? "border-accent font-semibold text-ink" : "border-transparent text-ink-2"
               }`}
             >
               {tab}
@@ -185,7 +189,15 @@ export function WizardMock(): ReactElement {
   );
 }
 
-function GovBar({ label, usage, pct }: { label: string; usage: string; pct: number }): ReactElement {
+function GovBar({
+  label,
+  usage,
+  pct,
+}: {
+  label: string;
+  usage: string;
+  pct: number;
+}): ReactElement {
   return (
     <div className="mb-[10px]">
       <div className="mb-1 flex justify-between text-[9.5px]">
@@ -207,7 +219,15 @@ const PCT_WIDTH: Record<number, string> = {
   75: "w-[75%]",
 };
 
-function GovRole({ name, role, scope }: { name: string; role: string; scope: string }): ReactElement {
+function GovRole({
+  name,
+  role,
+  scope,
+}: {
+  name: string;
+  role: string;
+  scope: string;
+}): ReactElement {
   return (
     <div className="flex items-center gap-2 border-t border-line py-[6px] text-[9.5px]">
       <span className="flex h-[18px] w-[18px] items-center justify-center rounded-full bg-tint2 text-[8px] font-semibold text-accent">
@@ -244,7 +264,15 @@ export function GovMock(): ReactElement {
   );
 }
 
-function CatalogCard({ type, name, desc }: { type: MarketingSvcName; name: string; desc: string }): ReactElement {
+function CatalogCard({
+  type,
+  name,
+  desc,
+}: {
+  type: MarketingSvcName;
+  name: string;
+  desc: string;
+}): ReactElement {
   return (
     <div className="rounded-[3px] border border-line bg-page p-[10px]">
       <div className="flex items-center gap-[7px]">
@@ -266,10 +294,22 @@ export function CatalogMock(): ReactElement {
           Search the catalog
         </div>
         <div className="mt-[11px] grid grid-cols-2 gap-2">
-          <CatalogCard type="db" name="PostgreSQL 16" desc="Managed Postgres with automated backups and retention." />
+          <CatalogCard
+            type="db"
+            name="PostgreSQL 16"
+            desc="Managed Postgres with automated backups and retention."
+          />
           <CatalogCard type="db" name="Redis 7" desc="In-memory cache with optional persistence." />
-          <CatalogCard type="k8s" name="Kubernetes (K3s)" desc="Node pools, upgrades, kubeconfig download." />
-          <CatalogCard type="store" name="S3 bucket" desc="Object storage with access keys and quotas." />
+          <CatalogCard
+            type="k8s"
+            name="Kubernetes (K3s)"
+            desc="Node pools, upgrades, kubeconfig download."
+          />
+          <CatalogCard
+            type="store"
+            name="S3 bucket"
+            desc="Object storage with access keys and quotas."
+          />
         </div>
       </div>
     </Frame>

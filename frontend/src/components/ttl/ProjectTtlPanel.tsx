@@ -143,7 +143,9 @@ function PolicyFlyout({ project, onClose }: { project: Project; onClose: () => v
             {errors.maxHours ? (
               <p className="mt-1 text-[12px] text-err-text">{errors.maxHours}</p>
             ) : (
-              <p className="mt-1 text-[12px] text-ink-3">Hard ceiling on any TTL in this project.</p>
+              <p className="mt-1 text-[12px] text-ink-3">
+                Hard ceiling on any TTL in this project.
+              </p>
             )}
           </div>
 
@@ -167,7 +169,9 @@ function PolicyFlyout({ project, onClose }: { project: Project; onClose: () => v
             {errors.defaultHours ? (
               <p className="mt-1 text-[12px] text-err-text">{errors.defaultHours}</p>
             ) : (
-              <p className="mt-1 text-[12px] text-ink-3">Blank ⇒ no default (guests are permanent).</p>
+              <p className="mt-1 text-[12px] text-ink-3">
+                Blank ⇒ no default (guests are permanent).
+              </p>
             )}
           </div>
 
@@ -180,7 +184,13 @@ function PolicyFlyout({ project, onClose }: { project: Project; onClose: () => v
 
 // ── Section (list + editor trigger) ────────────────────────────────────────────
 
-export function ProjectTtlSection({ project, canManage }: { project: Project; canManage: boolean }) {
+export function ProjectTtlSection({
+  project,
+  canManage,
+}: {
+  project: Project;
+  canManage: boolean;
+}) {
   const ttls = useProjectTtls(project.id);
   const policy = useProjectTtlPolicy(project.id);
   const [editing, setEditing] = useState(false);
@@ -209,7 +219,11 @@ export function ProjectTtlSection({ project, canManage }: { project: Project; ca
           </p>
         </div>
         {canManage ? (
-          <Button variant="secondaryCompact" disabled={policy.isPending} onClick={() => setEditing(true)}>
+          <Button
+            variant="secondaryCompact"
+            disabled={policy.isPending}
+            onClick={() => setEditing(true)}
+          >
             Edit TTL policy
           </Button>
         ) : null}

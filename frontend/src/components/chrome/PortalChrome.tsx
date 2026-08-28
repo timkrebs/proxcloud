@@ -52,7 +52,8 @@ export default function PortalChrome({ children }: { children: React.ReactNode }
   useEffect(() => {
     if (!me.data) return;
     const tenants = me.data.tenants ?? [];
-    const isMember = (id: string | null | undefined): boolean => !!id && tenants.some((t) => t.id === id);
+    const isMember = (id: string | null | undefined): boolean =>
+      !!id && tenants.some((t) => t.id === id);
     const persisted = useUiStore.getState().activeTenantId;
     let next: string | null = null;
     if (isMember(persisted)) next = persisted;

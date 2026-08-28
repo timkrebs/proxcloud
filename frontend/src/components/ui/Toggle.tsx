@@ -11,7 +11,13 @@ export interface ToggleProps {
   "aria-label"?: string;
 }
 
-export function Toggle({ checked, onChange, disabled, title, "aria-label": ariaLabel }: ToggleProps) {
+export function Toggle({
+  checked,
+  onChange,
+  disabled,
+  title,
+  "aria-label": ariaLabel,
+}: ToggleProps) {
   return (
     <button
       type="button"

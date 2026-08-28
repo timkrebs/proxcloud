@@ -138,12 +138,20 @@ export function usePutProjectTtlPolicy(projectId: string) {
   const tenantId = useActiveTenantId();
   return useMutation({
     mutationFn: (body: TtlPolicyRequest) =>
-      apiFetch<TtlPolicy>(policyUrl(tenantId, projectId), { method: "PUT", body: JSON.stringify(body) }),
+      apiFetch<TtlPolicy>(policyUrl(tenantId, projectId), {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
     onSuccess: () => {
-      pushToast({ kind: "info", title: "TTL policy saved", desc: "Applies to new and extended TTLs." });
+      pushToast({
+        kind: "info",
+        title: "TTL policy saved",
+        desc: "Applies to new and extended TTLs.",
+      });
       invalidateTtls(qc);
     },
-    onError: (err) => pushToast({ kind: "err", title: "Could not save TTL policy", desc: errDesc(err) }),
+    onError: (err) =>
+      pushToast({ kind: "err", title: "Could not save TTL policy", desc: errDesc(err) }),
   });
 }
 

@@ -21,7 +21,12 @@ export interface ProgressBarProps {
   className?: string;
 }
 
-export function ProgressBar({ pct, tone = "accent", transition = false, className = "" }: ProgressBarProps) {
+export function ProgressBar({
+  pct,
+  tone = "accent",
+  transition = false,
+  className = "",
+}: ProgressBarProps) {
   const clamped = Math.min(100, Math.max(0, pct));
   return (
     <div className={`h-1 rounded-fluent bg-hover ${className}`}>

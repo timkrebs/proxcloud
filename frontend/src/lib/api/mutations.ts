@@ -105,7 +105,15 @@ export function useDeleteGuest() {
   return useMutation({
     // The typed name travels to the server, which re-verifies it against
     // the live guest — the confirmation is not just a UI gate.
-    mutationFn: ({ target, purge, confirmName }: { target: GuestTarget; purge: boolean; confirmName: string }) =>
+    mutationFn: ({
+      target,
+      purge,
+      confirmName,
+    }: {
+      target: GuestTarget;
+      purge: boolean;
+      confirmName: string;
+    }) =>
       apiFetch<TaskRef>(`${guestBase(tenantId, target)}${purge ? "?purge=1" : ""}`, {
         method: "DELETE",
         body: JSON.stringify({ confirmName }),

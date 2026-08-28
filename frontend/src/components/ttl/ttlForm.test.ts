@@ -59,7 +59,10 @@ describe("secondsToPreset", () => {
 
 describe("validateTtlForm — duration / max", () => {
   it("accepts a preset within max and emits a stop body without confirmName", () => {
-    const { errors, body } = validateTtlForm(base({ preset: "7d" }), { maxTtlSeconds: MAX, guestName: GUEST });
+    const { errors, body } = validateTtlForm(base({ preset: "7d" }), {
+      maxTtlSeconds: MAX,
+      guestName: GUEST,
+    });
     expect(errors).toEqual({});
     expect(body).toEqual({ action: "stop", ttlSeconds: 7 * DAY });
     expect(body && "confirmName" in body).toBe(false);
@@ -158,7 +161,8 @@ describe("defaultTtlForm / ttlToForm", () => {
     // A round-tripped delete form still needs the typed name before it validates.
     expect(validateTtlForm(form, { maxTtlSeconds: MAX, guestName: GUEST }).body).toBeUndefined();
     expect(
-      validateTtlForm({ ...form, confirmName: GUEST }, { maxTtlSeconds: MAX, guestName: GUEST }).body,
+      validateTtlForm({ ...form, confirmName: GUEST }, { maxTtlSeconds: MAX, guestName: GUEST })
+        .body,
     ).toEqual({ action: "delete", ttlSeconds: 7 * DAY, confirmName: GUEST });
   });
 
@@ -172,7 +176,10 @@ describe("validateTtlPolicyForm", () => {
   it("accepts a max with an optional default within it", () => {
     const { errors, body } = validateTtlPolicyForm("720", "24"); // 30d max, 24h default
     expect(errors).toEqual({});
-    expect(body).toEqual({ maxTtlSeconds: 720 * HOUR_SECONDS, defaultTtlSeconds: 24 * HOUR_SECONDS });
+    expect(body).toEqual({
+      maxTtlSeconds: 720 * HOUR_SECONDS,
+      defaultTtlSeconds: 24 * HOUR_SECONDS,
+    });
   });
 
   it("treats a blank default as no default", () => {

@@ -1,0 +1,28 @@
+# EditorConfig — baseline whitespace conventions across the repo (ADR-0022 source
+# stage). Prettier owns frontend formatting and gofmt owns Go; this covers the
+# rest and keeps editors consistent for contributors.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Go is tab-indented (gofmt).
+[*.go]
+indent_style = tab
+
+[Makefile]
+indent_style = tab
+
+[*.{md,mdx}]
+# Preserve hard line breaks in Markdown.
+trim_trailing_whitespace = false
+
+# Generated frontend types are machine-authored (tygo) — don't fight the tool.
+[frontend/src/lib/api/generated/**]
+trim_trailing_whitespace = false
+insert_final_newline = false

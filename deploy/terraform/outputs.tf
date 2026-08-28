@@ -3,6 +3,11 @@ output "staging_container_id" {
   value       = proxmox_virtual_environment_container.staging.vm_id
 }
 
+output "qa_container_id" {
+  description = "QA LXC VMID."
+  value       = proxmox_virtual_environment_container.qa.vm_id
+}
+
 output "prod_vm_id" {
   description = "Prod VM VMID."
   value       = proxmox_virtual_environment_vm.prod.vm_id
@@ -17,6 +22,7 @@ output "provision_hosts" {
   description = "Hosts the Terraform provisioners SSH to. With DHCP, set *_provision_host to the leased IP (or ensure DNS registration) before re-applying if the DNS names don't resolve."
   value = {
     staging = local.staging_host
+    qa      = local.qa_host
     prod    = local.prod_host
   }
 }

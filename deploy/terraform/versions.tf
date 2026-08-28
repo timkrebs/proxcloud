@@ -6,7 +6,7 @@ terraform {
     # 0.x minor; bump deliberately and re-run `terraform plan`.
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.66"
+      version = ">= 0.66.0"
     }
     null = {
       source  = "hashicorp/null"

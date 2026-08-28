@@ -40,8 +40,18 @@ export default function NodeDetailPage() {
   };
 
   const charts = [
-    { label: "CPU", value: last("cpu") !== undefined ? formatPct(last("cpu")!, 1) : "—", points: s.cpu ?? [], max: 100 },
-    { label: "IO wait", value: last("iowait") !== undefined ? formatPct(last("iowait")!, 1) : "—", points: s.iowait ?? [], max: 100 },
+    {
+      label: "CPU",
+      value: last("cpu") !== undefined ? formatPct(last("cpu")!, 1) : "—",
+      points: s.cpu ?? [],
+      max: 100,
+    },
+    {
+      label: "IO wait",
+      value: last("iowait") !== undefined ? formatPct(last("iowait")!, 1) : "—",
+      points: s.iowait ?? [],
+      max: 100,
+    },
     {
       label: "Memory",
       value: last("memused") !== undefined ? formatBytes(last("memused")!) : "—",
@@ -50,7 +60,10 @@ export default function NodeDetailPage() {
     },
     {
       label: "Network (in/out)",
-      value: last("netin") !== undefined ? `${formatRate(last("netin")!)} / ${formatRate(last("netout") ?? 0)}` : "—",
+      value:
+        last("netin") !== undefined
+          ? `${formatRate(last("netin")!)} / ${formatRate(last("netout") ?? 0)}`
+          : "—",
       points: (s.netin ?? []).map((p, i) => ({ t: p.t, v: p.v + (s.netout?.[i]?.v ?? 0) })),
       max: undefined,
     },
@@ -77,17 +90,33 @@ export default function NodeDetailPage() {
         <Card className="mb-4 max-w-[640px] px-4 py-3">
           <Row k="PVE version" v={detail.data.pveVersion || "—"} />
           <Row k="Kernel" v={detail.data.kernelVersion || "—"} />
-          <Row k="CPU" v={`${detail.data.cpuModel || "—"} (${detail.data.cpuCores} cores, ${detail.data.cpuSockets} socket${detail.data.cpuSockets === 1 ? "" : "s"})`} />
-          <Row k="Load average" v={(detail.data.loadAvg ?? []).map((l) => l.toFixed(2)).join(" / ") || "—"} />
+          <Row
+            k="CPU"
+            v={`${detail.data.cpuModel || "—"} (${detail.data.cpuCores} cores, ${detail.data.cpuSockets} socket${detail.data.cpuSockets === 1 ? "" : "s"})`}
+          />
+          <Row
+            k="Load average"
+            v={(detail.data.loadAvg ?? []).map((l) => l.toFixed(2)).join(" / ") || "—"}
+          />
           <Row k="Memory" v={formatBytesPair(detail.data.memUsed, detail.data.memTotal)} />
-          <Row k="Swap" v={detail.data.swapTotal > 0 ? formatBytesPair(detail.data.swapUsed, detail.data.swapTotal) : "none"} />
+          <Row
+            k="Swap"
+            v={
+              detail.data.swapTotal > 0
+                ? formatBytesPair(detail.data.swapUsed, detail.data.swapTotal)
+                : "none"
+            }
+          />
           <Row k="Root FS" v={formatBytesPair(detail.data.diskUsed, detail.data.diskTotal)} />
           <Row k="Uptime" v={formatUptime(detail.data.uptimeSec)} />
         </Card>
       )}
 
       <h2 className="mb-3 text-[16px] font-semibold">
-        Metrics <span className="text-[12px] font-normal text-ink-2">· Last hour · 1-minute granularity</span>
+        Metrics{" "}
+        <span className="text-[12px] font-normal text-ink-2">
+          · Last hour · 1-minute granularity
+        </span>
       </h2>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-3">
         {charts.map((c) => (

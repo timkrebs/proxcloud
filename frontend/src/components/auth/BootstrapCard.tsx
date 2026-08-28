@@ -91,8 +91,8 @@ export function BootstrapCard({ onAlreadyBootstrapped }: { onAlreadyBootstrapped
 
       <h2 className="text-[24px] font-semibold text-ink">Welcome to Proxcloud</h2>
       <p className="mt-1 mb-5 text-[13px] leading-[1.5] text-ink-2">
-        Create the platform administrator. This is the first and only account
-        until you invite others.
+        Create the platform administrator. This is the first and only account until you invite
+        others.
       </p>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">

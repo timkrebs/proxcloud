@@ -82,9 +82,7 @@ export default function CommandPalette({
 
   const q = query.trim().toLowerCase();
   const quick = QUICK_ACTIONS.filter((a) => a.label.toLowerCase().includes(q));
-  const matches = q
-    ? resources.filter((r) => r.name.toLowerCase().includes(q)).slice(0, 5)
-    : [];
+  const matches = q ? resources.filter((r) => r.name.toLowerCase().includes(q)).slice(0, 5) : [];
 
   function go(href: string) {
     setPaletteOpen(false);

@@ -93,7 +93,9 @@ export default function TopBar({ unread = 0, displayName, initials }: TopBarProp
             onClick={() => setPane("tenant")}
             className="flex h-10 items-center gap-2 px-3 hover:bg-topbar-hover"
           >
-            <span className="text-right text-[12px] leading-tight font-semibold">{displayName}</span>
+            <span className="text-right text-[12px] leading-tight font-semibold">
+              {displayName}
+            </span>
             <span className="flex h-[26px] w-[26px] flex-none items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
               {initials}
             </span>

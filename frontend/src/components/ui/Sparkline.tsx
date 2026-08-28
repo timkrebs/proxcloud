@@ -53,7 +53,12 @@ export function Sparkline({ points, height = 44, max }: SparklineProps) {
       className="block"
       aria-hidden
     >
-      <path d="M0 11.3h100M0 22.6h100" stroke="var(--color-line-row)" strokeWidth={0.6} fill="none" />
+      <path
+        d="M0 11.3h100M0 22.6h100"
+        stroke="var(--color-line-row)"
+        strokeWidth={0.6}
+        fill="none"
+      />
       <path d={area} fill="var(--color-chart-fill)" opacity={0.7} />
       <path
         d={line}

@@ -109,11 +109,21 @@ export default function GuestSchedulePage() {
         </div>
       ) : null}
 
-      <ScheduleEditor values={form} onChange={patch} errors={errors} scope="resource" disabled={!canEdit} />
+      <ScheduleEditor
+        values={form}
+        onChange={patch}
+        errors={errors}
+        scope="resource"
+        disabled={!canEdit}
+      />
 
       {canEdit ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Button variant="primary" disabled={!dirty || !body || put.isPending} onClick={() => body && put.mutate(body)}>
+          <Button
+            variant="primary"
+            disabled={!dirty || !body || put.isPending}
+            onClick={() => body && put.mutate(body)}
+          >
             {put.isPending ? "Applying…" : "Apply changes"}
           </Button>
 

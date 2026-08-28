@@ -28,7 +28,12 @@ import {
 } from "@/lib/api/quota";
 import { useMe, useResources } from "@/lib/api/queries";
 import { useProjectSchedule } from "@/lib/api/scheduleQueries";
-import { useCreateProject, useDeleteProject, useProjects, useRenameProject } from "@/lib/api/tenant";
+import {
+  useCreateProject,
+  useDeleteProject,
+  useProjects,
+  useRenameProject,
+} from "@/lib/api/tenant";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { relativeTime } from "@/lib/format";
 import { scheduleSummary } from "@/lib/schedule";
@@ -110,8 +115,8 @@ function RenameProjectFlyout({ project, onClose }: { project: Project; onClose: 
   return (
     <Flyout title="Rename project" onClose={onClose}>
       <p className="mb-4 text-[13px] leading-[1.5] text-ink-2">
-        Renaming changes the display name only. The slug and Proxmox pool ({project.poolId}) stay the
-        same.
+        Renaming changes the display name only. The slug and Proxmox pool ({project.poolId}) stay
+        the same.
       </p>
       <div className="mb-[6px] text-[13px]">Project name</div>
       <Input
@@ -168,7 +173,12 @@ function DeleteProjectFlyout({
   return (
     <Flyout title="Delete project" onClose={onClose}>
       <div className="mb-4 flex gap-[10px] rounded-fluent border border-err bg-err-bg px-3 py-[10px] text-[13px] leading-[1.5]">
-        <Mi name="warn" size={16} color="var(--color-err)" style={{ flexShrink: 0, marginTop: 2 }} />
+        <Mi
+          name="warn"
+          size={16}
+          color="var(--color-err)"
+          style={{ flexShrink: 0, marginTop: 2 }}
+        />
         <span>
           Deleting <strong>{project.name}</strong> removes its Proxmox pool ({project.poolId}). This
           cannot be undone.
@@ -274,7 +284,11 @@ function DirectoryQuotaSection({ isAdmin }: { isAdmin: boolean }) {
         query={quota}
         action={
           isAdmin ? (
-            <Button variant="secondaryCompact" disabled={quota.isPending} onClick={() => setEditing(true)}>
+            <Button
+              variant="secondaryCompact"
+              disabled={quota.isPending}
+              onClick={() => setEditing(true)}
+            >
               Edit
             </Button>
           ) : undefined
@@ -350,11 +364,17 @@ function ProjectScheduleSection({ project, canManage }: { project: Project; canM
         )}
       </div>
       {canManage ? (
-        <Button variant="secondaryCompact" disabled={sched.isPending} onClick={() => setEditing(true)}>
+        <Button
+          variant="secondaryCompact"
+          disabled={sched.isPending}
+          onClick={() => setEditing(true)}
+        >
           {sched.data ? "Edit schedule" : "Set schedule"}
         </Button>
       ) : null}
-      {editing ? <ProjectScheduleFlyout project={project} onClose={() => setEditing(false)} /> : null}
+      {editing ? (
+        <ProjectScheduleFlyout project={project} onClose={() => setEditing(false)} />
+      ) : null}
     </div>
   );
 }
@@ -394,7 +414,11 @@ function ProjectQuotaPanel({ project, canManage }: { project: Project; canManage
           ) : null}
         </div>
         {canManage ? (
-          <Button variant="secondaryCompact" disabled={!quota.data} onClick={() => setEditing(true)}>
+          <Button
+            variant="secondaryCompact"
+            disabled={!quota.data}
+            onClick={() => setEditing(true)}
+          >
             Edit quota
           </Button>
         ) : null}
@@ -462,8 +486,8 @@ export default function ProjectsPage() {
       </nav>
       <h1 className="mb-1 text-[24px] font-semibold">Projects</h1>
       <p className="mb-3 text-[12px] text-ink-2">
-        Resource groups in your directory — each backed by a Proxmox pool. Resources are created into
-        a project from the wizard.
+        Resource groups in your directory — each backed by a Proxmox pool. Resources are created
+        into a project from the wizard.
       </p>
 
       <DirectoryQuotaSection isAdmin={isAdmin} />
@@ -476,7 +500,11 @@ export default function ProjectsPage() {
           className="flex h-9 items-center gap-[6px] border-none bg-transparent px-[10px] text-[13px] text-ink enabled:cursor-pointer enabled:hover:bg-hover disabled:cursor-default disabled:text-ink-3"
           title={canManage ? "Create a project" : "Only owners can create projects"}
         >
-          <Mi name="plus" size={14} color={canManage ? "var(--color-accent)" : "var(--color-ink-3)"} />
+          <Mi
+            name="plus"
+            size={14}
+            color={canManage ? "var(--color-accent)" : "var(--color-ink-3)"}
+          />
           Create project
         </button>
         <button
@@ -514,7 +542,11 @@ export default function ProjectsPage() {
                 ? "Create your first project to start organizing resources into resource groups."
                 : "No projects have been created in this directory yet."
             }
-            cta={canManage ? { label: "Create project", onClick: () => setDialog({ mode: "create" }) } : undefined}
+            cta={
+              canManage
+                ? { label: "Create project", onClick: () => setDialog({ mode: "create" }) }
+                : undefined
+            }
           />
         ) : (
           <table className="w-full border-collapse text-[13px]">
@@ -544,10 +576,16 @@ export default function ProjectsPage() {
                           type="button"
                           onClick={() => toggleExpanded(p.id)}
                           aria-expanded={open}
-                          aria-label={open ? `Hide quota for ${p.name}` : `Show quota for ${p.name}`}
+                          aria-label={
+                            open ? `Hide quota for ${p.name}` : `Show quota for ${p.name}`
+                          }
                           className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-fluent text-ink-2 hover:bg-hover"
                         >
-                          <Mi name={open ? "chevronDown" : "chevronLeft"} size={14} color="currentColor" />
+                          <Mi
+                            name={open ? "chevronDown" : "chevronLeft"}
+                            size={14}
+                            color="currentColor"
+                          />
                         </button>
                       </td>
                       <td className="h-10 px-4 font-semibold">{p.name}</td>
@@ -558,13 +596,19 @@ export default function ProjectsPage() {
                       <td className="px-4 text-right">
                         {canManage ? (
                           <span className="inline-flex gap-1">
-                            <Button variant="link" onClick={() => setDialog({ mode: "rename", project: p })}>
+                            <Button
+                              variant="link"
+                              onClick={() => setDialog({ mode: "rename", project: p })}
+                            >
                               Rename
                             </Button>
                             <span className="text-line" aria-hidden>
                               ·
                             </span>
-                            <Button variant="link" onClick={() => setDialog({ mode: "delete", project: p })}>
+                            <Button
+                              variant="link"
+                              onClick={() => setDialog({ mode: "delete", project: p })}
+                            >
                               Delete
                             </Button>
                           </span>

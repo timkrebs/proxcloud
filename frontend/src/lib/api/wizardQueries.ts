@@ -6,7 +6,13 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "@/lib/api/client";
-import type { Bridge, CatalogNode, CatalogStorage, NextID, StorageContentItem } from "@/lib/api/generated/types";
+import type {
+  Bridge,
+  CatalogNode,
+  CatalogStorage,
+  NextID,
+  StorageContentItem,
+} from "@/lib/api/generated/types";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 
 export function useCatalogNodes() {
@@ -33,7 +39,9 @@ export function useBridges(node: string) {
   return useQuery({
     queryKey: ["catalog", tenantId, node, "bridges"],
     queryFn: () =>
-      apiFetch<Bridge[]>(`/api/tenants/${tenantId}/catalog/nodes/${encodeURIComponent(node)}/bridges`),
+      apiFetch<Bridge[]>(
+        `/api/tenants/${tenantId}/catalog/nodes/${encodeURIComponent(node)}/bridges`,
+      ),
     enabled: tenantId !== null && node !== "",
   });
 }

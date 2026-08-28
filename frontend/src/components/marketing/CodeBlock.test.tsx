@@ -47,7 +47,9 @@ describe("CodeBlock tabs", () => {
   it("switches to the Terraform and REST snippets", () => {
     renderBlock();
     fireEvent.click(screen.getByRole("tab", { name: "Terraform" }));
-    expect(screen.getByRole("tab", { name: "Terraform" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Terraform" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
     expect(screen.getByRole("tabpanel").textContent).toContain("required_providers");
 
     fireEvent.click(screen.getByRole("tab", { name: "REST" }));
@@ -63,8 +65,6 @@ describe("CodeBlock copy", () => {
 
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText.mock.calls[0][0]).toContain("required_providers");
-    await waitFor(() =>
-      expect(screen.getByText("Copied the Terraform snippet.")).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText("Copied the Terraform snippet.")).toBeTruthy());
   });
 });

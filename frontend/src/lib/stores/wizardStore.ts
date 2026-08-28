@@ -9,7 +9,15 @@ import type { CreateGuestRequest, ProjectQuotaResponse } from "@/lib/api/generat
 export type WizardKind = "qemu" | "lxc";
 export type SourceMode = "iso" | "vztmpl" | "clone";
 
-export const TAB_NAMES = ["Basics", "Image", "Size", "Networking", "Advanced", "Tags", "Review + create"] as const;
+export const TAB_NAMES = [
+  "Basics",
+  "Image",
+  "Size",
+  "Networking",
+  "Advanced",
+  "Tags",
+  "Review + create",
+] as const;
 
 export const SIZE_PRESETS = [
   { name: "S", cores: 2, ramGiB: 4 },
@@ -149,7 +157,12 @@ export interface QuotaRemaining {
  * have a non-null limit; if neither caps the dimension it stays unlimited.
  */
 export function effectiveRemaining(resp: ProjectQuotaResponse): QuotaRemaining {
-  const dim = (projHas: boolean, projRem: number, tenHas: boolean, tenRem: number): number | null => {
+  const dim = (
+    projHas: boolean,
+    projRem: number,
+    tenHas: boolean,
+    tenRem: number,
+  ): number | null => {
     const vals: number[] = [];
     if (projHas) vals.push(projRem);
     if (tenHas) vals.push(tenRem);
@@ -158,10 +171,30 @@ export function effectiveRemaining(resp: ProjectQuotaResponse): QuotaRemaining {
   const p = resp.project;
   const t = resp.tenant;
   return {
-    vcpu: dim(p.limits.maxVcpu != null, p.remaining.vcpu, t.limits.maxVcpu != null, t.remaining.vcpu),
-    ramMb: dim(p.limits.maxRamMb != null, p.remaining.ramMb, t.limits.maxRamMb != null, t.remaining.ramMb),
-    diskGb: dim(p.limits.maxDiskGb != null, p.remaining.diskGb, t.limits.maxDiskGb != null, t.remaining.diskGb),
-    count: dim(p.limits.maxCount != null, p.remaining.count, t.limits.maxCount != null, t.remaining.count),
+    vcpu: dim(
+      p.limits.maxVcpu != null,
+      p.remaining.vcpu,
+      t.limits.maxVcpu != null,
+      t.remaining.vcpu,
+    ),
+    ramMb: dim(
+      p.limits.maxRamMb != null,
+      p.remaining.ramMb,
+      t.limits.maxRamMb != null,
+      t.remaining.ramMb,
+    ),
+    diskGb: dim(
+      p.limits.maxDiskGb != null,
+      p.remaining.diskGb,
+      t.limits.maxDiskGb != null,
+      t.remaining.diskGb,
+    ),
+    count: dim(
+      p.limits.maxCount != null,
+      p.remaining.count,
+      t.limits.maxCount != null,
+      t.remaining.count,
+    ),
   };
 }
 
@@ -184,25 +217,43 @@ export function validateWizard(
     errs.push({
       tab: 0,
       field: "name",
-      message: "Name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens (Basics).",
+      message:
+        "Name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens (Basics).",
     });
   }
-  if (s.node === "") errs.push({ tab: 0, field: "node", message: "Target node is required (Basics)." });
-  if (s.projectId === "") errs.push({ tab: 0, field: "projectId", message: "A project is required (Basics)." });
+  if (s.node === "")
+    errs.push({ tab: 0, field: "node", message: "Target node is required (Basics)." });
+  if (s.projectId === "")
+    errs.push({ tab: 0, field: "projectId", message: "A project is required (Basics)." });
 
   const vmid = Number(s.vmid);
   if (!Number.isInteger(vmid) || vmid < 100 || vmid > 999999999) {
-    errs.push({ tab: 0, field: "vmid", message: "VMID must be an integer between 100 and 999999999 (Basics)." });
+    errs.push({
+      tab: 0,
+      field: "vmid",
+      message: "VMID must be an integer between 100 and 999999999 (Basics).",
+    });
   } else if (existingVmids.includes(vmid)) {
     errs.push({ tab: 0, field: "vmid", message: `VMID ${vmid} is already in use (Basics).` });
   }
 
   if (s.kind === "lxc") {
-    if (s.vztmplVolId === "") errs.push({ tab: 1, field: "vztmplVolId", message: "A container template is required (Image)." });
+    if (s.vztmplVolId === "")
+      errs.push({
+        tab: 1,
+        field: "vztmplVolId",
+        message: "A container template is required (Image).",
+      });
   } else if (s.sourceMode === "iso") {
-    if (s.isoVolId === "") errs.push({ tab: 1, field: "isoVolId", message: "An ISO image is required (Image)." });
+    if (s.isoVolId === "")
+      errs.push({ tab: 1, field: "isoVolId", message: "An ISO image is required (Image)." });
   } else if (s.sourceMode === "clone") {
-    if (!s.cloneVmid) errs.push({ tab: 1, field: "cloneVmid", message: "A template to clone is required (Image)." });
+    if (!s.cloneVmid)
+      errs.push({
+        tab: 1,
+        field: "cloneVmid",
+        message: "A template to clone is required (Image).",
+      });
   }
 
   const cores = Number(s.cores);
@@ -218,28 +269,46 @@ export function validateWizard(
     if (!Number.isInteger(disk) || disk < 1) {
       errs.push({ tab: 2, field: "diskGb", message: "Disk size must be at least 1 GiB (Size)." });
     }
-    if (s.storage === "") errs.push({ tab: 2, field: "storage", message: "A storage pool is required (Size)." });
-    if (s.bridge === "") errs.push({ tab: 3, field: "bridge", message: "A network bridge is required (Networking)." });
+    if (s.storage === "")
+      errs.push({ tab: 2, field: "storage", message: "A storage pool is required (Size)." });
+    if (s.bridge === "")
+      errs.push({ tab: 3, field: "bridge", message: "A network bridge is required (Networking)." });
   }
 
   if (s.vlanTag !== "") {
     const tag = Number(s.vlanTag);
     if (!Number.isInteger(tag) || tag < 1 || tag > 4094) {
-      errs.push({ tab: 3, field: "vlanTag", message: "VLAN tag must be between 1 and 4094 (Networking)." });
+      errs.push({
+        tab: 3,
+        field: "vlanTag",
+        message: "VLAN tag must be between 1 and 4094 (Networking).",
+      });
     }
   }
   if (s.ipMode === "static") {
     if (!CIDR_RE.test(s.cidr)) {
-      errs.push({ tab: 3, field: "cidr", message: "Static IP must be CIDR notation, e.g. 192.168.1.50/24 (Networking)." });
+      errs.push({
+        tab: 3,
+        field: "cidr",
+        message: "Static IP must be CIDR notation, e.g. 192.168.1.50/24 (Networking).",
+      });
     }
     if (s.gateway !== "" && !IP_RE.test(s.gateway)) {
-      errs.push({ tab: 3, field: "gateway", message: "Gateway must be an IPv4 address (Networking)." });
+      errs.push({
+        tab: 3,
+        field: "gateway",
+        message: "Gateway must be an IPv4 address (Networking).",
+      });
     }
   }
 
   for (const t of s.tags) {
     if (!TAG_RE.test(t)) {
-      errs.push({ tab: 5, field: "tags", message: `Invalid tag "${t}" — lowercase letters, digits, . - _ only (Tags).` });
+      errs.push({
+        tab: 5,
+        field: "tags",
+        message: `Invalid tag "${t}" — lowercase letters, digits, . - _ only (Tags).`,
+      });
     }
   }
 
@@ -251,7 +320,8 @@ export function validateWizard(
       errs.push({
         tab: 2,
         field: "quota",
-        message: "This project's guest-count quota is exhausted — free a guest or raise the quota (Size).",
+        message:
+          "This project's guest-count quota is exhausted — free a guest or raise the quota (Size).",
       });
     }
     // For clones the reservation delta is the SOURCE template's allocation
@@ -320,7 +390,11 @@ export function toCreateRequest(s: WizardState): CreateGuestRequest {
       ? {
           ipConfig:
             s.ipMode === "static"
-              ? { mode: "static", cidr: s.cidr, ...(s.gateway !== "" ? { gateway: s.gateway } : {}) }
+              ? {
+                  mode: "static",
+                  cidr: s.cidr,
+                  ...(s.gateway !== "" ? { gateway: s.gateway } : {}),
+                }
               : { mode: "dhcp" },
         }
       : {}),

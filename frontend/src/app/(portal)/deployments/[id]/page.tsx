@@ -41,7 +41,9 @@ export default function DeploymentPage() {
   const failLog = useQuery({
     queryKey: ["task", failedStep?.upid ?? "", "log"],
     queryFn: () =>
-      apiFetch<TaskLog>(`/api/tenants/${tenantId}/tasks/${encodeURIComponent(failedStep!.upid!)}/log?limit=50`),
+      apiFetch<TaskLog>(
+        `/api/tenants/${tenantId}/tasks/${encodeURIComponent(failedStep!.upid!)}/log?limit=50`,
+      ),
     enabled: !!failedStep?.upid && tenantId !== null,
   });
 
@@ -75,7 +77,11 @@ export default function DeploymentPage() {
           <Mi name="checkC" size={34} color="var(--color-ok)" strokeWidth={1.1} />
         )}
         <h1 className="text-[22px] font-semibold">
-          {running ? "Deployment is in progress" : failed ? "Deployment failed" : "Your deployment is complete"}
+          {running
+            ? "Deployment is in progress"
+            : failed
+              ? "Deployment failed"
+              : "Your deployment is complete"}
         </h1>
       </div>
       <p className="text-[13px] text-ink-2">
