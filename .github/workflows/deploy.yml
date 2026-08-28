@@ -264,6 +264,10 @@ jobs:
           SMOKE_STORAGE: ${{ vars.SMOKE_STORAGE }}
           SMOKE_BRIDGE: ${{ vars.SMOKE_BRIDGE }}
           SMOKE_VMID: ${{ vars.QA_SMOKE_VMID }}
+          # Cloudflare Access service token — lets the smoke through the Access
+          # login wall on a gated qa origin (no-op when the secrets are unset).
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           chmod +x ./smoketest
@@ -364,6 +368,10 @@ jobs:
           SMOKE_STORAGE: ${{ vars.SMOKE_STORAGE }}
           SMOKE_BRIDGE: ${{ vars.SMOKE_BRIDGE }}
           SMOKE_VMID: ${{ vars.SMOKE_VMID }}
+          # Cloudflare Access service token — lets the smoke through the Access
+          # login wall on a gated staging origin (no-op when the secrets are unset).
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           chmod +x ./smoketest

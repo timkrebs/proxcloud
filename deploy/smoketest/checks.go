@@ -32,7 +32,7 @@ type Runner struct {
 }
 
 func newRunner(cfg Config) (*Runner, error) {
-	api, err := newAPIClient(cfg.BaseURL, cfg.HTTPTimeout)
+	api, err := newAPIClient(cfg.BaseURL, cfg.HTTPTimeout, cfg.CFClientID, cfg.CFClientSecret)
 	if err != nil {
 		return nil, err
 	}
