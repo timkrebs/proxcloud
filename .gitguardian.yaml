@@ -1,0 +1,13 @@
+# GitGuardian configuration.
+#
+# The per-environment docker-compose files reference POSTGRES_PASSWORD via shell
+# interpolation — `${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /opt/proxcloud/.env}` —
+# a REQUIRED-variable reference (errors if unset), NOT a committed secret. The real
+# value lives only in the per-guest /opt/proxcloud/.env (gitignored, never in git).
+# GitGuardian's generic "Generic Password" detector trips on the literal token; the
+# repo's own gitleaks gate (.gitleaks.toml, run in CI) already passes clean on these
+# files. Scope the ignore to those compose files only, so nothing else is masked.
+version: 2
+secret:
+  ignored-paths:
+    - 'deploy/host/*/docker-compose.yml'
