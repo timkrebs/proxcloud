@@ -9,6 +9,9 @@ resource "proxmox_virtual_environment_vm" "prod" {
   node_name   = var.node
   vm_id       = var.vmid_prod
 
+  # The cloud image must exist on the node before the disk can import from it.
+  depends_on = [proxmox_download_file.ubuntu_cloud_image]
+
   agent {
     enabled = true
   }
@@ -25,8 +28,8 @@ resource "proxmox_virtual_environment_vm" "prod" {
   disk {
     datastore_id = var.storage
     interface    = "scsi0"
-    import_from  = proxmox_download_file.ubuntu_cloud_image.id
     size         = var.prod_disk_gb
+    # import_from removed temporarily — we write the image in by hand below
   }
 
   network_device {
@@ -77,7 +80,7 @@ resource "null_resource" "prod_provision" {
     common_hash = local.common_hash
     prod_hash   = local.prod_hash
     host        = local.prod_host
-    ci_deploy   = sha1(var.ci_deploy_public_key)
+    ci_deploy   = sha1(local.ci_deploy_prod)
   }
 
   connection {
@@ -87,33 +90,33 @@ resource "null_resource" "prod_provision" {
     agent = true
   }
 
-  provisioner "file" {
-    source      = "${path.module}/../host/common/"
-    destination = "/tmp/proxcloud-common"
-  }
-
-  provisioner "file" {
-    source      = "${path.module}/../host/prod/"
-    destination = "/tmp/proxcloud-host"
-  }
-
-  provisioner "file" {
-    content     = var.ci_deploy_public_key
-    destination = "/tmp/ci-deploy-key.pub"
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      TMP=$(mktemp -d)
+      cp -r ${path.module}/../host/common $TMP/common
+      cp -r ${path.module}/../host/prod   $TMP/prod
+      printf '%s' '${local.ci_deploy_prod}' > $TMP/ci-deploy-key.pub
+      tar czf - -C $TMP common prod ci-deploy-key.pub \
+        | ssh -o StrictHostKeyChecking=accept-new ${var.provision_ssh_username}@${local.prod_host} 'cat > /tmp/proxcloud-host.tgz'
+      rm -rf $TMP
+    EOT
   }
 
   provisioner "remote-exec" {
     inline = [
       "set -e",
-      "chmod +x /tmp/proxcloud-common/bin/*.sh",
-      "sudo /tmp/proxcloud-common/bin/first-boot.sh",
+      "rm -rf /tmp/proxcloud && mkdir -p /tmp/proxcloud",
+      "tar xzf /tmp/proxcloud-host.tgz -C /tmp/proxcloud",
+      "chmod +x /tmp/proxcloud/common/bin/*.sh",
+      "sudo /tmp/proxcloud/common/bin/first-boot.sh",
       "sudo mkdir -p /opt/proxcloud/bin",
-      # common scripts first, then the prod tree overlays (adds its own bin/*).
-      "sudo cp -r /tmp/proxcloud-common/bin/. /opt/proxcloud/bin/",
-      "sudo cp -r /tmp/proxcloud-host/. /opt/proxcloud/",
-      "sudo cp /tmp/ci-deploy-key.pub /opt/proxcloud/ci-deploy-key.pub",
+      "sudo cp -r /tmp/proxcloud/common/bin/. /opt/proxcloud/bin/",
+      "sudo cp -r /tmp/proxcloud/prod/. /opt/proxcloud/",
+      "sudo cp /tmp/proxcloud/ci-deploy-key.pub /opt/proxcloud/ci-deploy-key.pub",
       "sudo chmod +x /opt/proxcloud/bin/*.sh /opt/proxcloud/bootstrap.sh",
       "sudo /opt/proxcloud/bootstrap.sh",
     ]
   }
 }
+

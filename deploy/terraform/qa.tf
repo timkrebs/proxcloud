@@ -1,26 +1,28 @@
-# proxcloud-staging — the LXC that runs the single staging stack (ADR-0014).
-# Unprivileged + nesting/keyctl so Docker runs inside the container. If Docker
-# misbehaves on your kernel, set unprivileged=false (see deploy/README.md).
+# proxcloud-qa — the LXC that runs the single QA stack (ADR-0022, mirrors
+# ADR-0014 §4.1). A clone of the staging pattern: unprivileged LXC with
+# nesting/keyctl so Docker runs inside the container, single compose stack, no
+# blue/green (QA is disposable — rebuild from scratch instead of repairing).
+# If Docker misbehaves on your kernel, set unprivileged=false (see deploy/README.md).
 
-resource "proxmox_virtual_environment_container" "staging" {
-  description  = "Proxcloud STAGING — single Docker compose stack. Managed by deploy/terraform."
-  tags         = ["proxcloud", "staging"]
+resource "proxmox_virtual_environment_container" "qa" {
+  description  = "Proxcloud QA — single Docker compose stack. Managed by deploy/terraform."
+  tags         = ["proxcloud", "qa"]
   node_name    = var.node
-  vm_id        = var.vmid_staging
+  vm_id        = var.vmid_qa
   unprivileged = true
 
   cpu {
-    cores = var.staging_cores
+    cores = var.qa_cores
   }
 
   memory {
-    dedicated = var.staging_memory
+    dedicated = var.qa_memory
     swap      = 512
   }
 
   disk {
     datastore_id = var.storage
-    size         = var.staging_disk_gb
+    size         = var.qa_disk_gb
   }
 
   network_interface {
@@ -35,12 +37,12 @@ resource "proxmox_virtual_environment_container" "staging" {
   }
 
   initialization {
-    hostname = "proxcloud-staging"
+    hostname = "proxcloud-qa"
 
     ip_config {
       ipv4 {
-        address = local.ipv4_staging
-        gateway = local.gw_staging
+        address = local.ipv4_qa
+        gateway = local.gw_qa
       }
     }
 
@@ -67,23 +69,23 @@ resource "proxmox_virtual_environment_container" "staging" {
 }
 
 # ── Provision: first-boot.sh (Docker + deploy user), lay down /opt/proxcloud
-#    (common + staging), run bootstrap.sh. Runs as root (LXC). ──
-resource "null_resource" "staging_provision" {
+#    (common + qa), run bootstrap.sh. Runs as root (LXC). ──
+resource "null_resource" "qa_provision" {
   count = var.run_provisioners ? 1 : 0
 
-  depends_on = [proxmox_virtual_environment_container.staging]
+  depends_on = [proxmox_virtual_environment_container.qa]
 
   triggers = {
-    ct_id        = proxmox_virtual_environment_container.staging.vm_id
-    common_hash  = local.common_hash
-    staging_hash = local.staging_hash
-    host         = local.staging_host
-    ci_deploy    = sha1(local.ci_deploy_staging)
+    ct_id       = proxmox_virtual_environment_container.qa.vm_id
+    common_hash = local.common_hash
+    qa_hash     = local.qa_hash
+    host        = local.qa_host
+    ci_deploy   = sha1(local.ci_deploy_qa)
   }
 
   connection {
     type  = "ssh"
-    host  = local.staging_host
+    host  = local.qa_host
     user  = "root"
     agent = true
   }
@@ -98,12 +100,12 @@ resource "null_resource" "staging_provision" {
   }
 
   provisioner "file" {
-    source      = "${path.module}/../host/staging/"
+    source      = "${path.module}/../host/qa/"
     destination = "/tmp/proxcloud-host"
   }
 
   provisioner "file" {
-    content     = local.ci_deploy_staging
+    content     = local.ci_deploy_qa
     destination = "/tmp/ci-deploy-key.pub"
   }
 

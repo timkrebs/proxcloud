@@ -20,5 +20,7 @@ keys/ci-deploy-prod
 keys/ci-deploy-prod.pub
 keys/ci-deploy-staging
 keys/ci-deploy-staging.pub
+keys/ci-deploy-qa
+keys/ci-deploy-qa.pub
 keys/ci-soak
 keys/ci-soak.pub

@@ -18,25 +18,41 @@ provider "proxmox" {
   ssh {
     agent    = var.proxmox_ssh_agent
     username = var.proxmox_ssh_username
+
+    node {
+      name    = var.node
+      address = "192.168.1.128"
+    }
   }
 }
 
 locals {
   # IPv4 config string bpg expects: "dhcp" or a CIDR.
   ipv4_staging = var.ip_mode == "static" ? var.staging_static_ipv4_cidr : "dhcp"
+  ipv4_qa      = var.ip_mode == "static" ? var.qa_static_ipv4_cidr : "dhcp"
   ipv4_prod    = var.ip_mode == "static" ? var.prod_static_ipv4_cidr : "dhcp"
 
   gw_staging = var.ip_mode == "static" ? var.staging_gateway : null
+  gw_qa      = var.ip_mode == "static" ? var.qa_gateway : null
   gw_prod    = var.ip_mode == "static" ? var.prod_gateway : null
 
   # Provisioner SSH targets: explicit override → else the DNS name.
   staging_host = var.staging_provision_host != "" ? var.staging_provision_host : "proxcloud-staging.${var.domain}"
+  qa_host      = var.qa_provision_host != "" ? var.qa_provision_host : "proxcloud-qa.${var.domain}"
   prod_host    = var.prod_provision_host != "" ? var.prod_provision_host : "proxcloud-prod.${var.domain}"
+
+  # Per-environment deploy key: the env-specific key if set, else the shared
+  # fallback. Each guest trusts only the PUBLIC half of its own environment's
+  # deploy key (staging <- STAGING_SSH_KEY, qa <- QA_SSH_KEY, prod <- PROD_SSH_KEY).
+  ci_deploy_staging = var.staging_ci_deploy_public_key != "" ? var.staging_ci_deploy_public_key : var.ci_deploy_public_key
+  ci_deploy_qa      = var.qa_ci_deploy_public_key != "" ? var.qa_ci_deploy_public_key : var.ci_deploy_public_key
+  ci_deploy_prod    = var.prod_ci_deploy_public_key != "" ? var.prod_ci_deploy_public_key : var.ci_deploy_public_key
 
   # Re-run provisioners when the on-guest scaffolding changes.
   common_hash  = sha1(join("", [for f in sort(tolist(fileset("${path.module}/../host/common", "**"))) : filesha1("${path.module}/../host/common/${f}")]))
   prod_hash    = sha1(join("", [for f in sort(tolist(fileset("${path.module}/../host/prod", "**"))) : filesha1("${path.module}/../host/prod/${f}")]))
   staging_hash = sha1(join("", [for f in sort(tolist(fileset("${path.module}/../host/staging", "**"))) : filesha1("${path.module}/../host/staging/${f}")]))
+  qa_hash      = sha1(join("", [for f in sort(tolist(fileset("${path.module}/../host/qa", "**"))) : filesha1("${path.module}/../host/qa/${f}")]))
 }
 
 # ── VM cloud image (imported as the prod root disk) ──────────────────────────

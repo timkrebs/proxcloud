@@ -34,3 +34,4 @@ frontend/coverage/
 # OS / editor
 .DS_Store
 *.log
+.claude/
