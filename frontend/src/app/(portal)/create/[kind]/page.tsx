@@ -17,6 +17,7 @@ import {
   SizeTab,
   TagsTab,
 } from "@/components/wizard/tabs";
+import { CredentialsTab } from "@/components/wizard/CredentialsTab";
 import { CredentialReveal } from "@/components/catalog/CredentialReveal";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -32,13 +33,15 @@ import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { pushToast } from "@/lib/stores/toastStore";
 import { CostRows } from "@/components/wizard/CostRows";
 import {
-  TAB_NAMES,
+  STEP_LABEL,
   effectiveRemaining,
-  tabIndex,
+  makeWizardCredentials,
+  stepIndex,
   toCreateRequest,
   toProvisionRequest,
   useWizardStore,
   validateWizard,
+  wizardSteps,
 } from "@/lib/stores/wizardStore";
 
 function WizardPageInner() {
@@ -81,6 +84,8 @@ function WizardPageInner() {
     set({
       serviceId: svc.id,
       serviceName: svc.displayName,
+      serviceHasCredentials: svc.credentials.length > 0,
+      credentials: makeWizardCredentials(svc.credentials),
       name: svc.id,
       sourceMode: "iso",
       cores: String(svc.sizing.default.cores),
@@ -101,19 +106,27 @@ function WizardPageInner() {
 
   const kindLabel = kind === "qemu" ? "virtual machine" : "LXC container";
   const heading = inServiceMode && svc ? `Create ${svc.displayName}` : `Create a ${kindLabel}`;
-  const onReview = s.tab === tabIndex("review");
+  // Mode-aware ordered steps: a catalog service with credentials inserts the
+  // Credentials step; a plain create is unchanged. Every positional reference
+  // resolves through this list, never a hardcoded index.
+  const steps = wizardSteps(s);
+  const reviewIdx = stepIndex(steps, "review");
+  const onReview = s.tab === reviewIdx;
+  const active = steps[s.tab];
+  const tabErrs = errs.filter((e) => e.tab === s.tab);
 
   const submit = () => {
     setQuotaError(null);
     if (errs.length > 0) {
-      s.set({ tab: tabIndex("review"), maxTab: tabIndex("review") });
+      s.set({ tab: reviewIdx, maxTab: reviewIdx });
       return;
     }
     const onError = (err: unknown) => {
       if (isQuotaExceeded(err)) {
         // Send the user back to Size and show the sizing error inline.
         setQuotaError(err instanceof ApiError ? err.message : "Over quota");
-        s.set({ tab: tabIndex("size"), maxTab: Math.max(s.maxTab, tabIndex("size")) });
+        const sizeIdx = stepIndex(steps, "size");
+        s.set({ tab: sizeIdx, maxTab: Math.max(s.maxTab, sizeIdx) });
         return;
       }
       pushToast({
@@ -174,25 +187,25 @@ function WizardPageInner() {
 
       {/* tab strip §3.3 */}
       <div className="mt-4 flex gap-[2px] border-b border-line">
-        {TAB_NAMES.map((name, i) => {
+        {steps.map((key, i) => {
           const locked = i > s.maxTab;
-          const active = i === s.tab;
-          const tabErr = errs.some((e) => e.tab === i) && s.maxTab >= i && !active;
+          const isActive = i === s.tab;
+          const tabErr = errs.some((e) => e.tab === i) && s.maxTab >= i && !isActive;
           return (
             <button
-              key={name}
+              key={key}
               type="button"
               disabled={locked}
               onClick={() => s.goTab(i)}
               className={`-mb-px cursor-pointer border-0 border-b-2 bg-transparent px-3 py-[9px] text-[14px] ${
-                active
+                isActive
                   ? "border-accent font-semibold text-ink"
                   : locked
                     ? "cursor-default border-transparent text-ink-3"
                     : "border-transparent text-ink-2 hover:text-ink"
               }`}
             >
-              {name}
+              {STEP_LABEL[key]}
               {tabErr ? <span className="ml-1 text-err">•</span> : null}
             </button>
           );
@@ -215,13 +228,14 @@ function WizardPageInner() {
               </div>
             </div>
           ) : null}
-          {s.tab === 0 ? <BasicsTab errs={errs.filter((e) => e.tab === 0)} /> : null}
-          {s.tab === 1 ? <ImageTab errs={errs.filter((e) => e.tab === 1)} /> : null}
-          {s.tab === 2 ? <SizeTab errs={errs.filter((e) => e.tab === 2)} /> : null}
-          {s.tab === 3 ? <NetworkingTab errs={errs.filter((e) => e.tab === 3)} /> : null}
-          {s.tab === 4 ? <AdvancedTab /> : null}
-          {s.tab === 5 ? <TagsTab errs={errs.filter((e) => e.tab === 5)} /> : null}
-          {s.tab === 6 ? <ReviewTab errs={errs} /> : null}
+          {active === "basics" ? <BasicsTab errs={tabErrs} /> : null}
+          {active === "image" ? <ImageTab errs={tabErrs} /> : null}
+          {active === "size" ? <SizeTab errs={tabErrs} /> : null}
+          {active === "networking" ? <NetworkingTab errs={tabErrs} /> : null}
+          {active === "advanced" ? <AdvancedTab /> : null}
+          {active === "credentials" ? <CredentialsTab errs={tabErrs} /> : null}
+          {active === "tags" ? <TagsTab errs={tabErrs} /> : null}
+          {active === "review" ? <ReviewTab errs={errs} /> : null}
         </div>
 
         {/* sticky summary card §3.3 (pricing lands later; summary is real) */}
@@ -267,9 +281,7 @@ function WizardPageInner() {
         <Button
           variant="primary"
           disabled={pending || submitted || (onReview && tenantId === null)}
-          onClick={
-            onReview ? submit : () => s.set({ tab: tabIndex("review"), maxTab: tabIndex("review") })
-          }
+          onClick={onReview ? submit : () => s.set({ tab: reviewIdx, maxTab: reviewIdx })}
         >
           {onReview ? (pending ? "Creating…" : "Create") : "Review + create"}
         </Button>
@@ -278,7 +290,7 @@ function WizardPageInner() {
         </Button>
         {!onReview ? (
           <Button variant="secondary" onClick={() => s.next()}>
-            Next : {TAB_NAMES[s.tab + 1]} &gt;
+            Next : {STEP_LABEL[steps[s.tab + 1]]} &gt;
           </Button>
         ) : null}
       </div>

@@ -843,6 +843,22 @@ export function ReviewTab({ errs }: { errs: WizardError[] }) {
         ["Start after create", s.startAfterCreate ? "Yes" : "No"],
       ],
     },
+    // Credentials summary (service mode) — origin only; never a secret value.
+    ...(s.serviceId !== "" && s.credentials.length > 0
+      ? [
+          {
+            title: "Credentials",
+            rows: s.credentials.map((c): [string, string] => [
+              c.name,
+              c.mode === "set"
+                ? c.usernameSettable && c.username.trim() !== ""
+                  ? `You set it (username ${c.username})`
+                  : "You set it"
+                : "Generated — shown once after create",
+            ]),
+          },
+        ]
+      : []),
     { title: "Tags", rows: [["Tags", s.tags.join(", ") || "—"]] },
   ];
 
