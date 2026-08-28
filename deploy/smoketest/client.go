@@ -25,15 +25,30 @@ type apiClient struct {
 	base   string
 	hc     *http.Client // bounded-timeout client for request/response JSON calls
 	stream *http.Client // no client-timeout; SSE liveness is bounded by context
+	cfID   string       // Cloudflare Access service-token client id (optional)
+	cfSec  string       // Cloudflare Access service-token client secret (optional)
 }
 
-func newAPIClient(base string, httpTimeout time.Duration) (*apiClient, error) {
+func newAPIClient(base string, httpTimeout time.Duration, cfID, cfSec string) (*apiClient, error) {
 	jar := newPermissiveJar()
 	return &apiClient{
 		base:   strings.TrimRight(base, "/"),
 		hc:     &http.Client{Jar: jar, Timeout: httpTimeout},
 		stream: &http.Client{Jar: jar}, // Timeout 0: long-lived stream, ctx-bounded
+		cfID:   cfID,
+		cfSec:  cfSec,
 	}, nil
+}
+
+// applyAccessHeaders adds Cloudflare Access service-token headers when both are
+// configured, so the smoke can reach an Access-protected origin (a gated
+// qa/staging) without an interactive login. No-op when the credentials are
+// empty — an un-gated origin (e.g. public prod) is unaffected.
+func (c *apiClient) applyAccessHeaders(req *http.Request) {
+	if c.cfID != "" && c.cfSec != "" {
+		req.Header.Set("CF-Access-Client-Id", c.cfID)
+		req.Header.Set("CF-Access-Client-Secret", c.cfSec)
+	}
 }
 
 // permissiveJar is a minimal cookie jar for the smoke: it stores cookies per
@@ -102,6 +117,7 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) (int,
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	c.applyAccessHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
@@ -190,6 +206,7 @@ func (c *apiClient) readSSE(ctx context.Context, path string) (sseResult, error)
 		return sseResult{}, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	c.applyAccessHeaders(req)
 	resp, err := c.stream.Do(req)
 	if err != nil {
 		return sseResult{}, fmt.Errorf("open SSE %s: %w", path, err)

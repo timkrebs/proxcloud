@@ -58,6 +58,12 @@ type Config struct {
 	SSETimeout  time.Duration
 
 	SummaryFile string // GITHUB_STEP_SUMMARY, if set
+
+	// Cloudflare Access service-token creds (optional). When set, every request
+	// carries CF-Access-Client-Id/Secret so the smoke can reach an Access-gated
+	// qa/staging origin without an interactive login. Empty => not gated.
+	CFClientID     string // CF_ACCESS_CLIENT_ID
+	CFClientSecret string // CF_ACCESS_CLIENT_SECRET
 }
 
 func envOr(key, def string) string {
@@ -82,6 +88,9 @@ func loadConfig() (Config, error) {
 		TaskTimeout: envDur("SMOKE_TASK_TIMEOUT", 180*time.Second),
 		SSETimeout:  envDur("SMOKE_SSE_TIMEOUT", 20*time.Second),
 		SummaryFile: strings.TrimSpace(os.Getenv("GITHUB_STEP_SUMMARY")),
+
+		CFClientID:     envOr("CF_ACCESS_CLIENT_ID", ""),
+		CFClientSecret: envOr("CF_ACCESS_CLIENT_SECRET", ""),
 	}
 	var vmid string
 	flag.StringVar(&c.BaseURL, "base-url", envOr("SMOKE_BASE_URL", ""), "base URL of the deployed origin, e.g. https://staging.proxcloud.lab")
