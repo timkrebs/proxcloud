@@ -109,9 +109,12 @@ func TestLoadValidatesFailFast(t *testing.T) {
 		{"bad readiness", func(f map[string]string) {
 			f["services/pg/service.yaml"] = strings.Replace(f["services/pg/service.yaml"], `readiness: "tcp:5432"`, `readiness: "http:8080"`, 1)
 		}, "readiness must be 'tcp:<port>'"},
-		{"no credentials", func(f map[string]string) {
+		// An EMPTY credential schema is now ACCEPTED (ADR-0027 §4, the "Vault
+		// honesty" case): a service whose secrets are generated in-guest and never
+		// seen by Proxcloud declares no credential. wantSub "" asserts it loads.
+		{"no credentials -> allowed (vault honesty)", func(f map[string]string) {
 			f["services/pg/service.yaml"] = strings.Replace(f["services/pg/service.yaml"], "credentials:\n  - name: superuser\n    username: postgres\n    userSettable: true\n    generatedDefault: true", "credentials: []", 1)
-		}, "at least one credential"},
+		}, ""},
 		{"unknown field", func(f map[string]string) {
 			f["services/pg/service.yaml"] += "bogusField: 1\n"
 		}, "parse"},

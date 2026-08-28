@@ -322,10 +322,27 @@ export interface CatalogProvision {
   userSupplied: boolean;
 }
 /**
+ * ProvisionCredential carries ONE user-supplied credential for a service, keyed
+ * by the service's declared credential name (see CatalogCredential.Name). It is
+ * present only when the user chose "I'll set it" for that credential; a credential
+ * with no entry here falls back to server-side crypto/rand generation (Phase A).
+ * The values are attacker-influenced and validated server-side (ADR-0027 §3:
+ * length-only password policy, ≥ 12 chars; username against the credential's
+ * allowed charset only when usernameSettable). They are injected through the SAME
+ * mandatory base64 transport as a generated value (§1) — the raw bytes never touch
+ * YAML or a shell string — and are never logged, stored, audited, or echoed back.
+ */
+export interface ProvisionCredential {
+  name: string;
+  username?: string;
+  password?: string;
+}
+/**
  * ProvisionServiceRequest is the body of POST
  * /tenants/{tenantId}/service-catalog/{serviceId}/provision. Sizing fields left
- * zero fall back to the service definition's default. In Phase A the credential
- * is always generated server-side (the user-supplied path is Phase C).
+ * zero fall back to the service definition's default. Credentials left absent are
+ * generated server-side (Phase A); a Credentials entry lets the user SUPPLY a
+ * credential (Phase C), validated server-authoritatively before any reservation.
  */
 export interface ProvisionServiceRequest {
   projectId: string;
@@ -342,6 +359,12 @@ export interface ProvisionServiceRequest {
   ipConfig?: IPConfig;
   sshKeys?: string[];
   tags?: string[];
+  /**
+   * Credentials carries user-supplied credential values (Phase C). Omit an entry
+   * to have that credential generated. A supplied password must be ≥ 12 chars; a
+   * supplied username is only accepted when the credential is usernameSettable.
+   */
+  credentials?: ProvisionCredential[];
 }
 /**
  * ProvisionServiceResponse acknowledges an accepted service deployment. A
@@ -352,11 +375,19 @@ export interface ProvisionServiceResponse {
   deploymentId: string;
   vmid: number /* int */;
   /**
-   * Username / GeneratedPassword are the one-time generated credential. Empty on
-   * the (Phase C) user-supplied path.
+   * Username is the credential's account/role name. GeneratedPassword is set ONLY
+   * when the credential was generated server-side (the one-time reveal); it is
+   * EMPTY when the user supplied the credential — the user already has that value,
+   * so it is never echoed back.
    */
   username?: string;
   generatedPassword?: string;
+  /**
+   * CredentialHint is a NON-secret indicator of the credential's origin:
+   * "generated — shown once" when GeneratedPassword is set, or "you set this
+   * credential" when the user supplied it. It never contains a credential value.
+   */
+  credentialHint?: string;
 }
 /**
  * CreateGuestResponse acknowledges an accepted deployment.

@@ -1,0 +1,63 @@
+# Vault CE — a Phase-D catalog service on the Phase-A/C rails (ADR-0026 schema).
+#
+# This definition is CODE: it ships embedded in the backend binary via
+# //go:embed (internal/catalog/catalog.go) and is validated at startup. A
+# malformed field fails the process boot, never a half-provisioned guest.
+#
+# VAULT HONESTY (ADR-0027 §4): Vault's real secrets are the unseal keys and the
+# initial root token, produced by `vault operator init` INSIDE the guest.
+# Proxcloud NEVER sees them. So the credential schema is EMPTY (`credentials:
+# []`) — there is nothing for Proxcloud to generate, inject, or reveal. Cloud-init
+# installs Vault in server mode, started SEALED and UNINITIALIZED; it does NOT run
+# `vault operator init`. The operator initialises + unseals it themselves and is
+# the only party who ever holds the keys. See ADR-0027 §4 and next-steps.
+id: vault
+displayName: Vault CE
+# The tile description CARRIES the TLS-off warning (per the task): the default
+# listener is HTTP with TLS disabled and must not be exposed publicly as-is.
+description: HashiCorp Vault CE secrets manager (Ubuntu 24.04). TLS is DISABLED by default — do not expose publicly; you initialise and unseal it yourself.
+icon: shield
+category: security
+
+# kind: single provisions ONE guest (ADR-0026). `set` is reserved for
+# multi-guest services (Phase E) and rejected by the loader in v1.
+kind: single
+# guestType: qemu — cloud-init user-data (packages/runcmd) is a VM-only path
+# (ADR-0025 §v1 scope; docs/proxmox/cloud-init.md §2). LXC is not supported.
+guestType: qemu
+
+baseImage:
+  # Storage-scoped volid of the Ubuntu 24.04 cloud image prod already imports
+  # (deploy/terraform: ubuntu-24.04-server-cloudimg-amd64.img →
+  # proxcloud-ubuntu-24.04.img on the image datastore).
+  ref: "local:iso/proxcloud-ubuntu-24.04.img"
+
+sizing:
+  default:
+    cores: 1
+    memoryMb: 1024
+    diskGb: 8
+  min:
+    cores: 1
+    memoryMb: 512
+    diskGb: 8
+
+# EMPTY credential schema (ADR-0027 §4). Vault is NOT a user/pass service: its
+# secrets (unseal keys + root token) are generated in-guest by `vault operator
+# init`, which Proxcloud never runs and never observes. There is no credential to
+# inject or reveal, so the provision path skips password generation entirely.
+credentials: []
+
+# Default service port(s) — informational + firewall hints (ADR-0026).
+ports:
+  - 8200
+
+# Completion probe target consumed by the deploy engine's `configuring` step
+# (ADR-0028). The port opening means Vault is listening (sealed) — readiness here
+# is "Vault is up", NOT "initialised": init/unseal is the operator's step.
+readiness: "tcp:8200"
+
+docs: "https://developer.hashicorp.com/vault/docs"
+
+# YYYY-MM-DD this definition was last verified against a real PVE (9.2.4).
+testedOn: "2026-08-28"

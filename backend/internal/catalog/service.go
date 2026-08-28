@@ -136,9 +136,11 @@ func (s *ServiceDef) validate(dir string) error {
 	if err := validateSizing(s.ID, s.Sizing); err != nil {
 		return err
 	}
-	if len(s.Credentials) == 0 {
-		return fmt.Errorf("service %q: at least one credential is required", s.ID)
-	}
+	// An EMPTY credential schema is valid (ADR-0027 §4, the "Vault honesty" case):
+	// a service whose real secrets are generated in-guest and never seen by
+	// Proxcloud (e.g. Vault CE's unseal keys / root token) declares no credential,
+	// so there is nothing to generate, inject, or reveal. Services that DO inject a
+	// credential still validate each entry below.
 	for i, c := range s.Credentials {
 		if strings.TrimSpace(c.Name) == "" {
 			return fmt.Errorf("service %q: credential[%d].name is required", s.ID, i)

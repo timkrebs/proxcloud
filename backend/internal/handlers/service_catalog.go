@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,10 +71,12 @@ func (d *Deps) GetService(w http.ResponseWriter, r *http.Request) {
 // /api/tenants/{tenantId}/service-catalog/{serviceId}/provision (Contributor). It
 // reuses the CreateGuest spine — resolve project→pool (cross-tenant 404), reserve
 // the VMID+quota BEFORE any Proxmox call, ensure the pool, then submit — but
-// first renders the service's cloud-init server-side with a generated superuser
-// password and hands the snippet to the deploy engine via CreateContext. The
-// generated password is surfaced ONCE in the response and never stored, logged,
-// or audited (only the user_credentials boolean is recorded).
+// first renders the service's cloud-init server-side with the resolved superuser
+// credential (user-supplied where the request carried one and it passed
+// server-authoritative validation, generated otherwise) and hands the snippet to
+// the deploy engine via CreateContext. A GENERATED password is surfaced ONCE in
+// the response; a USER-SUPPLIED one is never echoed back. Either way the value is
+// never stored, logged, or audited — only the user_credentials boolean is recorded.
 func (d *Deps) ProvisionService(w http.ResponseWriter, r *http.Request) {
 	id, ok := requireIdentity(w, r)
 	if !ok || !d.requireStore(w) {
@@ -197,36 +197,48 @@ func (d *Deps) ProvisionService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Audit enrichment: the resolved guest + service, and the user_credentials
-	// boolean — NEVER the credential value (Phase A generates → "false").
+	// boolean — whether ANY credential was user-supplied — NEVER the credential
+	// value (Phase A generated → "false"; Phase C user-supplied → "true").
 	authz.Annotate(r.Context(), "vmid", strconv.Itoa(dep.VMID))
 	authz.Annotate(r.Context(), "name", build.req.Name)
 	authz.Annotate(r.Context(), "service", svc.ID)
-	authz.Annotate(r.Context(), "user_credentials", "false")
+	authz.Annotate(r.Context(), "user_credentials", strconv.FormatBool(build.anyUserSupplied))
 
-	// The generated password is surfaced HERE, once, and nowhere else.
+	// The one-time reveal: return the generated password ONLY for a generated
+	// credential. A user-supplied credential is never echoed back (the user already
+	// has it); the non-secret CredentialHint records which case this was.
+	reveal := build.password
+	if build.userSupplied {
+		reveal = ""
+	}
 	httpserver.WriteJSON(w, http.StatusAccepted, types.ProvisionServiceResponse{
 		DeploymentID:      dep.ID,
 		VMID:              dep.VMID,
 		Username:          build.username,
-		GeneratedPassword: build.password,
+		GeneratedPassword: reveal,
+		CredentialHint:    build.credentialHint,
 	})
 }
 
 // catalogProvision bundles the assembled create request, the rendered snippet,
-// and the one-time generated credential for ProvisionService.
+// and the resolved credential outcome for ProvisionService.
 type catalogProvision struct {
 	req             types.CreateGuestRequest
 	snippetContent  string
 	snippetFilename string
 	readinessPort   int
 	username        string
-	password        string // one-time; never stored/logged/audited
+	password        string // the primary credential value; one-time, never stored/logged/audited
+	userSupplied    bool   // the primary credential's password was user-supplied (do NOT reveal it)
+	anyUserSupplied bool   // ANY declared credential was user-supplied → audit "user_credentials"="true"
+	credentialHint  string // NON-secret: "generated — shown once" vs "you set this credential"
 }
 
 // buildCatalogProvision assembles the qemu CreateGuestRequest from the service
-// definition + request overrides, generates the superuser password, and renders
-// the cloud-init snippet. Sizing defaults to the service's default and must not
-// dip below its minimum floor.
+// definition + request overrides, resolves each declared credential (user-supplied
+// where given and valid, generated otherwise — server-authoritative validation
+// BEFORE any reservation), and renders the cloud-init snippet. Sizing defaults to
+// the service's default and must not dip below its minimum floor.
 func (d *Deps) buildCatalogProvision(svc *catalog.ServiceDef, req *types.ProvisionServiceRequest) (*catalogProvision, error) {
 	cores := req.Cores
 	if cores == 0 {
@@ -257,15 +269,50 @@ func (d *Deps) buildCatalogProvision(svc *catalog.ServiceDef, req *types.Provisi
 		return nil, badRequest("at least one SSH public key is required — a catalog guest locks password login, so an SSH key is the only way to log in")
 	}
 
-	// The superuser username is fixed by the definition (the built-in role).
-	username := svc.Credentials[0].Username
-	if username == "" {
-		username = svc.Credentials[0].Name
+	// Resolve every declared credential: user-supplied where the request carried a
+	// value (validated server-authoritatively — length-only password policy, charset
+	// for a settable username), generated otherwise. A *catalog.CredentialError is a
+	// 400 (weak/empty password, a username on a fixed-username credential); anything
+	// else is a crypto/rand failure → 500. Both return here, BEFORE any reservation.
+	// The raw values are used ONLY to build the base64 transport below and are never
+	// logged, stored, audited, or echoed back.
+	supplied := make([]catalog.SuppliedCredential, 0, len(req.Credentials))
+	for _, c := range req.Credentials {
+		supplied = append(supplied, catalog.SuppliedCredential{Name: c.Name, Username: c.Username, Password: c.Password})
 	}
-	password, err := generatePassword()
+	resolved, err := catalog.ResolveCredentials(svc.Credentials, supplied, catalog.GeneratePassword)
 	if err != nil {
-		d.logger().Error("generate catalog password", "err", err)
-		return nil, &types.APIError{Code: "internal", Message: "Failed to generate a credential.", Status: http.StatusInternalServerError}
+		var ce *catalog.CredentialError
+		if errors.As(err, &ce) {
+			return nil, badRequest(ce.Msg)
+		}
+		d.logger().Error("resolve catalog credentials", "service", svc.ID, "err", err)
+		return nil, &types.APIError{Code: "internal", Message: "Failed to prepare a credential.", Status: http.StatusInternalServerError}
+	}
+	// The template injects at most ONE credential slot (the service superuser). Most
+	// services declare exactly one credential, so the primary is index 0; a service
+	// with an EMPTY credential schema (e.g. Vault, ADR-0027 §4) injects none — it
+	// self-initializes and Proxcloud never holds its secrets. anyUserSupplied drives
+	// the audit boolean across all declared credentials.
+	var username, password string
+	var primaryUserSupplied bool
+	anyUserSupplied := false
+	if len(resolved) > 0 {
+		primary := resolved[0]
+		username, password, primaryUserSupplied = primary.Username, primary.Password, primary.UserSupplied
+		for _, rc := range resolved {
+			if rc.UserSupplied {
+				anyUserSupplied = true
+			}
+		}
+	}
+	// Connection/reveal hints (never a secret). An empty-credential service points
+	// the operator at its self-initialization steps instead of naming an account.
+	credentialHintStr := "This service manages its own credentials — see the next steps to initialize it."
+	revealHintStr := "no stored credential — see next steps"
+	if len(resolved) > 0 {
+		credentialHintStr = connectionHint(username, primaryUserSupplied)
+		revealHintStr = revealHint(primaryUserSupplied)
 	}
 
 	filename := fmt.Sprintf("proxcloud-%d-%s.yaml", req.VMID, svc.ID)
@@ -302,8 +349,8 @@ func (d *Deps) buildCatalogProvision(svc *catalog.ServiceDef, req *types.Provisi
 			ServiceID:      svc.ID,
 			SnippetRef:     snippetRef,
 			Ports:          svc.Ports,
-			CredentialHint: fmt.Sprintf("user %q — password shown once at creation", username),
-			UserSupplied:   false,
+			CredentialHint: credentialHintStr,
+			UserSupplied:   anyUserSupplied,
 		},
 	}
 
@@ -335,7 +382,30 @@ func (d *Deps) buildCatalogProvision(svc *catalog.ServiceDef, req *types.Provisi
 		readinessPort:   port,
 		username:        username,
 		password:        password,
+		userSupplied:    primaryUserSupplied,
+		anyUserSupplied: anyUserSupplied,
+		credentialHint:  revealHintStr,
 	}, nil
+}
+
+// revealHint is the NON-secret origin indicator returned in the provision
+// response: whether the surfaced credential was generated (shown once) or set by
+// the user (never echoed back). It never contains a credential value.
+func revealHint(userSupplied bool) string {
+	if userSupplied {
+		return "you set this credential"
+	}
+	return "generated — shown once"
+}
+
+// connectionHint is the NON-secret auth hint carried on the deployment's
+// connection view (CatalogProvision/Deployment.CredentialHint). It names the
+// account/role only — never a password.
+func connectionHint(username string, userSupplied bool) string {
+	if userSupplied {
+		return fmt.Sprintf("user %q — password you set at creation", username)
+	}
+	return fmt.Sprintf("user %q — password shown once at creation", username)
 }
 
 // hasSSHKey reports whether at least one non-blank SSH public key was supplied.
@@ -346,16 +416,6 @@ func hasSSHKey(keys []string) bool {
 		}
 	}
 	return false
-}
-
-// generatePassword mints a strong, URL-safe secret (length-only policy ≥ 12;
-// 18 crypto/rand bytes → 24 chars). It is never persisted, logged, or audited.
-func generatePassword() (string, error) {
-	b := make([]byte, 18)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // toCatalogService maps a loaded definition to its frontend wire view.

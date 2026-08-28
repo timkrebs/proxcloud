@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -102,6 +103,20 @@ func provisionBodyNoKey(projID string) string {
 		`"storage":"local-lvm","bridge":"vmbr0"}`
 }
 
+// provisionBodyWithCred builds a Phase-C provision body carrying a user-supplied
+// superuser credential. It marshals via encoding/json so hostile metacharacters in
+// the password survive intact. An empty username is dropped (omitempty).
+func provisionBodyWithCred(projID, username, password string) string {
+	req := types.ProvisionServiceRequest{
+		ProjectId: projID, Name: "pg-01", Node: "pve01", VMID: 106,
+		Storage: "local-lvm", Bridge: "vmbr0",
+		SSHKeys:     []string{"ssh-ed25519 AAAAExampleKey user@host"},
+		Credentials: []types.ProvisionCredential{{Name: "superuser", Username: username, Password: password}},
+	}
+	b, _ := json.Marshal(req)
+	return string(b)
+}
+
 func TestListServices(t *testing.T) {
 	hh, _ := newCatalogHarness(t, &proxmoxtest.MockClient{})
 	tenantID, _, userID := seedTenant(hh, "reader")
@@ -195,6 +210,168 @@ func TestProvisionServiceReserveAndSubmit(t *testing.T) {
 	}
 	if !strings.Contains(*got, "user_credentials") || strings.Contains(*got, resp.GeneratedPassword) {
 		t.Fatalf("audit detail wrong (must have user_credentials, never the password): %s", *got)
+	}
+}
+
+// TestProvisionServiceUserSuppliedCredential is the Phase-C happy path: the user
+// supplies their own superuser password (containing hostile metacharacters, ≥ 12
+// chars). It is accepted, injected through the SAME base64 transport (raw value
+// NEVER in the snippet), the response does NOT echo the value back but flags "you
+// set this credential", and the audit boolean flips to user_credentials="true".
+// TestProvisionServiceVaultNoCredential exercises the empty-credential-schema path
+// (Vault, ADR-0027 §4): provisioning must NOT panic on resolved[0], must surface no
+// generated password, and must carry a non-secret self-init hint.
+func TestProvisionServiceVaultNoCredential(t *testing.T) {
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) { return nil, nil },
+		OnCreatePool:       func(context.Context, string, string) error { return nil },
+		OnCreateVM: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			return "UPID:pve01:1:1:1:qmcreate:106:u@pam:", nil
+		},
+	}
+	hh, writer := newCatalogHarness(t, mock)
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	c := hh.cookie(t, userID)
+
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/service-catalog/vault/provision", provisionBody(projID))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("vault provision = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	resp := decodeBody[types.ProvisionServiceResponse](t, rec)
+	if resp.GeneratedPassword != "" {
+		t.Fatalf("vault must surface NO generated password, got %+v", resp)
+	}
+	if resp.CredentialHint == "" {
+		t.Fatalf("vault should carry a non-secret self-init credential hint")
+	}
+	select {
+	case w := <-writer.written:
+		if w.name != "proxcloud-106-vault.yaml" || !strings.HasPrefix(w.content, "#cloud-config") {
+			t.Errorf("unexpected vault snippet: name=%q", w.name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine never wrote the vault snippet")
+	}
+}
+
+func TestProvisionServiceUserSuppliedCredential(t *testing.T) {
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) { return nil, nil },
+		OnCreatePool:       func(context.Context, string, string) error { return nil },
+		OnCreateVM: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			return "UPID:pve01:1:1:1:qmcreate:106:u@pam:", nil
+		},
+	}
+	hh, writer := newCatalogHarness(t, mock)
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	c := hh.cookie(t, userID)
+
+	// A deliberately hostile, ≥12-char password: quotes, $(...), backticks, pipe,
+	// semicolon, YAML metacharacters. Length-only policy admits all of them.
+	hostilePass := "P@ss $(reboot) `id` \"q\" | ; # :"
+
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/service-catalog/postgresql/provision", provisionBodyWithCred(projID, "", hostilePass))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("provision = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	resp := decodeBody[types.ProvisionServiceResponse](t, rec)
+	if resp.Username != "postgres" {
+		t.Fatalf("username = %q, want postgres", resp.Username)
+	}
+	// The user already has the value → it is NEVER echoed back.
+	if resp.GeneratedPassword != "" {
+		t.Fatalf("user-supplied credential must not be echoed back, got %q", resp.GeneratedPassword)
+	}
+	if resp.CredentialHint != "you set this credential" {
+		t.Fatalf("hint = %q, want 'you set this credential'", resp.CredentialHint)
+	}
+
+	// The engine wrote the snippet: the RAW password must NOT appear, only its
+	// base64 blob (the in-guest decode is the only place it is raw).
+	select {
+	case w := <-writer.written:
+		for _, frag := range []string{hostilePass, "$(reboot)", "`id`"} {
+			if strings.Contains(w.content, frag) {
+				t.Errorf("raw user-supplied fragment %q leaked into the snippet", frag)
+			}
+		}
+		if !strings.Contains(w.content, catalog.B64(hostilePass)) {
+			t.Error("base64 of the user-supplied password missing from the snippet")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine never wrote the snippet")
+	}
+
+	// Audit records user_credentials="true" and NEVER the value.
+	var got *string
+	for _, a := range hh.fake.AllAudit() {
+		if a.Action == "service_catalog.provision" {
+			s := string(a.Detail)
+			got = &s
+		}
+	}
+	if got == nil {
+		t.Fatal("no service_catalog.provision audit row")
+	}
+	if !strings.Contains(*got, `"user_credentials":"true"`) {
+		t.Fatalf("audit must record user_credentials=true: %s", *got)
+	}
+	if strings.Contains(*got, hostilePass) || strings.Contains(*got, "$(reboot)") {
+		t.Fatalf("audit detail leaked the user-supplied password: %s", *got)
+	}
+}
+
+// TestProvisionServiceWeakPassword400: a sub-12-char user-supplied password is
+// rejected 400 BEFORE any reservation (validate-before-reserve), and no VMID leaks.
+func TestProvisionServiceWeakPassword400(t *testing.T) {
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			t.Error("clusterSnapshot must not run: credential validation precedes reservation")
+			return nil, nil
+		},
+		OnCreateVM: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			t.Error("CreateVM must not run for a rejected credential")
+			return "", nil
+		},
+	}
+	hh, _ := newCatalogHarness(t, mock)
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	c := hh.cookie(t, userID)
+
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/service-catalog/postgresql/provision", provisionBodyWithCred(projID, "", "short11char")) // 11 chars
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("weak password = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "at least 12") {
+		t.Errorf("error should state the length policy: %s", rec.Body.String())
+	}
+	if s := hh.fake.OwnershipStatus(106); s != "" {
+		t.Fatalf("a reservation leaked for a rejected credential: %q", s)
+	}
+}
+
+// TestProvisionServiceSuppliedUsernameOnFixed400: postgres fixes the username
+// (`postgres`), so a supplied username is rejected 400 before any reservation.
+func TestProvisionServiceSuppliedUsernameOnFixed400(t *testing.T) {
+	mock := &proxmoxtest.MockClient{
+		OnCreateVM: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			t.Error("CreateVM must not run for a rejected credential")
+			return "", nil
+		},
+	}
+	hh, _ := newCatalogHarness(t, mock)
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	c := hh.cookie(t, userID)
+
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/service-catalog/postgresql/provision", provisionBodyWithCred(projID, "evil_admin", "correcthorse12"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("supplied username on fixed credential = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "fixed") {
+		t.Errorf("error should explain the username is fixed: %s", rec.Body.String())
+	}
+	if s := hh.fake.OwnershipStatus(106); s != "" {
+		t.Fatalf("a reservation leaked for a rejected credential: %q", s)
 	}
 }
 

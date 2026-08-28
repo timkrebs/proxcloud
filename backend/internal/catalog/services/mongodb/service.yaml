@@ -1,0 +1,61 @@
+# MongoDB — a Phase-D catalog service on the Phase-A/C rails (ADR-0026 schema).
+#
+# This definition is CODE: it ships embedded in the backend binary via
+# //go:embed (internal/catalog/catalog.go) and is validated at startup. A
+# malformed field fails the process boot, never a half-provisioned guest.
+#
+# It mirrors the PostgreSQL reference exactly: kind single, qemu, ONE injected
+# credential (the database root user), base64-transported through the shared
+# render pipeline (ADR-0027 §1). See internal/catalog/README.md.
+id: mongodb
+displayName: MongoDB
+description: Open-source document database (MongoDB 8.0 Community on Ubuntu 24.04 LTS).
+icon: database
+category: database
+
+# kind: single provisions ONE guest (ADR-0026). `set` is reserved for
+# multi-guest services (Phase E) and rejected by the loader in v1.
+kind: single
+# guestType: qemu — cloud-init user-data (packages/runcmd) is a VM-only path
+# (ADR-0025 §v1 scope; docs/proxmox/cloud-init.md §2). LXC is not supported.
+guestType: qemu
+
+baseImage:
+  # Storage-scoped volid of the Ubuntu 24.04 cloud image prod already imports
+  # (deploy/terraform: ubuntu-24.04-server-cloudimg-amd64.img →
+  # proxcloud-ubuntu-24.04.img on the image datastore).
+  ref: "local:iso/proxcloud-ubuntu-24.04.img"
+
+sizing:
+  default:
+    cores: 2
+    memoryMb: 2048
+    diskGb: 16
+  min:
+    cores: 1
+    memoryMb: 1024
+    diskGb: 8
+
+# The service's injected credential: the MongoDB administrative user created in
+# the `admin` database with the built-in `root` role. The username is the fixed
+# `admin` account (usernameSettable: false); `userSettable` lets the wizard set
+# the password (Phase C), `generatedDefault` mints a strong secret when blank.
+credentials:
+  - name: root
+    username: admin
+    usernameSettable: false
+    userSettable: true
+    generatedDefault: true
+
+# Default service port(s) — informational + firewall hints (ADR-0026).
+ports:
+  - 27017
+
+# Completion probe target consumed by the deploy engine's `configuring` step
+# (ADR-0028). Never hardcode a port in the engine — this is the single source.
+readiness: "tcp:27017"
+
+docs: "https://www.mongodb.com/docs/manual/"
+
+# YYYY-MM-DD this definition was last verified against a real PVE (9.2.4).
+testedOn: "2026-08-28"
