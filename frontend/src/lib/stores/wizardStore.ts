@@ -4,7 +4,11 @@
 // internal/deploy/params.go; the server re-validates everything.
 import { create } from "zustand";
 
-import type { CreateGuestRequest, ProjectQuotaResponse } from "@/lib/api/generated/types";
+import type {
+  CreateGuestRequest,
+  ProjectQuotaResponse,
+  ProvisionServiceRequest,
+} from "@/lib/api/generated/types";
 
 export type WizardKind = "qemu" | "lxc";
 export type SourceMode = "iso" | "vztmpl" | "clone";
@@ -18,6 +22,30 @@ export const TAB_NAMES = [
   "Tags",
   "Review + create",
 ] as const;
+
+/**
+ * Semantic keys for the named tabs the wizard code navigates to by intent
+ * (jump-to-Size on an over-quota bounce, jump-to-Review on submit). Resolving
+ * them through TAB_NAMES means no code hardcodes a positional index — inserting
+ * a step (e.g. the Phase-C Credentials tab) shifts every reference automatically
+ * instead of silently pointing at the wrong tab.
+ */
+export type TabKey = "basics" | "image" | "size" | "networking" | "advanced" | "tags" | "review";
+
+const TAB_KEY_TO_LABEL: Record<TabKey, (typeof TAB_NAMES)[number]> = {
+  basics: "Basics",
+  image: "Image",
+  size: "Size",
+  networking: "Networking",
+  advanced: "Advanced",
+  tags: "Tags",
+  review: "Review + create",
+};
+
+/** Position of a named tab in TAB_NAMES (single source of truth for ordering). */
+export function tabIndex(key: TabKey): number {
+  return TAB_NAMES.indexOf(TAB_KEY_TO_LABEL[key]);
+}
 
 export const SIZE_PRESETS = [
   { name: "S", cores: 2, ramGiB: 4 },
@@ -35,6 +63,13 @@ export interface WizardState {
   kind: WizardKind;
   tab: number;
   maxTab: number;
+
+  // Service-catalog mode (ADR-0026). Empty for a bare VM/LXC. When set, the
+  // wizard provisions the named service: the base image is defined by the
+  // service (no Image picker), and submit posts a ProvisionServiceRequest — the
+  // superuser credential is generated server-side and shown once after create.
+  serviceId: string;
+  serviceName: string; // display-only mirror for the header/summary
 
   // Basics
   name: string;
@@ -87,6 +122,8 @@ const initial = (kind: WizardKind) => ({
   kind,
   tab: 0,
   maxTab: 0,
+  serviceId: "",
+  serviceName: "",
   name: "",
   node: "",
   vmid: "",
@@ -245,7 +282,9 @@ export function validateWizard(
         message: "A container template is required (Image).",
       });
   } else if (s.sourceMode === "iso") {
-    if (s.isoVolId === "")
+    // A catalog service supplies its own base image server-side, so the Image
+    // tab has no ISO to pick — skip the requirement in service mode.
+    if (s.serviceId === "" && s.isoVolId === "")
       errs.push({ tab: 1, field: "isoVolId", message: "An ISO image is required (Image)." });
   } else if (s.sourceMode === "clone") {
     if (!s.cloneVmid)
@@ -356,6 +395,17 @@ export function validateWizard(
     }
   }
 
+  // Catalog services lock the password and set cicustom (which drops cipassword),
+  // so an SSH key is the ONLY way into the guest — require at least one. The
+  // server rejects an empty sshKeys with a 400; mirror that here (Advanced tab).
+  if (s.serviceId !== "" && s.sshKeys.split("\n").every((k) => k.trim() === "")) {
+    errs.push({
+      tab: tabIndex("advanced"),
+      field: "sshKeys",
+      message: "An SSH public key is required for catalog services (Advanced).",
+    });
+  }
+
   return errs;
 }
 
@@ -410,5 +460,39 @@ export function toCreateRequest(s: WizardState): CreateGuestRequest {
       : {}),
     ...(s.tags.length > 0 ? { tags: s.tags } : {}),
     startAfterCreate: s.startAfterCreate,
+  };
+}
+
+/**
+ * Wire request for POST /api/tenants/{tenantId}/service-catalog/{serviceId}/provision
+ * (service mode only). The service defines its own base image and generates the
+ * superuser credential server-side, so this carries no source and no cloud-init
+ * account fields — only sizing, placement, network, SSH keys, and tags. Call
+ * only when validation passes and s.serviceId is set.
+ */
+export function toProvisionRequest(s: WizardState): ProvisionServiceRequest {
+  const sshKeys = s.sshKeys
+    .split("\n")
+    .map((k) => k.trim())
+    .filter(Boolean);
+
+  return {
+    projectId: s.projectId,
+    name: s.name,
+    node: s.node,
+    vmid: Number(s.vmid),
+    cores: Number(s.cores),
+    memoryMb: Number(s.memoryMb),
+    diskGb: Number(s.diskGb),
+    storage: s.storage,
+    bridge: s.bridge,
+    ...(s.vlanTag !== "" ? { vlanTag: Number(s.vlanTag) } : {}),
+    firewall: s.firewall,
+    ipConfig:
+      s.ipMode === "static"
+        ? { mode: "static", cidr: s.cidr, ...(s.gateway !== "" ? { gateway: s.gateway } : {}) }
+        : { mode: "dhcp" },
+    ...(sshKeys.length > 0 ? { sshKeys } : {}),
+    ...(s.tags.length > 0 ? { tags: s.tags } : {}),
   };
 }

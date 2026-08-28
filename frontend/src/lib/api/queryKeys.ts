@@ -56,6 +56,14 @@ export const qk = {
   // ── Invitations (Phase 5, Owner-only) ────────────────────────────────────
   invitations: (tenantId?: string) => ["invitations", tenantId] as const,
 
+  // ── Service catalog (ADR-0026) ───────────────────────────────────────────
+  // Leading "serviceCatalog" segment (never "catalog" — that prefix is taken by
+  // the wizard node/storage pickers). The gallery list and each service def
+  // share it so a tenant switch produces a distinct cache entry.
+  serviceCatalog: (tenantId?: string) => ["serviceCatalog", tenantId] as const,
+  service: (tenantId?: string, serviceId?: string) =>
+    ["serviceCatalog", tenantId, "service", serviceId] as const,
+
   // ── Quotas + activity (Phase 4) ──────────────────────────────────────────
   // Tenant-scoped: leading segment + tenant id, matching the pattern above so a
   // tenant switch produces a distinct cache entry and mutations can prefix-

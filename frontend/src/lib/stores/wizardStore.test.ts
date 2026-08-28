@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import type { ProjectQuotaResponse, QuotaLimits, QuotaUsage } from "@/lib/api/generated/types";
 import {
+  TAB_NAMES,
   effectiveRemaining,
+  tabIndex,
   toCreateRequest,
+  toProvisionRequest,
   useWizardStore,
   validateWizard,
   type QuotaRemaining,
@@ -381,5 +384,113 @@ describe("toCreateRequest", () => {
     validVm();
     const req = toCreateRequest(useWizardStore.getState());
     expect(req.cloudInit).toBeUndefined();
+  });
+});
+
+describe("tabIndex", () => {
+  it("resolves each key to its position in TAB_NAMES", () => {
+    expect(tabIndex("basics")).toBe(0);
+    expect(tabIndex("image")).toBe(1);
+    expect(tabIndex("size")).toBe(2);
+    expect(tabIndex("review")).toBe(TAB_NAMES.length - 1);
+  });
+
+  it("is derived from TAB_NAMES (label round-trips)", () => {
+    expect(TAB_NAMES[tabIndex("size")]).toBe("Size");
+    expect(TAB_NAMES[tabIndex("review")]).toBe("Review + create");
+  });
+});
+
+// ── Service-catalog mode (Phase B) ───────────────────────────────────────────
+
+function validService(): WizardState {
+  const s = useWizardStore.getState();
+  s.init("qemu");
+  s.set({
+    serviceId: "postgresql",
+    serviceName: "PostgreSQL",
+    sshKeys: "ssh-ed25519 AAAAExampleKey user@host",
+    name: "postgresql",
+    node: "pve01",
+    vmid: "150",
+    projectId: "p-web",
+    projectName: "Web",
+    sourceMode: "iso",
+    storage: "local-lvm",
+    bridge: "vmbr0",
+    cores: "2",
+    memoryMb: "4096",
+    diskGb: "20",
+  });
+  return useWizardStore.getState();
+}
+
+describe("validateWizard — service mode", () => {
+  it("does not require an ISO when a service is selected", () => {
+    const s = validService();
+    // No isoVolId set, yet the config validates (service supplies its image).
+    expect(s.isoVolId).toBe("");
+    expect(validateWizard(s)).toEqual([]);
+  });
+
+  it("requires an SSH key in service mode (catalog guests have no other login)", () => {
+    validService();
+    useWizardStore.getState().set({ sshKeys: "   \n  " }); // blank lines only
+    const errs = validateWizard(useWizardStore.getState());
+    expect(errs.some((e) => e.field === "sshKeys")).toBe(true);
+  });
+
+  it("still enforces storage and bridge in service mode", () => {
+    validService();
+    useWizardStore.getState().set({ storage: "", bridge: "" });
+    const errs = validateWizard(useWizardStore.getState());
+    expect(errs.some((e) => e.field === "storage")).toBe(true);
+    expect(errs.some((e) => e.field === "bridge")).toBe(true);
+  });
+});
+
+describe("toProvisionRequest", () => {
+  it("builds the provision wire request with no source or cloud-init account", () => {
+    validService();
+    useWizardStore.getState().set({
+      vlanTag: "20",
+      firewall: true,
+      ipMode: "static",
+      cidr: "192.168.1.60/24",
+      gateway: "192.168.1.1",
+      sshKeys: "ssh-ed25519 AAA key\n\n",
+      tags: ["env-prod"],
+    });
+    const req = toProvisionRequest(useWizardStore.getState());
+    expect(req).toEqual({
+      projectId: "p-web",
+      name: "postgresql",
+      node: "pve01",
+      vmid: 150,
+      cores: 2,
+      memoryMb: 4096,
+      diskGb: 20,
+      storage: "local-lvm",
+      bridge: "vmbr0",
+      vlanTag: 20,
+      firewall: true,
+      ipConfig: { mode: "static", cidr: "192.168.1.60/24", gateway: "192.168.1.1" },
+      sshKeys: ["ssh-ed25519 AAA key"],
+      tags: ["env-prod"],
+    });
+    // No bare-guest fields leak into the provision request.
+    expect("source" in req).toBe(false);
+    expect("cloudInit" in req).toBe(false);
+    expect("startAfterCreate" in req).toBe(false);
+  });
+
+  it("defaults to DHCP and omits empty sshKeys/tags", () => {
+    validService();
+    useWizardStore.getState().set({ sshKeys: "" }); // builder omits empty optional fields
+    const req = toProvisionRequest(useWizardStore.getState());
+    expect(req.ipConfig).toEqual({ mode: "dhcp" });
+    expect("sshKeys" in req).toBe(false);
+    expect("tags" in req).toBe(false);
+    expect("vlanTag" in req).toBe(false);
   });
 });
