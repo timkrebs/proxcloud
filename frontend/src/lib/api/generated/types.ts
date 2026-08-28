@@ -119,6 +119,64 @@ export interface SessionInfo {
 }
 
 //////////
+// source: catalog.go
+
+/**
+ * CatalogService is the frontend-facing view of a catalog service definition
+ * (ADR-0026). It deliberately omits the internal baseImage ref and the
+ * cloud-init template — the gallery renders metadata + sizing + input schema
+ * only. Credential values are never present here (this is a definition, not an
+ * instance).
+ */
+export interface CatalogService {
+  id: string;
+  displayName: string;
+  description: string;
+  icon: string;
+  category: string;
+  kind: string; // single | set
+  guestType: string; // qemu
+  sizing: CatalogSizing;
+  credentials: CatalogCredential[];
+  ports: number /* int */[];
+  readiness: string;
+  docs: string;
+  testedOn: string;
+}
+/**
+ * CatalogSizing is the wizard default + minimum floor for a service.
+ */
+export interface CatalogSizing {
+  default: CatalogSize;
+  min: CatalogSize;
+}
+/**
+ * CatalogSize is one sizing triple.
+ */
+export interface CatalogSize {
+  cores: number /* int */;
+  memoryMb: number /* int64 */;
+  diskGb: number /* int */;
+}
+/**
+ * CatalogCredential describes one credential input the service accepts. It never
+ * carries a value — only whether the wizard exposes/generates it.
+ */
+export interface CatalogCredential {
+  name: string;
+  username?: string;
+  usernameSettable: boolean;
+  userSettable: boolean;
+  generatedDefault: boolean;
+}
+/**
+ * CatalogServiceList is the gallery payload.
+ */
+export interface CatalogServiceList {
+  services: CatalogService[];
+}
+
+//////////
 // source: cluster.go
 
 /**
@@ -176,8 +234,17 @@ export interface ConsoleSession {
  * CreateSource selects where the new guest comes from.
  */
 export interface CreateSource {
-  mode: string; // "iso" | "vztmpl" | "clone"
+  mode: string; // "iso" | "image" | "vztmpl" | "clone"
+  /**
+   * ISOVolID attaches a bootable install ISO as a CD-ROM (installer flow).
+   */
   isoVolId?: string;
+  /**
+   * ImageVolID imports a cloud/disk image as the boot DISK (import-from) — the
+   * only path that boots a raw cloud .img and runs cloud-init. A cloud image is
+   * NOT a bootable CD-ROM; the catalog uses this mode.
+   */
+  imageVolId?: string;
   vztmplVolId?: string;
   cloneVmid?: number /* int */;
   cloneNode?: string;
@@ -232,6 +299,64 @@ export interface CreateGuestRequest {
   cloudInit?: CloudInitRequest;
   tags?: string[];
   startAfterCreate: boolean;
+  /**
+   * Catalog, when set, marks this as a service-catalog deployment (ADR-0025):
+   * the guest's cloud-init user-data comes from a rendered snippet referenced by
+   * cicustom, NOT from the inline ciuser/cipassword/sshkeys (PVE drops those when
+   * cicustom user= is set). The snippet content itself is carried into the deploy
+   * engine out-of-band (deploy.CreateContext), never in this request body.
+   */
+  catalog?: CatalogProvision;
+}
+/**
+ * CatalogProvision is the catalog-specific create parameters. It carries the
+ * cicustom snippet reference and the non-secret display metadata (ports, a
+ * credential hint) that the deployment surfaces once the guest is ready. It
+ * never carries a credential value.
+ */
+export interface CatalogProvision {
+  serviceId: string;
+  snippetRef: string; // "<datastore>:snippets/<file>"
+  ports?: number /* int */[];
+  credentialHint?: string;
+  userSupplied: boolean;
+}
+/**
+ * ProvisionServiceRequest is the body of POST
+ * /tenants/{tenantId}/service-catalog/{serviceId}/provision. Sizing fields left
+ * zero fall back to the service definition's default. In Phase A the credential
+ * is always generated server-side (the user-supplied path is Phase C).
+ */
+export interface ProvisionServiceRequest {
+  projectId: string;
+  name: string;
+  node: string;
+  vmid: number /* int */;
+  cores?: number /* int */;
+  memoryMb?: number /* int64 */;
+  diskGb?: number /* int */;
+  storage: string;
+  bridge: string;
+  vlanTag?: number /* int */;
+  firewall: boolean;
+  ipConfig?: IPConfig;
+  sshKeys?: string[];
+  tags?: string[];
+}
+/**
+ * ProvisionServiceResponse acknowledges an accepted service deployment. A
+ * generated credential is surfaced HERE exactly once (per the secrets-server-side
+ * iron rule, ADR-0028) — it is never stored, logged, audited, or returned again.
+ */
+export interface ProvisionServiceResponse {
+  deploymentId: string;
+  vmid: number /* int */;
+  /**
+   * Username / GeneratedPassword are the one-time generated credential. Empty on
+   * the (Phase C) user-supplied path.
+   */
+  username?: string;
+  generatedPassword?: string;
 }
 /**
  * CreateGuestResponse acknowledges an accepted deployment.
@@ -244,7 +369,7 @@ export interface CreateGuestResponse {
  * DeploymentStep is one row of the deployment progress table.
  */
 export interface DeploymentStep {
-  key: string; // create | start
+  key: string; // prepare | create | start | configuring
   label: string; // "Create virtual machine web-02"
   status: string; // pending | running | succeeded | failed
   upid?: string;
@@ -264,6 +389,14 @@ export interface Deployment {
   status: string; // running | succeeded | failed
   createdAt: string /* RFC3339 */;
   steps: DeploymentStep[];
+  /**
+   * Catalog service connection details, populated by the deploy engine's
+   * `configuring` step once a catalog guest is ready (ADR-0028). All omitempty,
+   * so the bare-guest path is unchanged. None of these carry a secret.
+   */
+  connection?: string; // reachable host:port
+  ports?: number /* int */[]; // exposed service ports
+  credentialHint?: string; // NON-secret auth hint
 }
 
 //////////

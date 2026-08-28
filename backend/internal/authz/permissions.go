@@ -185,6 +185,13 @@ func buildRegistry() map[routeKey]Rule {
 		{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/{action}", ContributorRule},
 		{http.MethodDelete, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}", ContributorRule},
 		{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/console", ContributorRule},
+		// Service catalog (ADR-0026): the gallery is Reader; provisioning is a
+		// Contributor mutation (blocks a Reader from provisioning). {serviceId} is a
+		// global catalog id, resolved by the handler (not ResolveScope).
+		{http.MethodGet, "/api/tenants/{tenantId}/service-catalog", ReaderRule},
+		{http.MethodGet, "/api/tenants/{tenantId}/service-catalog/{serviceId}", ReaderRule},
+		{http.MethodPost, "/api/tenants/{tenantId}/service-catalog/{serviceId}/provision", ContributorRule},
+
 		{http.MethodGet, "/api/tenants/{tenantId}/deployments/{id}", ReaderRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/tasks", ReaderRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/tasks/{upid}", ReaderRule},
