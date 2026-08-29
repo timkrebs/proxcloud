@@ -49,6 +49,9 @@ type Fake struct {
 	// TTL / ephemeral resources (ADR-0020).
 	ttls        map[int]*store.TTL                 // by vmid
 	ttlPolicies map[string]*store.ProjectTTLPolicy // by tenantID|projectID
+
+	// Deployment sets (ADR-0029).
+	deploymentSets map[string]*store.DeploymentSet // by id
 }
 
 // fakeRecoveryCode is one stored recovery code (hashed, single-use).
@@ -70,25 +73,26 @@ var _ store.Store = (*Fake)(nil)
 // New returns an empty Fake.
 func New() *Fake {
 	return &Fake{
-		Now:         time.Now,
-		fail:        map[string]error{},
-		users:       map[string]*store.User{},
-		sessions:    map[string]*store.Session{},
-		memberships: map[string]*store.Membership{},
-		tenants:     map[string]*store.Tenant{},
-		projects:    map[string]*store.Project{},
-		ownership:   map[int]*store.ResourceOwnership{},
-		quotas:      map[string]*store.Quota{},
-		audit:       []*store.AuditEntry{},
-		invitations: map[string]*store.Invitation{},
-		totp:        map[string]*store.TOTPSecret{},
-		recovery:    []*fakeRecoveryCode{},
-		challenges:  map[string]*fakeChallenge{},
-		chalByHash:  map[string]string{},
-		jobs:        map[string]*store.Job{},
-		schedules:   map[string]*store.Schedule{},
-		ttls:        map[int]*store.TTL{},
-		ttlPolicies: map[string]*store.ProjectTTLPolicy{},
+		Now:            time.Now,
+		fail:           map[string]error{},
+		users:          map[string]*store.User{},
+		sessions:       map[string]*store.Session{},
+		memberships:    map[string]*store.Membership{},
+		tenants:        map[string]*store.Tenant{},
+		projects:       map[string]*store.Project{},
+		ownership:      map[int]*store.ResourceOwnership{},
+		quotas:         map[string]*store.Quota{},
+		audit:          []*store.AuditEntry{},
+		invitations:    map[string]*store.Invitation{},
+		totp:           map[string]*store.TOTPSecret{},
+		recovery:       []*fakeRecoveryCode{},
+		challenges:     map[string]*fakeChallenge{},
+		chalByHash:     map[string]string{},
+		jobs:           map[string]*store.Job{},
+		schedules:      map[string]*store.Schedule{},
+		ttls:           map[int]*store.TTL{},
+		ttlPolicies:    map[string]*store.ProjectTTLPolicy{},
+		deploymentSets: map[string]*store.DeploymentSet{},
 	}
 }
 
@@ -272,6 +276,10 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	for k, v := range f.ttlPolicies {
 		ttlPolicies[k] = v
 	}
+	deploymentSets := make(map[string]*store.DeploymentSet, len(f.deploymentSets))
+	for k, v := range f.deploymentSets {
+		deploymentSets[k] = v
+	}
 	f.mu.Unlock()
 
 	if err := fn(f); err != nil {
@@ -289,6 +297,7 @@ func (f *Fake) WithTx(ctx context.Context, fn func(store.Store) error) error {
 		f.schedules = schedules
 		f.ttls = ttls
 		f.ttlPolicies = ttlPolicies
+		f.deploymentSets = deploymentSets
 		f.mu.Unlock()
 		return err
 	}
@@ -719,12 +728,16 @@ func (f *Fake) CreateOwnership(_ context.Context, p store.CreateOwnershipParams)
 		existing.CreatedBy = p.CreatedBy
 		existing.Status = p.Status
 		existing.PVEUPID = nil
+		existing.ReservedVCPU, existing.ReservedRAMMB, existing.ReservedDiskGB = p.ReservedVCPU, p.ReservedRAMMB, p.ReservedDiskGB
+		existing.DeploymentSetID, existing.Role = p.DeploymentSetID, p.Role
 		existing.UpdatedAt = f.Now()
 		c := *existing
 		return &c, nil
 	}
 	id := f.next("own")
-	o := &store.ResourceOwnership{ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID, GuestType: p.GuestType, Node: p.Node, CreatedBy: p.CreatedBy, Status: p.Status, CreatedAt: f.Now(), UpdatedAt: f.Now()}
+	o := &store.ResourceOwnership{ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: p.VMID, GuestType: p.GuestType, Node: p.Node, CreatedBy: p.CreatedBy, Status: p.Status,
+		ReservedVCPU: p.ReservedVCPU, ReservedRAMMB: p.ReservedRAMMB, ReservedDiskGB: p.ReservedDiskGB,
+		DeploymentSetID: p.DeploymentSetID, Role: p.Role, CreatedAt: f.Now(), UpdatedAt: f.Now()}
 	f.ownership[p.VMID] = o
 	c := *o
 	return &c, nil
@@ -1945,4 +1958,285 @@ func (f *Fake) UpsertProjectTTLPolicy(_ context.Context, p store.UpsertProjectTT
 	f.ttlPolicies[key] = pol
 	c := *pol
 	return &c, nil
+}
+
+// --- deployment sets (ADR-0029) ---
+
+// AddDeploymentSet seeds a set row directly and returns its id (test convenience).
+func (f *Fake) AddDeploymentSet(tenantID, projectID, serviceID, status string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := f.next("set")
+	if status == "" {
+		status = "provisioning"
+	}
+	f.deploymentSets[id] = &store.DeploymentSet{
+		ID: id, TenantID: tenantID, ProjectID: projectID, ServiceID: serviceID,
+		Status: status, CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	return id
+}
+
+// SetStatus returns the current status of a deployment set, or "" (test convenience).
+func (f *Fake) SetStatus(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := f.deploymentSets[id]; ok {
+		return d.Status
+	}
+	return ""
+}
+
+func (f *Fake) CreateDeploymentSet(_ context.Context, p store.CreateDeploymentSetParams) (*store.DeploymentSet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("CreateDeploymentSet"); err != nil {
+		return nil, err
+	}
+	status := p.Status
+	if status == "" {
+		status = "provisioning"
+	}
+	id := f.next("set")
+	d := &store.DeploymentSet{
+		ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, ServiceID: p.ServiceID,
+		Status: status, CreatedAt: f.Now(), UpdatedAt: f.Now(),
+	}
+	f.deploymentSets[id] = d
+	c := *d
+	return &c, nil
+}
+
+func (f *Fake) GetDeploymentSet(_ context.Context, id string) (*store.DeploymentSet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetDeploymentSet"); err != nil {
+		return nil, err
+	}
+	if d, ok := f.deploymentSets[id]; ok {
+		c := *d
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) ListDeploymentSets(_ context.Context, tenantID string) ([]store.DeploymentSet, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListDeploymentSets"); err != nil {
+		return nil, err
+	}
+	out := []store.DeploymentSet{}
+	for _, d := range f.deploymentSets {
+		if d.TenantID == tenantID {
+			out = append(out, *d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
+}
+
+func (f *Fake) ListSetMembers(_ context.Context, setID string) ([]store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ListSetMembers"); err != nil {
+		return nil, err
+	}
+	out := []store.ResourceOwnership{}
+	for _, o := range f.ownership {
+		if o.DeploymentSetID != nil && *o.DeploymentSetID == setID {
+			out = append(out, *o)
+		}
+	}
+	// role DESC then vmid: 'server' before 'agent' (start order); callers reverse.
+	sort.Slice(out, func(i, j int) bool {
+		ri, rj := "", ""
+		if out[i].Role != nil {
+			ri = *out[i].Role
+		}
+		if out[j].Role != nil {
+			rj = *out[j].Role
+		}
+		if ri != rj {
+			return ri > rj
+		}
+		return out[i].VMID < out[j].VMID
+	})
+	return out, nil
+}
+
+func (f *Fake) UpdateSetStatus(_ context.Context, id, status string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpdateSetStatus"); err != nil {
+		return err
+	}
+	d, ok := f.deploymentSets[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	d.Status = status
+	d.UpdatedAt = f.Now()
+	return nil
+}
+
+func (f *Fake) DeleteDeploymentSet(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("DeleteDeploymentSet"); err != nil {
+		return err
+	}
+	if _, ok := f.deploymentSets[id]; !ok {
+		return store.ErrNotFound
+	}
+	// Mirror ON DELETE SET NULL: null out members' set linkage.
+	for _, o := range f.ownership {
+		if o.DeploymentSetID != nil && *o.DeploymentSetID == id {
+			o.DeploymentSetID = nil
+			o.Role = nil
+		}
+	}
+	delete(f.deploymentSets, id)
+	return nil
+}
+
+// ReserveOwnershipBatch mirrors the real store's atomic multi-guest reservation:
+// it computes usage once, accumulates each accepted member's delta into the
+// running usage before the next member's quota check (the count-accumulation fix),
+// and inserts N pending rows tagged with the set id + role — all-or-nothing.
+func (f *Fake) ReserveOwnershipBatch(_ context.Context, p store.ReserveOwnershipBatchParams) ([]store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("ReserveOwnershipBatch"); err != nil {
+		return nil, err
+	}
+	tenantUsage, byProject := f.computeUsageLocked(p.TenantID, p.Snapshot)
+	projUsage := byProject[p.ProjectID]
+	tenUsage := tenantUsage
+	projQuota := f.quotas["project|"+p.ProjectID]
+	tenQuota := f.quotas["tenant|"+p.TenantID]
+	for _, m := range p.Members {
+		if err := checkQuotaFake("project", projQuota, projUsage, m.Reserved); err != nil {
+			return nil, err
+		}
+		if err := checkQuotaFake("tenant", tenQuota, tenUsage, m.Reserved); err != nil {
+			return nil, err
+		}
+		accumulate(&projUsage, m.Reserved)
+		accumulate(&tenUsage, m.Reserved)
+	}
+	// Reserve the VMIDs, respecting the tombstone-revive rule. If any conflicts,
+	// roll back the ones already inserted (all-or-nothing).
+	setID := p.SetID
+	inserted := []int{}
+	out := []store.ResourceOwnership{}
+	rollback := func() {
+		for _, vmid := range inserted {
+			delete(f.ownership, vmid)
+		}
+	}
+	for _, m := range p.Members {
+		rv, rr, rd := m.Reserved.VCPU, m.Reserved.RAMMB, m.Reserved.DiskGB
+		role := m.Role
+		if existing, ok := f.ownership[m.VMID]; ok {
+			if existing.Status != "tombstoned" {
+				rollback()
+				return nil, fmt.Errorf("reserve ownership for vmid %d: %w", m.VMID, store.ErrConflict)
+			}
+			existing.TenantID, existing.ProjectID = p.TenantID, p.ProjectID
+			existing.GuestType, existing.Node, existing.CreatedBy = m.GuestType, m.Node, p.CreatedBy
+			existing.Status, existing.PVEUPID = "pending", nil
+			existing.ReservedVCPU, existing.ReservedRAMMB, existing.ReservedDiskGB = &rv, &rr, &rd
+			existing.DeploymentSetID, existing.Role = &setID, &role
+			existing.UpdatedAt = f.Now()
+			out = append(out, *existing)
+			continue
+		}
+		id := f.next("own")
+		o := &store.ResourceOwnership{
+			ID: id, TenantID: p.TenantID, ProjectID: p.ProjectID, VMID: m.VMID, GuestType: m.GuestType,
+			Node: m.Node, CreatedBy: p.CreatedBy, Status: "pending",
+			ReservedVCPU: &rv, ReservedRAMMB: &rr, ReservedDiskGB: &rd,
+			DeploymentSetID: &setID, Role: &role, CreatedAt: f.Now(), UpdatedAt: f.Now(),
+		}
+		f.ownership[m.VMID] = o
+		inserted = append(inserted, m.VMID)
+		out = append(out, *o)
+	}
+	return out, nil
+}
+
+// accumulate folds one member's reserved allocation into a running usage total
+// (count += 1), mirroring store.addAlloc for the fake's batch path.
+func accumulate(u *store.QuotaUsage, a store.Alloc) {
+	u.VCPU += a.VCPU
+	u.RAMMB += a.RAMMB
+	u.DiskGB += a.DiskGB
+	u.Count++
+}
+
+// --- set schedules (ADR-0029) ---
+
+func (f *Fake) findSetScheduleLocked(tenantID, setID string) *store.Schedule {
+	for _, s := range f.schedules {
+		if s.Scope == "set" && s.TenantID == tenantID && s.SetID != nil && *s.SetID == setID {
+			return s
+		}
+	}
+	return nil
+}
+
+func (f *Fake) UpsertSetSchedule(_ context.Context, p store.UpsertSetScheduleParams) (*store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("UpsertSetSchedule"); err != nil {
+		return nil, err
+	}
+	setID := p.SetID
+	s := f.findSetScheduleLocked(p.TenantID, p.SetID)
+	if s == nil {
+		s = &store.Schedule{ID: f.next("sched"), Scope: "set", SetID: &setID, CreatedAt: f.Now()}
+		f.schedules[s.ID] = s
+	}
+	s.TenantID, s.ProjectID = p.TenantID, p.ProjectID
+	s.VMID = nil
+	s.SetID = &setID
+	s.ShutdownTime, s.AutoStartTime = p.ShutdownTime, p.AutoStartTime
+	s.DaysOfWeek = append([]int(nil), p.DaysOfWeek...)
+	s.Timezone, s.GraceSeconds = p.Timezone, p.GraceSeconds
+	s.Enabled, s.OptOut, s.CreatedBy = p.Enabled, false, p.CreatedBy
+	s.UpdatedAt = f.Now()
+	c := *s
+	return &c, nil
+}
+
+func (f *Fake) GetSetSchedule(_ context.Context, tenantID, setID string) (*store.Schedule, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetSetSchedule"); err != nil {
+		return nil, err
+	}
+	if s := f.findSetScheduleLocked(tenantID, setID); s != nil {
+		c := *s
+		return &c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *Fake) DeleteSetSchedule(_ context.Context, tenantID, setID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("DeleteSetSchedule"); err != nil {
+		return err
+	}
+	if s := f.findSetScheduleLocked(tenantID, setID); s != nil {
+		delete(f.schedules, s.ID)
+		return nil
+	}
+	return store.ErrNotFound
 }

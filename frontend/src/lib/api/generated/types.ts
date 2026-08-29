@@ -137,11 +137,28 @@ export interface CatalogService {
   kind: string; // single | set
   guestType: string; // qemu
   sizing: CatalogSizing;
+  /**
+   * Roles is the member-role schema of a kind:set service (ADR-0029); empty for
+   * a kind:single service. It drives the deployment-set wizard (worker count etc.).
+   */
+  roles?: CatalogRole[];
   credentials: CatalogCredential[];
   ports: number /* int */[];
   readiness: string;
   docs: string;
   testedOn: string;
+}
+/**
+ * CatalogRole is one member role of a kind:set service: its name, the wizard
+ * default count, the [Min,Max] range the operator may pick, and its per-member
+ * sizing.
+ */
+export interface CatalogRole {
+  name: string;
+  count: number /* int */;
+  min: number /* int */;
+  max: number /* int */;
+  sizing: CatalogSizing;
 }
 /**
  * CatalogSizing is the wizard default + minimum floor for a service.
@@ -428,6 +445,105 @@ export interface Deployment {
   connection?: string; // reachable host:port
   ports?: number /* int */[]; // exposed service ports
   credentialHint?: string; // NON-secret auth hint
+}
+
+//////////
+// source: deployment_sets.go
+
+/**
+ * DeploymentSet is the frontend-facing view of a deployment set (ADR-0029): one
+ * catalog action that provisioned N linked guests sharing a lifecycle. Status is
+ * the durable set status (provisioning | ready | degraded | failed | deleting).
+ * It never carries a secret — the cluster's generated join token is never stored,
+ * returned, or surfaced (ADR-0030).
+ */
+export interface DeploymentSet {
+  id: string;
+  serviceId: string;
+  projectId: string;
+  status: string;
+  createdAt: string /* RFC3339 */;
+  members: DeploymentSetMember[];
+}
+/**
+ * DeploymentSetMember is one guest of a set, keyed by its role (ADR-0030:
+ * "server" | "agent"). Status is the member's ownership status (pending | active
+ * | tombstoned) — the per-member honesty the set aggregates. Connection is the
+ * reachable host[:port] once known; never a secret.
+ */
+export interface DeploymentSetMember {
+  role: string;
+  vmid: number /* int */;
+  name?: string;
+  node: string;
+  guestType: string;
+  status: string;
+  connection?: string;
+}
+/**
+ * DeploymentSetList is the sets gallery payload.
+ */
+export interface DeploymentSetList {
+  sets: DeploymentSet[];
+}
+/**
+ * CreateSetRequest is the body of POST /tenants/{tenantId}/deployment-sets. It
+ * provisions a kind:set catalog service (ADR-0029). The server member takes a
+ * STATIC IP (ServerIP) so the join URL is known before any guest boots (ADR-0030);
+ * agents get DHCP. AgentCount is clamped to the service role's [min,max]; zero
+ * falls back to the role default. VMIDs are operator-chosen: ServerVMID for the
+ * control plane, AgentVMIDs for the workers (len must equal the resolved agent
+ * count). No credential is collected — the cluster join token is generated.
+ */
+export interface CreateSetRequest {
+  serviceId: string;
+  projectId: string;
+  /**
+   * Name is the set's base name; members are named <name>-server and
+   * <name>-agent-N.
+   */
+  name: string;
+  node: string;
+  storage: string;
+  bridge: string;
+  vlanTag?: number /* int */;
+  firewall: boolean;
+  sshKeys?: string[];
+  tags?: string[];
+  /**
+   * AgentCount is the number of worker nodes (0 → the service role default).
+   */
+  agentCount?: number /* int */;
+  /**
+   * ServerVMID + AgentVMIDs are the operator-chosen VMIDs. len(AgentVMIDs) must
+   * equal the resolved agent count.
+   */
+  serverVmid: number /* int */;
+  agentVmids: number /* int */[];
+  /**
+   * ServerIP is the static control-plane address (required for a joinable
+   * cluster, ADR-0030): a CIDR + gateway free on the LAN.
+   */
+  serverIp?: IPConfig;
+}
+/**
+ * CreateSetResponse acknowledges an accepted set provision. It carries the set id
+ * and the resolved members (VMIDs + roles) so the UI can track each. No secret is
+ * ever returned — the generated cluster token exists only inside the members'
+ * rendered snippets (ADR-0030).
+ */
+export interface CreateSetResponse {
+  setId: string;
+  status: string;
+  members: DeploymentSetMember[];
+}
+/**
+ * SetActionResponse acknowledges a set start/stop: the per-member Proxmox task
+ * refs the UI polls to completion.
+ */
+export interface SetActionResponse {
+  setId: string;
+  tasks: TaskRef[];
 }
 
 //////////

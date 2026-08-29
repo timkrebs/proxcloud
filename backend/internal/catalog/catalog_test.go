@@ -97,9 +97,9 @@ func TestLoadValidatesFailFast(t *testing.T) {
 		{"id mismatch dir", func(f map[string]string) {
 			f["services/pg/service.yaml"] = strings.Replace(f["services/pg/service.yaml"], "id: pg", "id: other", 1)
 		}, "must equal its directory name"},
-		{"bad kind set", func(f map[string]string) {
+		{"set without roles rejected", func(f map[string]string) {
 			f["services/pg/service.yaml"] = strings.Replace(f["services/pg/service.yaml"], "kind: single", "kind: set", 1)
-		}, "reserved"},
+		}, "requires at least one role"},
 		{"lxc rejected", func(f map[string]string) {
 			f["services/pg/service.yaml"] = strings.Replace(f["services/pg/service.yaml"], "guestType: qemu", "guestType: lxc", 1)
 		}, "guestType must be 'qemu'"},

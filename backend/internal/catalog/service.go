@@ -43,6 +43,18 @@ type Sizing struct {
 	Min     Size `yaml:"min"`
 }
 
+// RoleSpec is one member role of a kind:set service (ADR-0029/0030), e.g. the K3s
+// 'server' (count 1) and 'agent' (count 2 default, adjustable within [Min,Max]).
+// Each role has its own per-member Sizing. Name is the stable role slug and the
+// prefix of the role's cloud-init template (<name>.cloud-init.yaml.tftpl).
+type RoleSpec struct {
+	Name   string `yaml:"name"`
+	Count  int    `yaml:"count"` // wizard default member count for this role
+	Min    int    `yaml:"min"`   // minimum members (0 → treated as Count, i.e. fixed)
+	Max    int    `yaml:"max"`   // maximum members (0 → treated as Count, i.e. fixed)
+	Sizing Sizing `yaml:"sizing"`
+}
+
 // CredentialSpec declares one credential the service injects via the snippet.
 // UsernameSettable/UserSettable/GeneratedDefault drive the (Phase C) wizard;
 // Phase A always generates.
@@ -62,18 +74,33 @@ type ServiceDef struct {
 	Description string           `yaml:"description"`
 	Icon        string           `yaml:"icon"`
 	Category    string           `yaml:"category"`
-	Kind        string           `yaml:"kind"`      // single | set (v1: single)
+	Kind        string           `yaml:"kind"`      // single | set
 	GuestType   string           `yaml:"guestType"` // qemu
 	BaseImage   BaseImage        `yaml:"baseImage"`
-	Sizing      Sizing           `yaml:"sizing"`
+	Sizing      Sizing           `yaml:"sizing"` // kind:single only (per-role sizing lives on Roles)
+	Roles       []RoleSpec       `yaml:"roles"`  // kind:set only
 	Credentials []CredentialSpec `yaml:"credentials"`
 	Ports       []int            `yaml:"ports"`
 	Readiness   string           `yaml:"readiness"` // tcp:<port>
 	Docs        string           `yaml:"docs"`
 	TestedOn    string           `yaml:"testedOn"`
 
-	cloudInit *template.Template // parsed cloud-init.yaml.tftpl
-	nextSteps *template.Template // parsed next-steps.md.tftpl
+	cloudInit     *template.Template            // kind:single: parsed cloud-init.yaml.tftpl
+	roleCloudInit map[string]*template.Template // kind:set: role name -> parsed <role>.cloud-init.yaml.tftpl
+	nextSteps     *template.Template            // parsed next-steps.md.tftpl
+}
+
+// IsSet reports whether the service provisions a multi-guest deployment set.
+func (s *ServiceDef) IsSet() bool { return s.Kind == "set" }
+
+// Role returns the RoleSpec with the given name, or (RoleSpec{}, false).
+func (s *ServiceDef) Role(name string) (RoleSpec, bool) {
+	for _, r := range s.Roles {
+		if r.Name == name {
+			return r, true
+		}
+	}
+	return RoleSpec{}, false
 }
 
 // PrimaryPort returns the first declared port, or 0 when none.
@@ -121,11 +148,18 @@ func (s *ServiceDef) validate(dir string) error {
 	}
 	switch s.Kind {
 	case "single":
-		// ok
+		if len(s.Roles) > 0 {
+			return fmt.Errorf("service %q: kind 'single' must not declare roles", s.ID)
+		}
 	case "set":
-		return fmt.Errorf("service %q: kind 'set' is reserved and not implemented in v1", s.ID)
+		// A set is provisioned as N linked guests grouped by role (ADR-0029). The
+		// per-role member templates + sizing live on Roles; the top-level Sizing is
+		// unused. Phase E implements this — it is no longer reserved.
+		if len(s.Roles) == 0 {
+			return fmt.Errorf("service %q: kind 'set' requires at least one role", s.ID)
+		}
 	default:
-		return fmt.Errorf("service %q: kind must be 'single' (got %q)", s.ID, s.Kind)
+		return fmt.Errorf("service %q: kind must be 'single' or 'set' (got %q)", s.ID, s.Kind)
 	}
 	if s.GuestType != "qemu" {
 		return fmt.Errorf("service %q: guestType must be 'qemu' (cloud-init user-data is VM-only; got %q)", s.ID, s.GuestType)
@@ -133,7 +167,11 @@ func (s *ServiceDef) validate(dir string) error {
 	if !volIDRe.MatchString(s.BaseImage.Ref) {
 		return fmt.Errorf("service %q: baseImage.ref %q is not a storage-scoped volume id", s.ID, s.BaseImage.Ref)
 	}
-	if err := validateSizing(s.ID, s.Sizing); err != nil {
+	if s.IsSet() {
+		if err := validateRoles(s.ID, s.Roles); err != nil {
+			return err
+		}
+	} else if err := validateSizing(s.ID, s.Sizing); err != nil {
 		return err
 	}
 	// An EMPTY credential schema is valid (ADR-0027 §4, the "Vault honesty" case):
@@ -167,6 +205,42 @@ func (s *ServiceDef) validate(dir string) error {
 }
 
 var dateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// roleNameRe is the stable-slug rule for a role name (and its template prefix).
+var roleNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,19}$`)
+
+// validateRoles checks a kind:set service's role schema: unique slug names, sane
+// count/min/max bounds, and a valid per-role sizing. A returned error fails boot.
+func validateRoles(id string, roles []RoleSpec) error {
+	seen := map[string]bool{}
+	for i, r := range roles {
+		if !roleNameRe.MatchString(r.Name) {
+			return fmt.Errorf("service %q: role[%d].name %q must match [a-z][a-z0-9-] (max 20)", id, i, r.Name)
+		}
+		if seen[r.Name] {
+			return fmt.Errorf("service %q: duplicate role name %q", id, r.Name)
+		}
+		seen[r.Name] = true
+		if r.Count < 1 {
+			return fmt.Errorf("service %q: role %q count must be >= 1", id, r.Name)
+		}
+		// Min/Max default to Count (a fixed-size role) when left zero.
+		minC, maxC := r.Min, r.Max
+		if minC == 0 {
+			minC = r.Count
+		}
+		if maxC == 0 {
+			maxC = r.Count
+		}
+		if minC < 1 || maxC < minC || r.Count < minC || r.Count > maxC {
+			return fmt.Errorf("service %q: role %q bounds invalid (min %d, default %d, max %d)", id, r.Name, minC, r.Count, maxC)
+		}
+		if err := validateSizing(id+"/"+r.Name, r.Sizing); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func validateSizing(id string, sz Sizing) error {
 	dims := []struct {

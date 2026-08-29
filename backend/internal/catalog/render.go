@@ -57,6 +57,40 @@ func B64Each(raw []string) []string {
 	return out
 }
 
+// SetCloudInitInput is the server-authoritative input to a kind:set service's
+// per-role cloud-init template (ADR-0029/0030). Like CloudInitInput, every
+// credential-shaped value is already base64-encoded: K3sTokenB64 is the base64 of
+// the crypto/rand cluster token, decoded ONLY in-guest inside a runcmd (ADR-0027).
+// The raw token never touches YAML structure, a shell line, a log, or a response.
+// ServerIP is the static control-plane IP fixed at request time so agents can
+// embed the join URL (https://<ServerIP>:<Port>) before any guest boots.
+type SetCloudInitInput struct {
+	Hostname    string
+	LoginUser   string
+	SSHKeysB64  []string
+	K3sTokenB64 string // base64 of the generated cluster token (decoded in-guest)
+	ServerIP    string // static control-plane IP (tls-san / node-ip / K3S_URL host)
+	Port        int    // the API/join port (6443)
+}
+
+// RenderRoleCloudInit renders one member role's #cloud-config for a kind:set
+// service. role must be a declared role (e.g. "server"/"agent"); the result is
+// the exact bytes uploaded as that member's snippet (ADR-0025).
+func (s *ServiceDef) RenderRoleCloudInit(role string, in SetCloudInitInput) (string, error) {
+	if s.roleCloudInit == nil {
+		return "", fmt.Errorf("service %q: not a set service (no role templates)", s.ID)
+	}
+	t, ok := s.roleCloudInit[role]
+	if !ok {
+		return "", fmt.Errorf("service %q: no cloud-init template for role %q", s.ID, role)
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, in); err != nil {
+		return "", fmt.Errorf("service %q: render %s cloud-init: %w", s.ID, role, err)
+	}
+	return buf.String(), nil
+}
+
 // RenderCloudInit renders the service's #cloud-config user-data. The result is
 // the exact bytes uploaded as the snippet and referenced by cicustom.
 func (s *ServiceDef) RenderCloudInit(in CloudInitInput) (string, error) {

@@ -6,19 +6,33 @@ package types
 // only. Credential values are never present here (this is a definition, not an
 // instance).
 type CatalogService struct {
-	ID          string              `json:"id"`
-	DisplayName string              `json:"displayName"`
-	Description string              `json:"description"`
-	Icon        string              `json:"icon"`
-	Category    string              `json:"category"`
-	Kind        string              `json:"kind"`      // single | set
-	GuestType   string              `json:"guestType"` // qemu
-	Sizing      CatalogSizing       `json:"sizing"`
+	ID          string        `json:"id"`
+	DisplayName string        `json:"displayName"`
+	Description string        `json:"description"`
+	Icon        string        `json:"icon"`
+	Category    string        `json:"category"`
+	Kind        string        `json:"kind"`      // single | set
+	GuestType   string        `json:"guestType"` // qemu
+	Sizing      CatalogSizing `json:"sizing"`
+	// Roles is the member-role schema of a kind:set service (ADR-0029); empty for
+	// a kind:single service. It drives the deployment-set wizard (worker count etc.).
+	Roles       []CatalogRole       `json:"roles,omitempty"`
 	Credentials []CatalogCredential `json:"credentials"`
 	Ports       []int               `json:"ports"`
 	Readiness   string              `json:"readiness"`
 	Docs        string              `json:"docs"`
 	TestedOn    string              `json:"testedOn"`
+}
+
+// CatalogRole is one member role of a kind:set service: its name, the wizard
+// default count, the [Min,Max] range the operator may pick, and its per-member
+// sizing.
+type CatalogRole struct {
+	Name   string        `json:"name"`
+	Count  int           `json:"count"`
+	Min    int           `json:"min"`
+	Max    int           `json:"max"`
+	Sizing CatalogSizing `json:"sizing"`
 }
 
 // CatalogSizing is the wizard default + minimum floor for a service.

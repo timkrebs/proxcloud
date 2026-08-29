@@ -86,15 +86,30 @@ func loadService(fsys fs.FS, dir, name string) (*ServiceDef, error) {
 		return nil, fmt.Errorf("catalog: invalid %s: %w", name, err)
 	}
 
-	ci, err := parseTemplate(fsys, dir, cloudInitFile, def.ID)
-	if err != nil {
-		return nil, err
+	if def.IsSet() {
+		// A set service ships one cloud-init template per role, named
+		// "<role>.cloud-init.yaml.tftpl" (ADR-0029/0030). There is no single
+		// cloud-init.yaml.tftpl.
+		def.roleCloudInit = map[string]*template.Template{}
+		for _, role := range def.Roles {
+			file := role.Name + ".cloud-init.yaml.tftpl"
+			t, err := parseTemplate(fsys, dir, file, def.ID)
+			if err != nil {
+				return nil, err
+			}
+			def.roleCloudInit[role.Name] = t
+		}
+	} else {
+		ci, err := parseTemplate(fsys, dir, cloudInitFile, def.ID)
+		if err != nil {
+			return nil, err
+		}
+		def.cloudInit = ci
 	}
 	ns, err := parseTemplate(fsys, dir, nextStepsFile, def.ID)
 	if err != nil {
 		return nil, err
 	}
-	def.cloudInit = ci
 	def.nextSteps = ns
 	return &def, nil
 }

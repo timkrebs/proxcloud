@@ -430,6 +430,19 @@ func toCatalogService(s *catalog.ServiceDef) types.CatalogService {
 			GeneratedDefault: c.GeneratedDefault,
 		})
 	}
+	roles := make([]types.CatalogRole, 0, len(s.Roles))
+	for _, r := range s.Roles {
+		roles = append(roles, types.CatalogRole{
+			Name:  r.Name,
+			Count: r.Count,
+			Min:   r.Min,
+			Max:   r.Max,
+			Sizing: types.CatalogSizing{
+				Default: types.CatalogSize{Cores: r.Sizing.Default.Cores, MemoryMB: r.Sizing.Default.MemoryMb, DiskGB: r.Sizing.Default.DiskGb},
+				Min:     types.CatalogSize{Cores: r.Sizing.Min.Cores, MemoryMB: r.Sizing.Min.MemoryMb, DiskGB: r.Sizing.Min.DiskGb},
+			},
+		})
+	}
 	return types.CatalogService{
 		ID:          s.ID,
 		DisplayName: s.DisplayName,
@@ -442,6 +455,7 @@ func toCatalogService(s *catalog.ServiceDef) types.CatalogService {
 			Default: types.CatalogSize{Cores: s.Sizing.Default.Cores, MemoryMB: s.Sizing.Default.MemoryMb, DiskGB: s.Sizing.Default.DiskGb},
 			Min:     types.CatalogSize{Cores: s.Sizing.Min.Cores, MemoryMB: s.Sizing.Min.MemoryMb, DiskGB: s.Sizing.Min.DiskGb},
 		},
+		Roles:       roles,
 		Credentials: creds,
 		Ports:       s.Ports,
 		Readiness:   s.Readiness,
