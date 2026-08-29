@@ -64,6 +64,15 @@ export const qk = {
   service: (tenantId?: string, serviceId?: string) =>
     ["serviceCatalog", tenantId, "service", serviceId] as const,
 
+  // ── Deployment sets (ADR-0029/0030) ──────────────────────────────────────
+  // Leading "deploymentSets" segment (NEVER "catalog") so the SSE deployment_set
+  // frame and post-mutation code can prefix-invalidate every entry, and a tenant
+  // switch produces a distinct cache entry. The list and each set's detail share
+  // the prefix, mirroring serviceCatalog/service above.
+  deploymentSets: (tenantId?: string) => ["deploymentSets", tenantId] as const,
+  deploymentSet: (tenantId?: string, setId?: string) =>
+    ["deploymentSets", tenantId, "set", setId] as const,
+
   // ── Quotas + activity (Phase 4) ──────────────────────────────────────────
   // Tenant-scoped: leading segment + tenant id, matching the pattern above so a
   // tenant switch produces a distinct cache entry and mutations can prefix-

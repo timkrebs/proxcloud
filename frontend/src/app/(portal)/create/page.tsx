@@ -53,6 +53,9 @@ function serviceIcon(svc: CatalogService): SvcName {
 }
 
 function serviceHref(svc: CatalogService): string {
+  // A kind:"set" service (e.g. the K3s cluster) provisions N linked members and
+  // routes to the dedicated set-create flow — NOT the single-guest wizard.
+  if (svc.kind === "set") return `/deployment-sets/new?service=${encodeURIComponent(svc.id)}`;
   const kind = svc.guestType === "lxc" ? "lxc" : "vm";
   return `/create/${kind}?service=${encodeURIComponent(svc.id)}`;
 }

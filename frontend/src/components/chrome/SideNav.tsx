@@ -72,6 +72,12 @@ const ROWS: Row[] = [
     <Mi name="bolt" size={16} color="var(--color-accent)" strokeWidth={1.4} />,
     (p) => p === "/create",
   ),
+  // Flag-gated like the catalog (DEPLOYMENT_SETS_ENABLED): no capability flag is
+  // exposed to the client, so the row is always shown and the list page renders a
+  // disabled/empty state when the endpoint 404s.
+  item("Deployment sets", "/deployment-sets", <Svc name="k8s" size={16} />, (p) =>
+    prefix("/deployment-sets")(p),
+  ),
   item(
     "Projects",
     "/projects",
