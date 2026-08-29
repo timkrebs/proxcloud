@@ -102,6 +102,13 @@ type Config struct {
 	SnippetDatastore   string
 	SnippetStoragePath string
 
+	// DeploymentSetsEnabled gates the multi-guest deployment-set surface
+	// (ADR-0029/0030 — the K3s cluster action). OFF by default. A set is a catalog
+	// action that rides the snippet writer, so it is only truly active when the
+	// catalog is also enabled (the handler gates on the loaded catalog); the flag
+	// itself is independent so the routes still mount for the completeness tests.
+	DeploymentSetsEnabled bool
+
 	// Optional flat-rate pricing; all cost UI is hidden when unset.
 	PricingCurrency    string
 	PricingVCPUMonth   float64
@@ -219,6 +226,7 @@ func Load() (*Config, error) {
 	cfg.SchedulerEnabled = envBool("SCHEDULER_ENABLED", false)
 	cfg.AutoShutdownEnabled = envBool("AUTOSHUTDOWN_ENABLED", false)
 	cfg.TTLEnabled = envBool("TTL_ENABLED", false)
+	cfg.DeploymentSetsEnabled = envBool("DEPLOYMENT_SETS_ENABLED", false)
 	cfg.SchedulerInterval = parseDuration("SCHEDULER_INTERVAL", 30*time.Second, &problems)
 	cfg.AutoShutdownDefaultGrace = parseDuration("AUTOSHUTDOWN_DEFAULT_GRACE", 120*time.Second, &problems)
 	cfg.InvitationTTL = parseDuration("INVITATION_TTL", 72*time.Hour, &problems)

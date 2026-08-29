@@ -19,6 +19,11 @@ import "net/http"
 // action from urlParam when present.
 const guestActionPattern = "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/{action}"
 
+// setActionPattern is the deployment-set wildcard lifecycle route (start/stop,
+// ADR-0029); like guestActionPattern its concrete verb lives in the {action} path
+// param, refined by AuditAction from urlParam when present.
+const setActionPattern = "/api/tenants/{tenantId}/deployment-sets/{setId}/{action}"
+
 // auditActions maps a mutating tenant route to its audit action verb.
 var auditActions = map[routeKey]string{
 	{http.MethodPost, "/api/tenants/{tenantId}/projects"}:                  "project.create",
@@ -35,6 +40,10 @@ var auditActions = map[routeKey]string{
 	{http.MethodDelete, "/api/tenants/{tenantId}/invitations/{invitationId}"}: "invitation.revoke",
 
 	{http.MethodPost, "/api/tenants/{tenantId}/service-catalog/{serviceId}/provision"}: "service_catalog.provision",
+
+	{http.MethodPost, "/api/tenants/{tenantId}/deployment-sets"}:           "deployment_set.create",
+	{http.MethodDelete, "/api/tenants/{tenantId}/deployment-sets/{setId}"}: "deployment_set.delete",
+	{http.MethodPost, setActionPattern}:                                    "deployment_set.action",
 
 	{http.MethodPost, "/api/tenants/{tenantId}/guests"}:                                                "guest.create",
 	{http.MethodPatch, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/config"}:                   "guest.config.update",
@@ -64,9 +73,16 @@ func AuditAction(method, pattern string, urlParam func(string) string) string {
 	if !ok {
 		return ""
 	}
-	if pattern == guestActionPattern && urlParam != nil {
-		if a := urlParam("action"); a != "" {
-			return "guest." + a
+	if urlParam != nil {
+		switch pattern {
+		case guestActionPattern:
+			if a := urlParam("action"); a != "" {
+				return "guest." + a
+			}
+		case setActionPattern:
+			if a := urlParam("action"); a != "" {
+				return "deployment_set." + a
+			}
 		}
 	}
 	return base
@@ -85,6 +101,10 @@ func auditTarget(urlParam func(string) string) (targetType, targetID *string) {
 	}
 	if v := urlParam("projectId"); v != "" {
 		t := "project"
+		return &t, &v
+	}
+	if v := urlParam("setId"); v != "" {
+		t := "deployment_set"
 		return &t, &v
 	}
 	return nil, nil

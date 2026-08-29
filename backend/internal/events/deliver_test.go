@@ -24,6 +24,13 @@ func TestDeliverTenantScoping(t *testing.T) {
 	depFor := func(vmid int) Event {
 		return Event{Name: "deployment", Data: &types.Deployment{VMID: vmid}}
 	}
+	setFor := func(vmids ...int) Event {
+		ms := make([]types.DeploymentSetMember, 0, len(vmids))
+		for _, v := range vmids {
+			ms = append(ms, types.DeploymentSetMember{VMID: v})
+		}
+		return Event{Name: "deployment_set", Data: &types.DeploymentSet{ID: "set-1", Members: ms}}
+	}
 
 	tests := []struct {
 		name  string
@@ -54,6 +61,17 @@ func TestDeliverTenantScoping(t *testing.T) {
 		{"ttl_warning tenant owned vmid", Event{Name: "ttl_warning", Data: types.TtlWarningEvent{VMID: 200}}, false, true},
 		{"ttl_warning tenant foreign vmid blocked", Event{Name: "ttl_warning", Data: types.TtlWarningEvent{VMID: 100}}, false, false},
 		{"ttl_warning tenant wrong payload type blocked", Event{Name: "ttl_warning", Data: "garbage"}, false, false},
+
+		// Deployment-set frames reach a tenant subscriber only when EVERY member VMID
+		// is owned; platform-admin bypasses. A set naming any foreign VMID, an empty
+		// member list, or a typed-mismatched payload must NOT fall through to the
+		// default broadcast (which would leak the tenant's cluster topology).
+		{"deployment_set admin bypass (foreign vmids)", setFor(9012, 9013), true, true},
+		{"deployment_set tenant all owned", setFor(200), false, true},
+		{"deployment_set tenant one foreign vmid blocked", setFor(200, 100), false, false},
+		{"deployment_set tenant all foreign blocked", setFor(100, 101), false, false},
+		{"deployment_set tenant empty members blocked", setFor(), false, false},
+		{"deployment_set tenant wrong payload type blocked", Event{Name: "deployment_set", Data: "garbage"}, false, false},
 
 		{"unknown frame passes through", Event{Name: "hello", Data: nil}, false, true},
 	}

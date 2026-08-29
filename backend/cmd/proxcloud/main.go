@@ -258,7 +258,8 @@ func runServe(log *slog.Logger) {
 		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL,
 		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive(),
 		TTL: ttlSvc, TTLEnabled: cfg.TTLActive(),
-		Catalog: catalogDefs, CatalogEnabled: cfg.CatalogEnabled, SnippetDatastore: cfg.SnippetDatastore}
+		Catalog: catalogDefs, CatalogEnabled: cfg.CatalogEnabled, SnippetDatastore: cfg.SnippetDatastore,
+		DeploymentSetsEnabled: cfg.DeploymentSetsEnabled}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {

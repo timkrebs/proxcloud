@@ -146,6 +146,45 @@ func (e *Engine) Get(id string) (*types.Deployment, bool) {
 	return &cp, true
 }
 
+// awaitDeploymentPoll is how often AwaitDeployment samples a member's status.
+const awaitDeploymentPoll = 50 * time.Millisecond
+
+// AwaitDeployment blocks until deployment id leaves the "running" state (i.e.
+// reaches a terminal succeeded/failed), or ctx is done, and returns the final
+// snapshot. It is the deployment-set orchestrator's join point (ADR-0029): a set
+// awaits each member reaching ready — for a catalog guest, Status "succeeded"
+// means its `configuring` step passed and, for the server, Connection is set —
+// before it sequences the next role (ADR-0030). This is an ADDITIVE read-only
+// hook: it never mutates a run, so the single-guest Submit/run/Get path is
+// unchanged.
+func (e *Engine) AwaitDeployment(ctx context.Context, id string) (*types.Deployment, error) {
+	for {
+		d, ok := e.Get(id)
+		if !ok {
+			return nil, fmt.Errorf("deploy: deployment %s not found", id)
+		}
+		if d.Status != "running" {
+			return d, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(awaitDeploymentPoll):
+		}
+	}
+}
+
+// RemoveSnippet best-effort deletes a delivered cloud-init snippet by filename
+// (ADR-0025), the set-teardown counterpart to the internal removeSnippet(cctx)
+// the single-guest failure paths use. Nil-safe when no writer is configured.
+// ADDITIVE — it does not change any existing engine behaviour.
+func (e *Engine) RemoveSnippet(ctx context.Context, filename string) error {
+	if e.Snippets == nil || filename == "" {
+		return nil
+	}
+	return e.Snippets.RemoveSnippet(ctx, filename)
+}
+
 // Submit validates the request and starts the deployment goroutine. cctx carries
 // the tenancy context (pool passthrough + ownership reservation to settle).
 func (e *Engine) Submit(req *types.CreateGuestRequest, cctx CreateContext) (*types.Deployment, error) {
