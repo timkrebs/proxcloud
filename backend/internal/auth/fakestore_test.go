@@ -1056,17 +1056,17 @@ func (f *fakeStore) UpsertProjectTTLPolicy(context.Context, store.UpsertProjectT
 func (f *fakeStore) CreateDeploymentSet(context.Context, store.CreateDeploymentSetParams) (*store.DeploymentSet, error) {
 	return nil, nil
 }
-func (f *fakeStore) GetDeploymentSet(context.Context, string) (*store.DeploymentSet, error) {
+func (f *fakeStore) GetDeploymentSet(context.Context, string, string) (*store.DeploymentSet, error) {
 	return nil, nil
 }
 func (f *fakeStore) ListDeploymentSets(context.Context, string) ([]store.DeploymentSet, error) {
 	return nil, nil
 }
-func (f *fakeStore) ListSetMembers(context.Context, string) ([]store.ResourceOwnership, error) {
+func (f *fakeStore) ListSetMembers(context.Context, string, string) ([]store.ResourceOwnership, error) {
 	return nil, nil
 }
-func (f *fakeStore) UpdateSetStatus(context.Context, string, string) error { return nil }
-func (f *fakeStore) DeleteDeploymentSet(context.Context, string) error     { return nil }
+func (f *fakeStore) UpdateSetStatus(context.Context, string, string, string) error { return nil }
+func (f *fakeStore) DeleteDeploymentSet(context.Context, string, string) error     { return nil }
 func (f *fakeStore) ReserveOwnershipBatch(context.Context, store.ReserveOwnershipBatchParams) ([]store.ResourceOwnership, error) {
 	return nil, nil
 }

@@ -41,10 +41,13 @@ func (s *PgStore) CreateDeploymentSet(ctx context.Context, p CreateDeploymentSet
 	return d, nil
 }
 
-// GetDeploymentSet implements DeploymentSetStore.
-func (s *PgStore) GetDeploymentSet(ctx context.Context, id string) (*DeploymentSet, error) {
-	const q = `SELECT ` + deploymentSetColumns + ` FROM deployment_set WHERE id = $1::uuid`
-	d, err := scanDeploymentSet(s.q.QueryRow(ctx, q, id))
+// GetDeploymentSet implements DeploymentSetStore. The tenant filter is in SQL
+// (belt-and-suspenders): a cross-tenant id returns ErrNotFound at the DB layer,
+// so a leak can never depend on the handler's own 404 check alone.
+func (s *PgStore) GetDeploymentSet(ctx context.Context, tenantID, id string) (*DeploymentSet, error) {
+	const q = `SELECT ` + deploymentSetColumns + ` FROM deployment_set
+	           WHERE id = $1::uuid AND tenant_id = $2::uuid`
+	d, err := scanDeploymentSet(s.q.QueryRow(ctx, q, id, tenantID))
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrNotFound
 	}
@@ -79,11 +82,17 @@ func (s *PgStore) ListDeploymentSets(ctx context.Context, tenantID string) ([]De
 
 // ListSetMembers implements DeploymentSetStore. Ordered by role DESC then vmid so
 // 'server' sorts before 'agent' for start ordering; callers reverse it for
-// teardown (agents before server, ADR-0030).
-func (s *PgStore) ListSetMembers(ctx context.Context, setID string) ([]ResourceOwnership, error) {
+// teardown (agents before server, ADR-0030). The tenant filter is enforced in SQL
+// by joining through the owning deployment_set row (belt-and-suspenders): a
+// cross-tenant setID returns no members even if the handler's 404 is bypassed.
+func (s *PgStore) ListSetMembers(ctx context.Context, tenantID, setID string) ([]ResourceOwnership, error) {
 	const q = `SELECT ` + ownershipColumns + ` FROM resource_ownership
-	           WHERE deployment_set_id = $1::uuid ORDER BY role DESC, vmid`
-	rows, err := s.q.Query(ctx, q, setID)
+	           WHERE deployment_set_id = $1::uuid
+	             AND EXISTS (SELECT 1 FROM deployment_set s
+	                         WHERE s.id = resource_ownership.deployment_set_id
+	                           AND s.tenant_id = $2::uuid)
+	           ORDER BY role DESC, vmid`
+	rows, err := s.q.Query(ctx, q, setID, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list set members: %w", err)
 	}
@@ -102,10 +111,12 @@ func (s *PgStore) ListSetMembers(ctx context.Context, setID string) ([]ResourceO
 	return out, nil
 }
 
-// UpdateSetStatus implements DeploymentSetStore.
-func (s *PgStore) UpdateSetStatus(ctx context.Context, id, status string) error {
-	const q = `UPDATE deployment_set SET status = $2, updated_at = now() WHERE id = $1::uuid`
-	tag, err := s.q.Exec(ctx, q, id, status)
+// UpdateSetStatus implements DeploymentSetStore. Tenant-filtered in SQL: a
+// cross-tenant id affects zero rows and returns ErrNotFound (no silent write).
+func (s *PgStore) UpdateSetStatus(ctx context.Context, tenantID, id, status string) error {
+	const q = `UPDATE deployment_set SET status = $2, updated_at = now()
+	           WHERE id = $1::uuid AND tenant_id = $3::uuid`
+	tag, err := s.q.Exec(ctx, q, id, status, tenantID)
 	if err != nil {
 		return fmt.Errorf("store: update set status: %w", err)
 	}
@@ -116,10 +127,11 @@ func (s *PgStore) UpdateSetStatus(ctx context.Context, id, status string) error 
 }
 
 // DeleteDeploymentSet implements DeploymentSetStore. The FK's ON DELETE SET NULL
-// nulls each member's deployment_set_id.
-func (s *PgStore) DeleteDeploymentSet(ctx context.Context, id string) error {
-	const q = `DELETE FROM deployment_set WHERE id = $1::uuid`
-	tag, err := s.q.Exec(ctx, q, id)
+// nulls each member's deployment_set_id. Tenant-filtered in SQL: a cross-tenant
+// id deletes nothing and returns ErrNotFound.
+func (s *PgStore) DeleteDeploymentSet(ctx context.Context, tenantID, id string) error {
+	const q = `DELETE FROM deployment_set WHERE id = $1::uuid AND tenant_id = $2::uuid`
+	tag, err := s.q.Exec(ctx, q, id, tenantID)
 	if err != nil {
 		return fmt.Errorf("store: delete deployment set: %w", err)
 	}

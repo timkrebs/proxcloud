@@ -433,23 +433,25 @@ type DeploymentSetStore interface {
 	// CreateDeploymentSet inserts a set row (status defaults to 'provisioning')
 	// and returns it. The composite tenant/project isolation is enforced by the FK.
 	CreateDeploymentSet(ctx context.Context, p CreateDeploymentSetParams) (*DeploymentSet, error)
-	// GetDeploymentSet returns the set with the given id, or ErrNotFound. The
-	// caller does its OWN tenant-filtered 404 (the id is tenant-level, not a vmid).
-	GetDeploymentSet(ctx context.Context, id string) (*DeploymentSet, error)
+	// GetDeploymentSet returns the set with the given id scoped to tenantID, or
+	// ErrNotFound. The tenant filter is in SQL (belt-and-suspenders); the caller
+	// still does its OWN 404 so a cross-tenant id is an indistinguishable 404.
+	GetDeploymentSet(ctx context.Context, tenantID, id string) (*DeploymentSet, error)
 	// ListDeploymentSets returns a tenant's sets (tenant filter in SQL), newest first.
 	ListDeploymentSets(ctx context.Context, tenantID string) ([]DeploymentSet, error)
 	// ListSetMembers returns the set's member ownership rows (deployment_set_id
-	// filter in SQL), ordered by role then vmid so 'agent' rows sort before
-	// 'server' — the reverse-teardown order (ADR-0030).
-	ListSetMembers(ctx context.Context, setID string) ([]ResourceOwnership, error)
+	// filter in SQL, joined through the set for the tenant scope), ordered by role
+	// then vmid so 'agent' rows sort before 'server' — the reverse-teardown order
+	// (ADR-0030). A cross-tenant setID returns no members.
+	ListSetMembers(ctx context.Context, tenantID, setID string) ([]ResourceOwnership, error)
 	// UpdateSetStatus transitions a set to a new lifecycle status (durable truth
-	// that survives a backend restart, unlike an in-memory Deployment). ErrNotFound
-	// if the set id does not exist.
-	UpdateSetStatus(ctx context.Context, id, status string) error
+	// that survives a backend restart, unlike an in-memory Deployment). Tenant-scoped
+	// in SQL. ErrNotFound if the set id does not exist for the tenant.
+	UpdateSetStatus(ctx context.Context, tenantID, id, status string) error
 	// DeleteDeploymentSet removes the set row (the final step of a set teardown,
 	// after every member is destroyed/tombstoned). Members' deployment_set_id is
-	// nulled by the FK's ON DELETE SET NULL. ErrNotFound if gone.
-	DeleteDeploymentSet(ctx context.Context, id string) error
+	// nulled by the FK's ON DELETE SET NULL. Tenant-scoped in SQL; ErrNotFound if gone.
+	DeleteDeploymentSet(ctx context.Context, tenantID, id string) error
 	// ReserveOwnershipBatch reserves ALL N members or none, under ONE
 	// AdvisoryLock(AdvisoryKeyTenant) (ADR-0029): it computes usage once, then folds
 	// each member's delta into the running usage before checking the next member's

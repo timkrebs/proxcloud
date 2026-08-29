@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -433,8 +434,72 @@ func TestDeleteSetTombstonesMembers(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// The set row is gone.
-	if _, err := hh.fake.GetDeploymentSet(context.Background(), setID); err == nil {
+	if _, err := hh.fake.GetDeploymentSet(context.Background(), tenantID, setID); err == nil {
 		t.Fatal("set row still exists after delete")
+	}
+}
+
+// TestDeleteSetPartialFailureKeepsSet: when ONE member's destroy fails to submit, the
+// set row is KEPT (honest 'deleting' status, a 502 — not a 202 "all good"), the
+// members that DID submit are torn down + tombstoned, and the failed member's guest
+// is left intact (its ownership NOT tombstoned) so the delete stays retryable. This
+// prevents a transient PVE failure from deleting the set row while an orphan guest
+// keeps running and quota-charged.
+func TestDeleteSetPartialFailureKeepsSet(t *testing.T) {
+	deleted := make(chan proxmox.UPID, 8)
+	mock := &proxmoxtest.MockClient{
+		OnDeleteGuest: func(_ context.Context, ref proxmox.GuestRef, purge bool) (proxmox.UPID, error) {
+			// Agent 202's destroy fails to submit; the server + other agent succeed.
+			if ref.VMID == 202 {
+				return "", errors.New("storage is busy")
+			}
+			u := proxmox.UPID("UPID:pve01:9:9:9:qmdestroy:" + itoa(ref.VMID) + ":u@pam:")
+			deleted <- u
+			return u, nil
+		},
+	}
+	hh, _ := newSetHarness(t, mock)
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	setID := seedSet(t, hh, tenantID, projID)
+	c := hh.cookie(t, userID)
+
+	done := make(chan struct{})
+	go completeSetTasks(hh.registry, deleted, done)
+	defer close(done)
+
+	rec := hh.req(t, c, http.MethodDelete, "/api/tenants/"+tenantID+"/deployment-sets/"+setID, "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("partial delete = %d, want 502 (body %s)", rec.Code, rec.Body.String())
+	}
+	if env := decodeBody[types.ErrorEnvelope](t, rec); env.Error.Code != "set_teardown_incomplete" {
+		t.Fatalf("error code = %q, want set_teardown_incomplete", env.Error.Code)
+	}
+
+	// The two submittable members tombstone once their destroy tasks complete.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if hh.fake.OwnershipStatus(201) == "tombstoned" && hh.fake.OwnershipStatus(203) == "tombstoned" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("submittable members not tombstoned: 201=%q 203=%q",
+				hh.fake.OwnershipStatus(201), hh.fake.OwnershipStatus(203))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The failed member's guest is left running — its ownership must NOT be tombstoned.
+	if s := hh.fake.OwnershipStatus(202); s != "active" {
+		t.Errorf("failed member 202 ownership = %q, want active (guest still running, quota-charged)", s)
+	}
+
+	// The set row survives with an honest 'deleting' status so the UI keeps it and the
+	// delete can be retried — the fix's core: the row is NOT deleted on partial failure.
+	got, err := hh.fake.GetDeploymentSet(context.Background(), tenantID, setID)
+	if err != nil {
+		t.Fatalf("set row must survive a partial teardown (got err %v)", err)
+	}
+	if got.Status != "deleting" {
+		t.Errorf("set status = %q, want deleting (honest retry state)", got.Status)
 	}
 }
 

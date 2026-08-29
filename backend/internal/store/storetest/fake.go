@@ -2007,13 +2007,14 @@ func (f *Fake) CreateDeploymentSet(_ context.Context, p store.CreateDeploymentSe
 	return &c, nil
 }
 
-func (f *Fake) GetDeploymentSet(_ context.Context, id string) (*store.DeploymentSet, error) {
+func (f *Fake) GetDeploymentSet(_ context.Context, tenantID, id string) (*store.DeploymentSet, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failed("GetDeploymentSet"); err != nil {
 		return nil, err
 	}
-	if d, ok := f.deploymentSets[id]; ok {
+	// Tenant filter in SQL is mirrored here: a cross-tenant id is ErrNotFound.
+	if d, ok := f.deploymentSets[id]; ok && d.TenantID == tenantID {
 		c := *d
 		return &c, nil
 	}
@@ -2041,11 +2042,16 @@ func (f *Fake) ListDeploymentSets(_ context.Context, tenantID string) ([]store.D
 	return out, nil
 }
 
-func (f *Fake) ListSetMembers(_ context.Context, setID string) ([]store.ResourceOwnership, error) {
+func (f *Fake) ListSetMembers(_ context.Context, tenantID, setID string) ([]store.ResourceOwnership, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failed("ListSetMembers"); err != nil {
 		return nil, err
+	}
+	// Mirror the SQL join-through-the-set: only return members when the owning set
+	// belongs to the tenant (a cross-tenant setID yields no members).
+	if s, ok := f.deploymentSets[setID]; !ok || s.TenantID != tenantID {
+		return []store.ResourceOwnership{}, nil
 	}
 	out := []store.ResourceOwnership{}
 	for _, o := range f.ownership {
@@ -2070,14 +2076,14 @@ func (f *Fake) ListSetMembers(_ context.Context, setID string) ([]store.Resource
 	return out, nil
 }
 
-func (f *Fake) UpdateSetStatus(_ context.Context, id, status string) error {
+func (f *Fake) UpdateSetStatus(_ context.Context, tenantID, id, status string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failed("UpdateSetStatus"); err != nil {
 		return err
 	}
 	d, ok := f.deploymentSets[id]
-	if !ok {
+	if !ok || d.TenantID != tenantID {
 		return store.ErrNotFound
 	}
 	d.Status = status
@@ -2085,13 +2091,13 @@ func (f *Fake) UpdateSetStatus(_ context.Context, id, status string) error {
 	return nil
 }
 
-func (f *Fake) DeleteDeploymentSet(_ context.Context, id string) error {
+func (f *Fake) DeleteDeploymentSet(_ context.Context, tenantID, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failed("DeleteDeploymentSet"); err != nil {
 		return err
 	}
-	if _, ok := f.deploymentSets[id]; !ok {
+	if d, ok := f.deploymentSets[id]; !ok || d.TenantID != tenantID {
 		return store.ErrNotFound
 	}
 	// Mirror ON DELETE SET NULL: null out members' set linkage.

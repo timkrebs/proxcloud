@@ -61,7 +61,7 @@ func (d *Deps) ListSets(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]types.DeploymentSet, 0, len(sets))
 	for i := range sets {
-		members, err := d.Store.ListSetMembers(r.Context(), sets[i].ID)
+		members, err := d.Store.ListSetMembers(r.Context(), id.ActiveTenantID, sets[i].ID)
 		if err != nil {
 			httpserver.WriteError(w, err)
 			return
@@ -87,7 +87,7 @@ func (d *Deps) GetSet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	members, err := d.Store.ListSetMembers(r.Context(), set.ID)
+	members, err := d.Store.ListSetMembers(r.Context(), id.ActiveTenantID, set.ID)
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return
@@ -187,7 +187,7 @@ func (d *Deps) CreateSet(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The batch is all-or-nothing: no member row survives. Remove the now-empty
 		// set row so an over-quota create leaves ZERO pending rows and zero set rows.
-		if delErr := d.Store.DeleteDeploymentSet(r.Context(), set.ID); delErr != nil {
+		if delErr := d.Store.DeleteDeploymentSet(r.Context(), tenantID, set.ID); delErr != nil {
 			d.logger().Warn("delete set after reserve failure", "set", set.ID, "err", delErr)
 		}
 		var qe store.ErrQuotaExceeded
@@ -207,7 +207,7 @@ func (d *Deps) CreateSet(w http.ResponseWriter, r *http.Request) {
 	// batch + the set row so nothing leaks.
 	if err := bootstrap.EnsureProjectPool(r.Context(), d.PVE, proj.PoolID, poolComment); err != nil {
 		d.releaseSetReservations(r.Context(), reserved)
-		if delErr := d.Store.DeleteDeploymentSet(r.Context(), set.ID); delErr != nil {
+		if delErr := d.Store.DeleteDeploymentSet(r.Context(), tenantID, set.ID); delErr != nil {
 			d.logger().Warn("delete set after pool failure", "set", set.ID, "err", delErr)
 		}
 		httpserver.WriteError(w, err)
@@ -230,7 +230,7 @@ func (d *Deps) CreateSet(w http.ResponseWriter, r *http.Request) {
 	}
 	hooks := deploy.SetHooks{
 		UpdateStatus: func(ctx context.Context, setID, status string) error {
-			return d.Store.UpdateSetStatus(ctx, setID, status)
+			return d.Store.UpdateSetStatus(ctx, tenantID, setID, status)
 		},
 	}
 	d.Deploy.SubmitSet(set.ID, plan.members, sctx, hooks)
@@ -269,7 +269,7 @@ func (d *Deps) SetAction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	members, err := d.Store.ListSetMembers(r.Context(), set.ID)
+	members, err := d.Store.ListSetMembers(r.Context(), id.ActiveTenantID, set.ID)
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return
@@ -312,8 +312,14 @@ func (d *Deps) SetAction(w http.ResponseWriter, r *http.Request) {
 // (Contributor): reverse teardown (agents before the server, ADR-0030). Each member
 // is destroyed (purge) and, on task success, its ownership row is tombstoned — the
 // VMID freed — via the single-guest tombstone-after-destroy path, and its snippet
-// removed (ADR-0025). The set row is removed last. Successful members are NEVER
-// auto-destroyed elsewhere (ADR-0029); this is the one teardown path.
+// removed (ADR-0025). Successful members are NEVER auto-destroyed elsewhere
+// (ADR-0029); this is the one teardown path.
+//
+// The set row is removed ONLY when every member is torn down (its destroy submitted,
+// or it was already tombstoned/absent). If ANY member's destroy fails to submit, the
+// guest keeps running (and quota-charged), so the set row is KEPT with an honest
+// 'deleting' status and the caller gets a partial-failure error (never a 202 "all
+// good") — the delete is retryable, and members already submitted still tombstone.
 func (d *Deps) DeleteSet(w http.ResponseWriter, r *http.Request) {
 	id, ok := requireIdentity(w, r)
 	if !ok || !d.requireStore(w) {
@@ -322,32 +328,41 @@ func (d *Deps) DeleteSet(w http.ResponseWriter, r *http.Request) {
 	if !d.setsReady(w) {
 		return
 	}
-	set, ok := d.resolveSet(w, r, id.ActiveTenantID)
+	tenantID := id.ActiveTenantID
+	set, ok := d.resolveSet(w, r, tenantID)
 	if !ok {
 		return
 	}
-	members, err := d.Store.ListSetMembers(r.Context(), set.ID)
+	members, err := d.Store.ListSetMembers(r.Context(), tenantID, set.ID)
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return
 	}
 
 	// Durable status for the duration of the teardown (best-effort).
-	if err := d.Store.UpdateSetStatus(r.Context(), set.ID, "deleting"); err != nil {
+	if err := d.Store.UpdateSetStatus(r.Context(), tenantID, set.ID, "deleting"); err != nil {
 		d.logger().Warn("mark set deleting", "set", set.ID, "err", err)
 	}
 
 	// Reverse teardown: agents before the server, so workers deregister before the
-	// control plane they depend on disappears (ADR-0030).
+	// control plane they depend on disappears (ADR-0030). allTornDown tracks whether
+	// EVERY member was destroyed (submitted) or already tombstoned/absent — only then
+	// is it safe to remove the set row.
 	ordered := orderMembers(members, true)
 	tasks := []types.TaskRef{}
+	allTornDown := true
+	var lastErr error
 	for _, m := range ordered {
 		if m.Status == "tombstoned" {
-			continue
+			continue // already torn down / VMID freed — nothing to destroy
 		}
 		ref := proxmox.GuestRef{Node: m.Node, Type: m.GuestType, VMID: m.VMID}
 		upid, err := d.PVE.DeleteGuest(r.Context(), ref, true) // purge
 		if err != nil {
+			// The guest is still running (and still quota-charged): do NOT tombstone
+			// it, and do NOT let the set row be deleted — leave an honest retry path.
+			allTornDown = false
+			lastErr = err
 			d.logger().Warn("set delete member", "set", set.ID, "vmid", m.VMID, "err", err)
 			continue
 		}
@@ -362,13 +377,29 @@ func (d *Deps) DeleteSet(w http.ResponseWriter, r *http.Request) {
 		tasks = append(tasks, types.TaskRef{UPID: string(upid), Action: "Delete cluster member"})
 	}
 
-	// Remove the set row last. Members' set linkage is nulled by the FK's ON DELETE
-	// SET NULL; their ownership rows tombstone asynchronously as the destroys land.
-	if err := d.Store.DeleteDeploymentSet(r.Context(), set.ID); err != nil {
-		d.logger().Warn("delete set row", "set", set.ID, "err", err)
-	}
 	authz.Annotate(r.Context(), "set", set.ID)
 	authz.Annotate(r.Context(), "member_count", strconv.Itoa(len(tasks)))
+
+	if !allTornDown {
+		// Partial teardown: keep the set row so the orphaned member(s) stay visible and
+		// the delete can be retried; report the real Proxmox failure (not a 202).
+		if err := d.Store.UpdateSetStatus(r.Context(), tenantID, set.ID, "deleting"); err != nil {
+			d.logger().Warn("mark set deleting after partial teardown", "set", set.ID, "err", err)
+		}
+		httpserver.WriteError(w, &types.APIError{
+			Code:    "set_teardown_incomplete",
+			Message: fmt.Sprintf("The cluster was only partially torn down: at least one member could not be deleted and is still running. The set was kept for retry. Last Proxmox error: %v", lastErr),
+			Status:  http.StatusBadGateway,
+		})
+		return
+	}
+
+	// Every member is torn down. Remove the set row last. Members' set linkage is
+	// nulled by the FK's ON DELETE SET NULL; their ownership rows tombstone
+	// asynchronously as the destroys land.
+	if err := d.Store.DeleteDeploymentSet(r.Context(), tenantID, set.ID); err != nil {
+		d.logger().Warn("delete set row", "set", set.ID, "err", err)
+	}
 	httpserver.WriteJSON(w, http.StatusAccepted, types.SetActionResponse{SetID: set.ID, Tasks: tasks})
 }
 
@@ -376,7 +407,7 @@ func (d *Deps) DeleteSet(w http.ResponseWriter, r *http.Request) {
 // rule: cross-tenant or missing → an indistinguishable 404, never 403).
 func (d *Deps) resolveSet(w http.ResponseWriter, r *http.Request, tenantID string) (*store.DeploymentSet, bool) {
 	setID := chi.URLParam(r, "setId")
-	set, err := d.Store.GetDeploymentSet(r.Context(), setID)
+	set, err := d.Store.GetDeploymentSet(r.Context(), tenantID, setID)
 	if errors.Is(err, store.ErrNotFound) {
 		httpserver.WriteError(w, notFound("Deployment set not found."))
 		return nil, false

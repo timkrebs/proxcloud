@@ -213,9 +213,10 @@ func TestSubmitSetServerFailureSkipsAgents(t *testing.T) {
 }
 
 // TestSubmitSetMemberFailurePreservesSuccessful: the server + first agent come up,
-// the second agent's create fails. The set is marked failed, the successful members
-// are FINALIZED (preserved — never auto-destroyed, ADR-0029), and only the failed
-// member's reservation is released.
+// the second agent's create fails. Because the control plane is UP, the set is
+// marked DEGRADED (a live-but-partial cluster) — not failed (which is reserved for
+// a control-plane failure). The successful members are FINALIZED (preserved — never
+// auto-destroyed, ADR-0029), and only the failed member's reservation is released.
 func TestSubmitSetMemberFailurePreservesSuccessful(t *testing.T) {
 	created := make(chan proxmox.UPID, 8)
 	mock := &proxmoxtest.MockClient{
@@ -279,8 +280,8 @@ func TestSubmitSetMemberFailurePreservesSuccessful(t *testing.T) {
 
 	select {
 	case s := <-statusCh:
-		if s != "failed" {
-			t.Fatalf("set status = %q, want failed", s)
+		if s != "degraded" {
+			t.Fatalf("set status = %q, want degraded (server up, one agent failed)", s)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("set never reached a terminal status")
@@ -299,5 +300,41 @@ func TestSubmitSetMemberFailurePreservesSuccessful(t *testing.T) {
 	}
 	if released["own-201"] || released["own-202"] {
 		t.Error("successful members must NOT be released (no auto-destroy, ADR-0029)")
+	}
+}
+
+// TestSubmitSetPanicRecovered: a panic in a member step (here, releasing a rejected
+// member's reservation) is RECOVERED — the backend does not crash — and the set is
+// marked failed (honest terminal state). Guards the longer multi-Proxmox set path,
+// mirroring scheduler.runHandler's handler recover (commit 2565212).
+func TestSubmitSetPanicRecovered(t *testing.T) {
+	e, _ := testEngine(&proxmoxtest.MockClient{})
+	e.Snippets = &orderedWriter{}
+
+	// Releasing a member's reservation panics — a latent member-step bug that must not
+	// take the whole process down.
+	e.Release = func(context.Context, string) error { panic("boom releasing member") }
+	e.Finalize = func(context.Context, string, string) error { return nil }
+
+	// A server member with Cores=0 is rejected by Submit's Validate, so runSet reaches
+	// releaseMember synchronously on its own (panicking) goroutine stack.
+	bad := setMemberReq(201, "c1-server", &types.IPConfig{Mode: "static", CIDR: "192.168.1.50/24"})
+	bad.Cores = 0
+	members := []SetMember{
+		{Role: "server", Req: bad, SnippetContent: "#cloud-config\n", SnippetFilename: "proxcloud-201-k3s-cluster.yaml", ReadinessPort: 6443, OwnershipID: "own-201"},
+	}
+
+	statusCh := make(chan string, 2)
+	hooks := SetHooks{UpdateStatus: func(_ context.Context, _, status string) error { statusCh <- status; return nil }}
+
+	e.SubmitSet("set-1", members, SetContext{ServiceID: "k3s-cluster"}, hooks)
+
+	select {
+	case s := <-statusCh:
+		if s != "failed" {
+			t.Fatalf("set status = %q, want failed after a recovered panic", s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("panic was not recovered: the set never reached a terminal status")
 	}
 }

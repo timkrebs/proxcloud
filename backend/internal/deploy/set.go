@@ -10,6 +10,7 @@ package deploy
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -61,7 +62,8 @@ type SetHooks struct {
 // SubmitSet provisions a deployment set asynchronously (ADR-0029/0030): it
 // provisions all 'server' members first — awaiting each to ready (its configuring
 // step passed and, for the server, Connection is set) — then all 'agent' members,
-// then records the durable set status (ready, or failed if ANY member failed).
+// then records the durable set status: ready (all up), degraded (server up but ≥1
+// agent failed — a partial cluster), or failed (the control plane never came up).
 // A failed server means the control plane never came up, so the still-unprovisioned
 // agents are skipped and their reservations released (nothing to join). Successful
 // members are NEVER auto-destroyed on failure (ADR-0029) — deleting the set is the
@@ -74,6 +76,17 @@ func (e *Engine) SubmitSet(setID string, members []SetMember, sctx SetContext, h
 func (e *Engine) runSet(setID string, members []SetMember, sctx SetContext, hooks SetHooks) {
 	ordered := orderMembersForProvision(members)
 	finals := map[int]*types.Deployment{}
+	// Recover a panic anywhere in the longer multi-Proxmox set path so one bad member
+	// step can't take down the whole backend (runSet is its own goroutine). Mark the
+	// set failed (honest terminal state) — mirrors scheduler.runHandler's recover
+	// (commit 2565212). The status write goes through hooks (no Broker), so the
+	// recovery itself cannot re-panic on a panicking Broker.
+	defer func() {
+		if r := recover(); r != nil {
+			e.logger().Error("set orchestration panic recovered", "set", setID, "panic", fmt.Sprint(r))
+			e.updateSetStatus(hooks, setID, "failed")
+		}
+	}()
 	e.publishSetFrame(setFrame(setID, sctx, "provisioning", members, finals))
 
 	serverFailed := false
@@ -99,9 +112,15 @@ func (e *Engine) runSet(setID string, members []SetMember, sctx SetContext, hook
 		e.publishSetFrame(setFrame(setID, sctx, "provisioning", members, finals))
 	}
 
+	// Honest terminal status: a control-plane failure means the cluster never came
+	// up at all (failed); the server up but ≥1 agent failed is a partial cluster
+	// (degraded, a live-but-incomplete set); everything up is ready.
 	status := "ready"
-	if anyFailed {
+	switch {
+	case serverFailed:
 		status = "failed"
+	case anyFailed:
+		status = "degraded"
 	}
 	e.updateSetStatus(hooks, setID, status)
 	e.publishSetFrame(setFrame(setID, sctx, status, members, finals))
