@@ -64,9 +64,9 @@ func columnExists(t *testing.T, s *PgStore, table, col string) bool {
 	return exists
 }
 
-// TestSchedulerWaveMigrationsReversible proves migrations 000005/000006/000007
-// apply cleanly, reverse cleanly (Steps(-3) → version 4), and re-apply (up →
-// down → up) landing back on version 7 with the full object set. It restores the
+// TestSchedulerWaveMigrationsReversible proves migrations 000005/000006/000007/000008
+// apply cleanly, reverse cleanly (Steps(-4) → version 4), and re-apply (up →
+// down → up) landing back on version 8 with the full object set. It restores the
 // DB to the fully-migrated state on exit so it stays green for sibling tests.
 func TestSchedulerWaveMigrationsReversible(t *testing.T) {
 	s := requireStore(t)
@@ -81,16 +81,16 @@ func TestSchedulerWaveMigrationsReversible(t *testing.T) {
 		}
 	})
 
-	// Up: full schema, version 7.
+	// Up: full schema, version 8.
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		t.Fatalf("migrate up: %v", err)
 	}
-	if v, _, err := m.Version(); err != nil || v != 7 {
-		t.Fatalf("version after up = %d (err %v), want 7", v, err)
+	if v, _, err := m.Version(); err != nil || v != 8 {
+		t.Fatalf("version after up = %d (err %v), want 8", v, err)
 	}
 
-	// The three wave migrations' objects exist.
-	waveTables := []string{"jobs", "schedules", "ttls", "project_ttl_policy"}
+	// The four wave migrations' objects exist (deployment_set from 000008).
+	waveTables := []string{"jobs", "schedules", "ttls", "project_ttl_policy", "deployment_set"}
 	for _, tbl := range waveTables {
 		if !tableExists(t, s, tbl) {
 			t.Fatalf("table %q missing after up", tbl)
@@ -106,9 +106,9 @@ func TestSchedulerWaveMigrationsReversible(t *testing.T) {
 		t.Fatal("resource_ownership.expired_at missing after up")
 	}
 
-	// Down: reverse exactly the three wave migrations (7→6→5→4).
-	if err := m.Steps(-3); err != nil {
-		t.Fatalf("migrate down 3 steps: %v", err)
+	// Down: reverse exactly the four wave migrations (8→7→6→5→4).
+	if err := m.Steps(-4); err != nil {
+		t.Fatalf("migrate down 4 steps: %v", err)
 	}
 	if v, dirty, err := m.Version(); err != nil || v != 4 || dirty {
 		t.Fatalf("version after down = %d dirty=%v (err %v), want 4 clean", v, dirty, err)
@@ -128,12 +128,12 @@ func TestSchedulerWaveMigrationsReversible(t *testing.T) {
 		t.Fatal("resource_ownership.expired_at survived down migration")
 	}
 
-	// Up again: back to 7 with every wave object restored (reversibility).
+	// Up again: back to 8 with every wave object restored (reversibility).
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		t.Fatalf("migrate re-up: %v", err)
 	}
-	if v, dirty, err := m.Version(); err != nil || v != 7 || dirty {
-		t.Fatalf("version after re-up = %d dirty=%v (err %v), want 7 clean", v, dirty, err)
+	if v, dirty, err := m.Version(); err != nil || v != 8 || dirty {
+		t.Fatalf("version after re-up = %d dirty=%v (err %v), want 8 clean", v, dirty, err)
 	}
 	for _, tbl := range waveTables {
 		if !tableExists(t, s, tbl) {
