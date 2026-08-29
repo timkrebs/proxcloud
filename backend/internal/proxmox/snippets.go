@@ -259,7 +259,15 @@ func closeOnDone(ctx context.Context, c io.Closer) (stop func()) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = c.Close()
+			// stop() may fire at the same instant as ctx cancellation; a select
+			// with both channels ready picks at random, so re-check done and let
+			// stop WIN — a stopped watchdog must never close the conn out from
+			// under the next caller.
+			select {
+			case <-done:
+			default:
+				_ = c.Close()
+			}
 		case <-done:
 		}
 	}()
