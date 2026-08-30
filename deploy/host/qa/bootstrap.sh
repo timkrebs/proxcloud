@@ -15,6 +15,14 @@ fi
 
 mkdir -p "$ROOT/state" "$ROOT/tls"
 
+# Service-catalog snippet-writer credentials dir (ADR-0025). Backend-only,
+# bind-mounted read-only. The catalog is OFF by default, so this is empty until
+# an operator enables it (docs/runbooks/enable-service-catalog-qa.md). Create it
+# owned by 65532 (distroless nonroot backend UID) mode 0500 so only that UID (and
+# root, who places the files) can traverse it; the operator drops in id_ed25519 +
+# known_hosts and sets chown 65532:65532 / chmod 400 on the key. Idempotent.
+install -d -m 0500 -o 65532 -g 65532 "$ROOT/snippet-writer"
+
 # Postgres TLS cert (self-signed; sslmode=require) — 70:70 / 600, see script.
 "$ROOT/bin/gen-postgres-cert.sh" "$ROOT/tls"
 
