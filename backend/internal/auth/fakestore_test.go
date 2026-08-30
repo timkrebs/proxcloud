@@ -1051,6 +1051,33 @@ func (f *fakeStore) UpsertProjectTTLPolicy(context.Context, store.UpsertProjectT
 	return nil, nil
 }
 
+// Deployment-set + set-schedule stubs (ADR-0029). The auth tests never exercise
+// these; they exist only so *fakeStore still satisfies the store.Store interface.
+func (f *fakeStore) CreateDeploymentSet(context.Context, store.CreateDeploymentSetParams) (*store.DeploymentSet, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetDeploymentSet(context.Context, string, string) (*store.DeploymentSet, error) {
+	return nil, nil
+}
+func (f *fakeStore) ListDeploymentSets(context.Context, string) ([]store.DeploymentSet, error) {
+	return nil, nil
+}
+func (f *fakeStore) ListSetMembers(context.Context, string, string) ([]store.ResourceOwnership, error) {
+	return nil, nil
+}
+func (f *fakeStore) UpdateSetStatus(context.Context, string, string, string) error { return nil }
+func (f *fakeStore) DeleteDeploymentSet(context.Context, string, string) error     { return nil }
+func (f *fakeStore) ReserveOwnershipBatch(context.Context, store.ReserveOwnershipBatchParams) ([]store.ResourceOwnership, error) {
+	return nil, nil
+}
+func (f *fakeStore) UpsertSetSchedule(context.Context, store.UpsertSetScheduleParams) (*store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetSetSchedule(context.Context, string, string) (*store.Schedule, error) {
+	return nil, nil
+}
+func (f *fakeStore) DeleteSetSchedule(context.Context, string, string) error { return nil }
+
 func cloneUser(u *store.User) *store.User {
 	c := *u
 	return &c

@@ -119,6 +119,81 @@ export interface SessionInfo {
 }
 
 //////////
+// source: catalog.go
+
+/**
+ * CatalogService is the frontend-facing view of a catalog service definition
+ * (ADR-0026). It deliberately omits the internal baseImage ref and the
+ * cloud-init template — the gallery renders metadata + sizing + input schema
+ * only. Credential values are never present here (this is a definition, not an
+ * instance).
+ */
+export interface CatalogService {
+  id: string;
+  displayName: string;
+  description: string;
+  icon: string;
+  category: string;
+  kind: string; // single | set
+  guestType: string; // qemu
+  sizing: CatalogSizing;
+  /**
+   * Roles is the member-role schema of a kind:set service (ADR-0029); empty for
+   * a kind:single service. It drives the deployment-set wizard (worker count etc.).
+   */
+  roles?: CatalogRole[];
+  credentials: CatalogCredential[];
+  ports: number /* int */[];
+  readiness: string;
+  docs: string;
+  testedOn: string;
+}
+/**
+ * CatalogRole is one member role of a kind:set service: its name, the wizard
+ * default count, the [Min,Max] range the operator may pick, and its per-member
+ * sizing.
+ */
+export interface CatalogRole {
+  name: string;
+  count: number /* int */;
+  min: number /* int */;
+  max: number /* int */;
+  sizing: CatalogSizing;
+}
+/**
+ * CatalogSizing is the wizard default + minimum floor for a service.
+ */
+export interface CatalogSizing {
+  default: CatalogSize;
+  min: CatalogSize;
+}
+/**
+ * CatalogSize is one sizing triple.
+ */
+export interface CatalogSize {
+  cores: number /* int */;
+  memoryMb: number /* int64 */;
+  diskGb: number /* int */;
+}
+/**
+ * CatalogCredential describes one credential input the service accepts. It never
+ * carries a value — only whether the wizard exposes/generates it.
+ */
+export interface CatalogCredential {
+  name: string;
+  username?: string;
+  usernameSettable: boolean;
+  userSettable: boolean;
+  generatedDefault: boolean;
+}
+/**
+ * CatalogServiceList is the gallery payload.
+ */
+export interface CatalogServiceList {
+  services: CatalogService[];
+}
+
+//////////
 // source: cluster.go
 
 /**
@@ -176,8 +251,17 @@ export interface ConsoleSession {
  * CreateSource selects where the new guest comes from.
  */
 export interface CreateSource {
-  mode: string; // "iso" | "vztmpl" | "clone"
+  mode: string; // "iso" | "image" | "vztmpl" | "clone"
+  /**
+   * ISOVolID attaches a bootable install ISO as a CD-ROM (installer flow).
+   */
   isoVolId?: string;
+  /**
+   * ImageVolID imports a cloud/disk image as the boot DISK (import-from) — the
+   * only path that boots a raw cloud .img and runs cloud-init. A cloud image is
+   * NOT a bootable CD-ROM; the catalog uses this mode.
+   */
+  imageVolId?: string;
   vztmplVolId?: string;
   cloneVmid?: number /* int */;
   cloneNode?: string;
@@ -232,6 +316,95 @@ export interface CreateGuestRequest {
   cloudInit?: CloudInitRequest;
   tags?: string[];
   startAfterCreate: boolean;
+  /**
+   * Catalog, when set, marks this as a service-catalog deployment (ADR-0025):
+   * the guest's cloud-init user-data comes from a rendered snippet referenced by
+   * cicustom, NOT from the inline ciuser/cipassword/sshkeys (PVE drops those when
+   * cicustom user= is set). The snippet content itself is carried into the deploy
+   * engine out-of-band (deploy.CreateContext), never in this request body.
+   */
+  catalog?: CatalogProvision;
+}
+/**
+ * CatalogProvision is the catalog-specific create parameters. It carries the
+ * cicustom snippet reference and the non-secret display metadata (ports, a
+ * credential hint) that the deployment surfaces once the guest is ready. It
+ * never carries a credential value.
+ */
+export interface CatalogProvision {
+  serviceId: string;
+  snippetRef: string; // "<datastore>:snippets/<file>"
+  ports?: number /* int */[];
+  credentialHint?: string;
+  userSupplied: boolean;
+}
+/**
+ * ProvisionCredential carries ONE user-supplied credential for a service, keyed
+ * by the service's declared credential name (see CatalogCredential.Name). It is
+ * present only when the user chose "I'll set it" for that credential; a credential
+ * with no entry here falls back to server-side crypto/rand generation (Phase A).
+ * The values are attacker-influenced and validated server-side (ADR-0027 §3:
+ * length-only password policy, ≥ 12 chars; username against the credential's
+ * allowed charset only when usernameSettable). They are injected through the SAME
+ * mandatory base64 transport as a generated value (§1) — the raw bytes never touch
+ * YAML or a shell string — and are never logged, stored, audited, or echoed back.
+ */
+export interface ProvisionCredential {
+  name: string;
+  username?: string;
+  password?: string;
+}
+/**
+ * ProvisionServiceRequest is the body of POST
+ * /tenants/{tenantId}/service-catalog/{serviceId}/provision. Sizing fields left
+ * zero fall back to the service definition's default. Credentials left absent are
+ * generated server-side (Phase A); a Credentials entry lets the user SUPPLY a
+ * credential (Phase C), validated server-authoritatively before any reservation.
+ */
+export interface ProvisionServiceRequest {
+  projectId: string;
+  name: string;
+  node: string;
+  vmid: number /* int */;
+  cores?: number /* int */;
+  memoryMb?: number /* int64 */;
+  diskGb?: number /* int */;
+  storage: string;
+  bridge: string;
+  vlanTag?: number /* int */;
+  firewall: boolean;
+  ipConfig?: IPConfig;
+  sshKeys?: string[];
+  tags?: string[];
+  /**
+   * Credentials carries user-supplied credential values (Phase C). Omit an entry
+   * to have that credential generated. A supplied password must be ≥ 12 chars; a
+   * supplied username is only accepted when the credential is usernameSettable.
+   */
+  credentials?: ProvisionCredential[];
+}
+/**
+ * ProvisionServiceResponse acknowledges an accepted service deployment. A
+ * generated credential is surfaced HERE exactly once (per the secrets-server-side
+ * iron rule, ADR-0028) — it is never stored, logged, audited, or returned again.
+ */
+export interface ProvisionServiceResponse {
+  deploymentId: string;
+  vmid: number /* int */;
+  /**
+   * Username is the credential's account/role name. GeneratedPassword is set ONLY
+   * when the credential was generated server-side (the one-time reveal); it is
+   * EMPTY when the user supplied the credential — the user already has that value,
+   * so it is never echoed back.
+   */
+  username?: string;
+  generatedPassword?: string;
+  /**
+   * CredentialHint is a NON-secret indicator of the credential's origin:
+   * "generated — shown once" when GeneratedPassword is set, or "you set this
+   * credential" when the user supplied it. It never contains a credential value.
+   */
+  credentialHint?: string;
 }
 /**
  * CreateGuestResponse acknowledges an accepted deployment.
@@ -244,7 +417,7 @@ export interface CreateGuestResponse {
  * DeploymentStep is one row of the deployment progress table.
  */
 export interface DeploymentStep {
-  key: string; // create | start
+  key: string; // prepare | create | start | configuring
   label: string; // "Create virtual machine web-02"
   status: string; // pending | running | succeeded | failed
   upid?: string;
@@ -264,6 +437,113 @@ export interface Deployment {
   status: string; // running | succeeded | failed
   createdAt: string /* RFC3339 */;
   steps: DeploymentStep[];
+  /**
+   * Catalog service connection details, populated by the deploy engine's
+   * `configuring` step once a catalog guest is ready (ADR-0028). All omitempty,
+   * so the bare-guest path is unchanged. None of these carry a secret.
+   */
+  connection?: string; // reachable host:port
+  ports?: number /* int */[]; // exposed service ports
+  credentialHint?: string; // NON-secret auth hint
+}
+
+//////////
+// source: deployment_sets.go
+
+/**
+ * DeploymentSet is the frontend-facing view of a deployment set (ADR-0029): one
+ * catalog action that provisioned N linked guests sharing a lifecycle. Status is
+ * the durable set status (provisioning | ready | degraded | failed | deleting).
+ * It never carries a secret — the cluster's generated join token is never stored,
+ * returned, or surfaced (ADR-0030).
+ */
+export interface DeploymentSet {
+  id: string;
+  serviceId: string;
+  projectId: string;
+  status: string;
+  createdAt: string /* RFC3339 */;
+  members: DeploymentSetMember[];
+}
+/**
+ * DeploymentSetMember is one guest of a set, keyed by its role (ADR-0030:
+ * "server" | "agent"). Status is the member's ownership status (pending | active
+ * | tombstoned) — the per-member honesty the set aggregates. Connection is the
+ * reachable host[:port] once known; never a secret.
+ */
+export interface DeploymentSetMember {
+  role: string;
+  vmid: number /* int */;
+  name?: string;
+  node: string;
+  guestType: string;
+  status: string;
+  connection?: string;
+}
+/**
+ * DeploymentSetList is the sets gallery payload.
+ */
+export interface DeploymentSetList {
+  sets: DeploymentSet[];
+}
+/**
+ * CreateSetRequest is the body of POST /tenants/{tenantId}/deployment-sets. It
+ * provisions a kind:set catalog service (ADR-0029). The server member takes a
+ * STATIC IP (ServerIP) so the join URL is known before any guest boots (ADR-0030);
+ * agents get DHCP. AgentCount is clamped to the service role's [min,max]; zero
+ * falls back to the role default. VMIDs are operator-chosen: ServerVMID for the
+ * control plane, AgentVMIDs for the workers (len must equal the resolved agent
+ * count). No credential is collected — the cluster join token is generated.
+ */
+export interface CreateSetRequest {
+  serviceId: string;
+  projectId: string;
+  /**
+   * Name is the set's base name; members are named <name>-server and
+   * <name>-agent-N.
+   */
+  name: string;
+  node: string;
+  storage: string;
+  bridge: string;
+  vlanTag?: number /* int */;
+  firewall: boolean;
+  sshKeys?: string[];
+  tags?: string[];
+  /**
+   * AgentCount is the number of worker nodes (0 → the service role default).
+   */
+  agentCount?: number /* int */;
+  /**
+   * ServerVMID + AgentVMIDs are the operator-chosen VMIDs. len(AgentVMIDs) must
+   * equal the resolved agent count.
+   */
+  serverVmid: number /* int */;
+  agentVmids: number /* int */[];
+  /**
+   * ServerIP is the static control-plane address (required for a joinable
+   * cluster, ADR-0030): a CIDR + gateway free on the LAN.
+   */
+  serverIp?: IPConfig;
+}
+/**
+ * CreateSetResponse acknowledges an accepted set provision. It carries the set id
+ * and the resolved members (VMIDs + roles) so the UI can track each. No secret is
+ * ever returned — the generated cluster token exists only inside the members'
+ * rendered snippets (ADR-0030).
+ */
+export interface CreateSetResponse {
+  setId: string;
+  status: string;
+  members: DeploymentSetMember[];
+}
+/**
+ * SetActionResponse acknowledges a set start/stop: the per-member Proxmox task
+ * refs the UI polls to completion.
+ */
+export interface SetActionResponse {
+  setId: string;
+  tasks: TaskRef[];
 }
 
 //////////

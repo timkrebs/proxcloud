@@ -1,0 +1,58 @@
+# Initialise and unseal your Vault
+
+Vault CE is installed and running in server mode, but it comes up **sealed and
+uninitialised**. Proxcloud deliberately does **not** initialise it: the unseal
+keys and the initial root token are Vault's real secrets, and **only you should
+ever see them** (ADR-0027 §4). Finish the setup yourself with the steps below.
+
+- **API address:** `http://{{ .Host }}:{{ .Port }}`
+- **Web UI:** `http://{{ .Host }}:{{ .Port }}/ui`
+
+## ⚠️ TLS is DISABLED
+
+This instance listens over **plain HTTP** (`tls_disable = 1`) so you can reach the
+API without minting a certificate first. **Do not expose port {{ .Port }} to the
+public internet as-is** — anyone on the path can read your tokens and secrets.
+Before any real use, edit `/etc/vault.d/vault.hcl` to enable TLS (`tls_cert_file`
+/ `tls_key_file`, remove `tls_disable`) and restart Vault, or keep it strictly on
+a trusted private network / behind an SSH tunnel.
+
+## Initialise (you hold the keys — Proxcloud never does)
+
+Connect over SSH, then point the CLI at the local listener and initialise:
+
+```bash
+export VAULT_ADDR='http://127.0.0.1:{{ .Port }}'
+
+# Initialise: this prints the unseal keys and the initial root token ONCE.
+# Record them securely — they are the ONLY copy and Proxcloud never sees them.
+vault operator init
+```
+
+## Unseal
+
+Vault stays sealed until you provide the unseal-key threshold (3 of 5 by default).
+Run this three times, each with a **different** unseal key from `vault operator
+init`:
+
+```bash
+vault operator unseal    # paste unseal key 1
+vault operator unseal    # paste unseal key 2
+vault operator unseal    # paste unseal key 3
+
+vault status             # "Sealed  false" means Vault is ready
+```
+
+Then log in with the initial root token and create least-privilege policies and
+auth methods before storing anything:
+
+```bash
+vault login <initial-root-token>
+```
+
+## Where the secrets live
+
+The unseal keys and root token exist **only** where `vault operator init` printed
+them — on your terminal. Proxcloud does not store, log, or reveal them, and cannot
+recover them for you. If you lose the unseal keys, a sealed Vault cannot be
+recovered; treat them like the master keys they are.

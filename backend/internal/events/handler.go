@@ -161,6 +161,27 @@ func deliver(e Event, admin bool, owned map[int]bool) bool {
 			return false
 		}
 		return owned[ev.VMID]
+	case "deployment_set":
+		// Deployment-set progress (ADR-0029). A set frame names N member VMIDs that
+		// (a set being atomic) share one tenant, so it is delivered only when EVERY
+		// member VMID is owned by the subscriber's active tenant; platform-admin
+		// bypasses. It must NOT fall through to the default broadcast case — a set
+		// frame carries a tenant's whole cluster topology, so broadcasting it would
+		// leak that topology to every subscriber (the same hazard the warning frames
+		// above call out). An empty/typed-mismatched payload fails closed.
+		if admin {
+			return true
+		}
+		set, ok := e.Data.(*types.DeploymentSet)
+		if !ok || len(set.Members) == 0 {
+			return false
+		}
+		for _, m := range set.Members {
+			if !owned[m.VMID] {
+				return false
+			}
+		}
+		return true
 	default:
 		// No other frame types exist; deliver to everyone rather than silently
 		// drop a future benign frame.

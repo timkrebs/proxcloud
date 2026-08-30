@@ -1,0 +1,53 @@
+#cloud-config
+# K3s worker (agent) first-boot user-data, rendered server-side by
+# internal/catalog/render.go and delivered as a snippet referenced by
+# `cicustom "user=<datastore>:snippets/<file>.yaml"` (ADR-0025).
+#
+# The agent joins the control plane using two facts injected up front (ADR-0030):
+# the static server URL (https://<ServerIP>:<Port>) and the SAME pre-shared
+# K3S_TOKEN the server was installed with — so there is nothing to read back out
+# of the server after boot (proxmox.Client has no guest-exec method).
+#
+# CREDENTIAL SAFETY (ADR-0027, SECURITY-CRITICAL): the raw token and the SSH keys
+# never appear in this YAML or a shell line — only their base64 blobs, decoded
+# in-guest. K3S_TOKEN reaches the installer via the environment, never argv.
+hostname: {{ .Hostname }}
+manage_etc_hosts: true
+
+users:
+  - name: {{ .LoginUser }}
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+
+package_update: true
+packages:
+  - qemu-guest-agent
+  - curl
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  - |
+    set -eu
+    SSH_DIR="/home/{{ .LoginUser }}/.ssh"
+    AK="$SSH_DIR/authorized_keys"
+    install -d -m 700 "$SSH_DIR"
+    : > "$AK"
+    {{- range .SSHKeysB64 }}
+    printf %s '{{ . }}' | base64 -d >> "$AK"
+    printf '\n' >> "$AK"
+    {{- end }}
+    chmod 600 "$AK"
+    chown -R "{{ .LoginUser }}:{{ .LoginUser }}" "$SSH_DIR"
+  # Install K3s in agent (worker) mode, joining the control plane at the static
+  # server URL with the pre-shared token. Both the URL and the token are fixed at
+  # render time, so the join is immediate on boot — no post-boot discovery.
+  - |
+    set -eu
+    K3S_TOKEN="$(printf %s '{{ .K3sTokenB64 }}' | base64 -d)"
+    export K3S_TOKEN
+    K3S_URL="https://{{ .ServerIP }}:{{ .Port }}"
+    export K3S_URL
+    curl -sfL https://get.k3s.io | sh -
+    unset K3S_TOKEN

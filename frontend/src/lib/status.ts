@@ -16,8 +16,9 @@ const GREEN = new Set([
   "attached",
   "online",
   "ok",
+  "ready", // a deployment set whose members all came up (ADR-0029)
 ]);
-const GRAY = new Set(["stopped", "pending", "offline"]);
+const GRAY = new Set(["stopped", "pending", "offline", "tombstoned"]);
 const RED = new Set(["failed", "deny", "error"]);
 
 /** Design contract: green for terminal-good, gray for stopped/pending,

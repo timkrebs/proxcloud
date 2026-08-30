@@ -3,6 +3,7 @@
 // (Pending → Creating → Created), real task log tail on failure.
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { CardError, Skeleton } from "@/components/dashboard/DashboardCards";
@@ -59,6 +60,13 @@ export default function DeploymentPage() {
   const running = d.status === "running";
   const failed = d.status === "failed";
   const guestHref = `/resources/${d.node}/${d.type}/${d.vmid}`;
+
+  // Catalog "ready" signal (ADR-0028): the overall status stays `succeeded` (no
+  // separate "ready" value), so treat the `configuring` step having succeeded AND
+  // a resolved connection as the cue to surface the next-steps panel. Bare guests
+  // have no `configuring` step / connection, so this stays false for them.
+  const configuringStep = d.steps.find((step) => step.key === "configuring");
+  const ready = configuringStep?.status === "succeeded" && !!d.connection;
 
   return (
     <div className="max-w-[900px] px-8 pt-5 pb-10">
@@ -137,6 +145,8 @@ export default function DeploymentPage() {
         </table>
       </Card>
 
+      {ready ? <NextSteps dep={d} /> : null}
+
       {failedStep && failLog.data && failLog.data.lines.length > 0 ? (
         <Card className="mt-4 p-4">
           <h3 className="mb-2 text-[14px] font-semibold">Task log (from Proxmox)</h3>
@@ -168,5 +178,74 @@ export default function DeploymentPage() {
         notification bell.
       </p>
     </div>
+  );
+}
+
+// NextSteps surfaces the catalog service's connection details (ADR-0028) once
+// the `configuring` step resolves them. It renders NO secret — `credentialHint`
+// is a hint, and the generated password was shown once at creation.
+function NextSteps({ dep }: { dep: Deployment }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    if (!dep.connection) return;
+    void navigator.clipboard
+      ?.writeText(dep.connection)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => undefined);
+  };
+
+  return (
+    <Card className="mt-4 p-4">
+      <h3 className="mb-2 text-[14px] font-semibold">Next steps</h3>
+      <p className="mb-3 text-[13px] leading-[1.5] text-ink-2">
+        The guest booted and is reachable. Connect using the details below.
+      </p>
+
+      {dep.connection ? (
+        <div className="mb-3">
+          <div className="mb-1 text-[12px] font-semibold text-ink-2">Connection</div>
+          <div className="flex items-stretch gap-2">
+            <code className="flex-1 rounded-fluent border border-line bg-hover px-2 py-[7px] font-mono text-[13px] break-all select-all">
+              {dep.connection}
+            </code>
+            <button
+              type="button"
+              onClick={copy}
+              aria-label="Copy connection"
+              title="Copy connection"
+              className="flex w-9 flex-none cursor-pointer items-center justify-center rounded-fluent border border-line-input bg-card text-ink-2 hover:bg-hover"
+            >
+              {copied ? (
+                <Mi name="check" size={14} color="var(--color-ok)" strokeWidth={1.6} />
+              ) : (
+                <Mi name="copy" size={14} color="currentColor" />
+              )}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {dep.ports && dep.ports.length > 0 ? (
+        <div className="mb-3 flex py-1 text-[13px]">
+          <span className="w-[120px] flex-none text-ink-2">Ports</span>
+          <span className="tabular-nums">{dep.ports.join(", ")}</span>
+        </div>
+      ) : null}
+
+      {dep.credentialHint ? (
+        <div className="flex items-start gap-2 rounded-fluent border border-line bg-hover px-3 py-[10px] text-[13px] leading-[1.5] text-ink-2">
+          <Mi
+            name="info"
+            size={16}
+            color="var(--color-accent)"
+            style={{ flexShrink: 0, marginTop: 1 }}
+          />
+          <span>{dep.credentialHint}</span>
+        </div>
+      ) : null}
+    </Card>
   );
 }
