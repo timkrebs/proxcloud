@@ -23,6 +23,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/bootstrap"
+	"github.com/timkrebs9/proxcloud/backend/internal/catalog"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
@@ -208,6 +209,43 @@ func runServe(log *slog.Logger) {
 	engine.Release = func(ctx context.Context, ownershipID string) error {
 		return st.ReleaseOwnership(ctx, ownershipID)
 	}
+
+	// Service catalog (ADR-0025/0026): off by default. When enabled, load and
+	// validate the embedded definitions (fail-fast on a malformed def — that is a
+	// build/embed bug, not an ops misconfig) and build the SSH/SFTP snippet writer —
+	// the only node access beyond the API token — with mandatory host-key
+	// verification. The engine gains the writer so a catalog deployment can place
+	// its cloud-init before CreateVM.
+	//
+	// Degrade, don't crash: if the snippet writer cannot be initialized (missing SSH
+	// vars, an unreadable key, a bad known_hosts), the catalog is an OPTIONAL
+	// feature, so we log loudly and KEEP SERVING. Catalog provisioning then returns
+	// 503 (see CatalogProvisionReady), while auth, resources, and every other
+	// endpoint stay up. A catalog misconfig must never crash-loop the core control
+	// plane.
+	var catalogDefs *catalog.Catalog
+	var catalogProvisionReady bool
+	if cfg.CatalogEnabled {
+		catalogDefs, err = catalog.Load()
+		if err != nil {
+			log.Error("startup failed", "stage", "catalog-load", "err", err)
+			os.Exit(1)
+		}
+		snippetWriter, swErr := buildSnippetWriter(cfg, log)
+		if swErr != nil {
+			log.Error("catalog provisioning disabled — the snippet writer could not be initialized; "+
+				"catalog provisioning will return 503 until this is fixed. Auth, resources, and all "+
+				"other endpoints are unaffected.", "err", swErr)
+		} else {
+			engine.Snippets = snippetWriter
+			catalogProvisionReady = true
+			log.Info("service catalog enabled", "services", len(catalogDefs.List()),
+				"snippet_datastore", cfg.SnippetDatastore, "ssh_host", cfg.ProxmoxNodeSSHHost)
+		}
+	} else {
+		log.Info("service catalog disabled — set CATALOG_ENABLED=true to enable")
+	}
+
 	authzMW := &authz.Middleware{Store: st, Log: log}
 	// Auto-shutdown service (ADR-0019): shared by the HTTP schedule handlers (to
 	// materialize on edit) and the scheduler (to run the stop/warn/start handlers).
@@ -224,7 +262,10 @@ func runServe(log *slog.Logger) {
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW,
 		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL,
 		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive(),
-		TTL: ttlSvc, TTLEnabled: cfg.TTLActive()}
+		TTL: ttlSvc, TTLEnabled: cfg.TTLActive(),
+		Catalog: catalogDefs, CatalogEnabled: cfg.CatalogEnabled, CatalogProvisionReady: catalogProvisionReady,
+		SnippetDatastore:      cfg.SnippetDatastore,
+		DeploymentSetsEnabled: cfg.DeploymentSetsEnabled}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {
@@ -368,6 +409,24 @@ func runServe(log *slog.Logger) {
 		log.Warn("background workers did not drain in time")
 	}
 	log.Info("stopped")
+}
+
+// buildSnippetWriter constructs the catalog SSH/SFTP snippet writer from config.
+// It is a thin, testable seam over proxmox.NewSnippetWriter: it maps the catalog
+// SSH settings and returns an error (never panics, never os.Exit) when a required
+// var is missing or the key / known_hosts cannot be loaded. The caller degrades on
+// error — disabling catalog provisioning — so an optional feature's misconfig never
+// crash-loops the core control plane (ADR-0025). Host-key verification stays
+// mandatory inside NewSnippetWriter; there is no insecure fallback.
+func buildSnippetWriter(cfg *config.Config, log *slog.Logger) (*proxmox.SnippetWriter, error) {
+	return proxmox.NewSnippetWriter(proxmox.SnippetConfig{
+		Host:        cfg.ProxmoxNodeSSHHost,
+		User:        cfg.ProxmoxNodeSSHUser,
+		KeyPath:     cfg.ProxmoxNodeSSHKeyPath,
+		KnownHosts:  cfg.ProxmoxNodeKnownHosts,
+		StoragePath: cfg.SnippetStoragePath,
+		Log:         log,
+	})
 }
 
 // ownedVMIDsResolver adapts the store to the SSE handler's per-connection

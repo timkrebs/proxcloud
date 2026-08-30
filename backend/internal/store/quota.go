@@ -237,6 +237,85 @@ func (s *PgStore) ReserveOwnership(ctx context.Context, p ReserveOwnershipParams
 	return out, nil
 }
 
+// ReserveOwnershipBatch implements DeploymentSetStore: the atomic multi-guest
+// reservation (ADR-0029). It reserves ALL N members or none under ONE per-tenant
+// advisory lock. The key subtlety is the count accumulation: checkQuota hardcodes
+// `+1` on count (quota.go:180), so the batch cannot reuse it N times against the
+// same base usage — it must fold each accepted member into the running usage
+// before checking the next, so member k is checked against base + members 0..k-1.
+// The first member that would exceed any project OR tenant dimension returns a
+// single ErrQuotaExceeded and the whole transaction rolls back (no partial
+// cluster). All checks happen BEFORE any Proxmox call — same discipline as the
+// single-guest ReserveOwnership.
+func (s *PgStore) ReserveOwnershipBatch(ctx context.Context, p ReserveOwnershipBatchParams) ([]ResourceOwnership, error) {
+	var out []ResourceOwnership
+	err := s.WithTx(ctx, func(txs Store) error {
+		if err := txs.AdvisoryLock(ctx, AdvisoryKeyTenant(p.TenantID)); err != nil {
+			return err
+		}
+		tenantUsage, byProject, err := txs.ComputeUsage(ctx, p.TenantID, p.Snapshot)
+		if err != nil {
+			return err
+		}
+		projectQuota, err := txs.GetQuota(ctx, "project", p.ProjectID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		tenantQuota, err := txs.GetQuota(ctx, "tenant", p.TenantID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+
+		// Running usage, seeded from live usage and ACCUMULATED across accepted
+		// members (project first — usually the tighter cap — then tenant).
+		projUsage := byProject[p.ProjectID]
+		tenUsage := tenantUsage
+		for _, m := range p.Members {
+			if err := checkQuota("project", projectQuota, projUsage, m.Reserved); err != nil {
+				return err
+			}
+			if err := checkQuota("tenant", tenantQuota, tenUsage, m.Reserved); err != nil {
+				return err
+			}
+			// Fold this member in so the NEXT member is checked against base +
+			// members up to and including this one (closes the count/vcpu leak).
+			addAlloc(&projUsage, Alloc{VCPU: m.Reserved.VCPU, RAMMB: m.Reserved.RAMMB, DiskGB: m.Reserved.DiskGB})
+			addAlloc(&tenUsage, Alloc{VCPU: m.Reserved.VCPU, RAMMB: m.Reserved.RAMMB, DiskGB: m.Reserved.DiskGB})
+		}
+
+		// All members fit: insert N pending rows tagged with the set id + role.
+		setID := p.SetID
+		out = make([]ResourceOwnership, 0, len(p.Members))
+		for _, m := range p.Members {
+			rv, rr, rd := m.Reserved.VCPU, m.Reserved.RAMMB, m.Reserved.DiskGB
+			role := m.Role
+			o, err := txs.CreateOwnership(ctx, CreateOwnershipParams{
+				TenantID:        p.TenantID,
+				ProjectID:       p.ProjectID,
+				VMID:            m.VMID,
+				GuestType:       m.GuestType,
+				Node:            m.Node,
+				CreatedBy:       p.CreatedBy,
+				Status:          "pending",
+				ReservedVCPU:    &rv,
+				ReservedRAMMB:   &rr,
+				ReservedDiskGB:  &rd,
+				DeploymentSetID: &setID,
+				Role:            &role,
+			})
+			if err != nil {
+				return err // e.g. a duplicate VMID → ErrConflict rolls back ALL rows
+			}
+			out = append(out, *o)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // InsertAuditIntent implements QuotaStore: the fail-closed intent write.
 func (s *PgStore) InsertAuditIntent(ctx context.Context, a AuditIntent) (string, error) {
 	const q = `INSERT INTO audit_log

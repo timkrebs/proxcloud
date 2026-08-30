@@ -1,0 +1,63 @@
+#cloud-config
+# K3s control-plane (server) first-boot user-data, rendered server-side by
+# internal/catalog/render.go and delivered as a snippet referenced by
+# `cicustom "user=<datastore>:snippets/<file>.yaml"` (ADR-0025).
+#
+# OVERRIDE CONTRACT (docs/proxmox/cloud-init.md §1.4, ADR-0025): when
+# `cicustom user=` is set, PVE DROPS the inline ciuser/cipassword/sshkeys — this
+# file carries the login identity itself (users:/authorized_keys).
+#
+# CREDENTIAL SAFETY (ADR-0027, SECURITY-CRITICAL): neither the raw cluster join
+# token NOR the operator's SSH public keys ever appear in this YAML or a shell
+# line. Only their render-time base64 blobs are interpolated (base64 alphabet has
+# no YAML/shell metacharacters); they are decoded IN-GUEST and used only as
+# double-quoted values. K3S_TOKEN is passed to the installer via the environment,
+# never on the argv, so it never lands in the process list.
+hostname: {{ .Hostname }}
+manage_etc_hosts: true
+
+users:
+  - name: {{ .LoginUser }}
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+
+package_update: true
+packages:
+  # qemu-guest-agent is REQUIRED: it is what makes the deploy engine's
+  # `configuring` step observe the guest's IP (ADR-0028, docs §3).
+  - qemu-guest-agent
+  - curl
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  # Install the operator's SSH public key(s) for the login user. Each key is
+  # base64-encoded at render time so a hostile key string can never inject YAML
+  # structure or a shell command; it is decoded in-guest, one key per line.
+  - |
+    set -eu
+    SSH_DIR="/home/{{ .LoginUser }}/.ssh"
+    AK="$SSH_DIR/authorized_keys"
+    install -d -m 700 "$SSH_DIR"
+    : > "$AK"
+    {{- range .SSHKeysB64 }}
+    printf %s '{{ . }}' | base64 -d >> "$AK"
+    printf '\n' >> "$AK"
+    {{- end }}
+    chmod 600 "$AK"
+    chown -R "{{ .LoginUser }}:{{ .LoginUser }}" "$SSH_DIR"
+  # Install K3s in server (control-plane) mode. The pre-shared cluster token is
+  # decoded in-guest into K3S_TOKEN and handed to the installer via the
+  # ENVIRONMENT (never argv), so it is present in neither this YAML nor the
+  # process list. --tls-san / --node-ip / --node-external-ip pin the API server's
+  # certificate + advertised address to the static server IP the agents dial.
+  - |
+    set -eu
+    K3S_TOKEN="$(printf %s '{{ .K3sTokenB64 }}' | base64 -d)"
+    export K3S_TOKEN
+    SERVER_IP='{{ .ServerIP }}'
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_EXEC="server --tls-san ${SERVER_IP} --node-ip ${SERVER_IP} --node-external-ip ${SERVER_IP} --write-kubeconfig-mode 0644" \
+      sh -
+    unset K3S_TOKEN

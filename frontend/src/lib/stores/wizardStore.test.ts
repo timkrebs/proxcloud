@@ -2,12 +2,25 @@
 // deploy.Validate, so every case here has a server-side twin.
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { ProjectQuotaResponse, QuotaLimits, QuotaUsage } from "@/lib/api/generated/types";
+import type {
+  CatalogCredential,
+  ProjectQuotaResponse,
+  QuotaLimits,
+  QuotaUsage,
+} from "@/lib/api/generated/types";
 import {
+  MIN_CREDENTIAL_PASSWORD_LEN,
+  STEP_LABEL,
+  TAB_NAMES,
   effectiveRemaining,
+  makeWizardCredentials,
+  stepIndex,
+  tabIndex,
   toCreateRequest,
+  toProvisionRequest,
   useWizardStore,
   validateWizard,
+  wizardSteps,
   type QuotaRemaining,
   type WizardState,
 } from "@/lib/stores/wizardStore";
@@ -381,5 +394,324 @@ describe("toCreateRequest", () => {
     validVm();
     const req = toCreateRequest(useWizardStore.getState());
     expect(req.cloudInit).toBeUndefined();
+  });
+});
+
+describe("tabIndex", () => {
+  it("resolves each key to its position in TAB_NAMES", () => {
+    expect(tabIndex("basics")).toBe(0);
+    expect(tabIndex("image")).toBe(1);
+    expect(tabIndex("size")).toBe(2);
+    expect(tabIndex("review")).toBe(TAB_NAMES.length - 1);
+  });
+
+  it("is derived from TAB_NAMES (label round-trips)", () => {
+    expect(TAB_NAMES[tabIndex("size")]).toBe("Size");
+    expect(TAB_NAMES[tabIndex("review")]).toBe("Review + create");
+  });
+});
+
+// ── Service-catalog mode (Phase B) ───────────────────────────────────────────
+
+function validService(): WizardState {
+  const s = useWizardStore.getState();
+  s.init("qemu");
+  s.set({
+    serviceId: "postgresql",
+    serviceName: "PostgreSQL",
+    sshKeys: "ssh-ed25519 AAAAExampleKey user@host",
+    name: "postgresql",
+    node: "pve01",
+    vmid: "150",
+    projectId: "p-web",
+    projectName: "Web",
+    sourceMode: "iso",
+    storage: "local-lvm",
+    bridge: "vmbr0",
+    cores: "2",
+    memoryMb: "4096",
+    diskGb: "20",
+  });
+  return useWizardStore.getState();
+}
+
+describe("validateWizard — service mode", () => {
+  it("does not require an ISO when a service is selected", () => {
+    const s = validService();
+    // No isoVolId set, yet the config validates (service supplies its image).
+    expect(s.isoVolId).toBe("");
+    expect(validateWizard(s)).toEqual([]);
+  });
+
+  it("requires an SSH key in service mode (catalog guests have no other login)", () => {
+    validService();
+    useWizardStore.getState().set({ sshKeys: "   \n  " }); // blank lines only
+    const errs = validateWizard(useWizardStore.getState());
+    expect(errs.some((e) => e.field === "sshKeys")).toBe(true);
+  });
+
+  it("still enforces storage and bridge in service mode", () => {
+    validService();
+    useWizardStore.getState().set({ storage: "", bridge: "" });
+    const errs = validateWizard(useWizardStore.getState());
+    expect(errs.some((e) => e.field === "storage")).toBe(true);
+    expect(errs.some((e) => e.field === "bridge")).toBe(true);
+  });
+});
+
+describe("toProvisionRequest", () => {
+  it("builds the provision wire request with no source or cloud-init account", () => {
+    validService();
+    useWizardStore.getState().set({
+      vlanTag: "20",
+      firewall: true,
+      ipMode: "static",
+      cidr: "192.168.1.60/24",
+      gateway: "192.168.1.1",
+      sshKeys: "ssh-ed25519 AAA key\n\n",
+      tags: ["env-prod"],
+    });
+    const req = toProvisionRequest(useWizardStore.getState());
+    expect(req).toEqual({
+      projectId: "p-web",
+      name: "postgresql",
+      node: "pve01",
+      vmid: 150,
+      cores: 2,
+      memoryMb: 4096,
+      diskGb: 20,
+      storage: "local-lvm",
+      bridge: "vmbr0",
+      vlanTag: 20,
+      firewall: true,
+      ipConfig: { mode: "static", cidr: "192.168.1.60/24", gateway: "192.168.1.1" },
+      sshKeys: ["ssh-ed25519 AAA key"],
+      tags: ["env-prod"],
+    });
+    // No bare-guest fields leak into the provision request.
+    expect("source" in req).toBe(false);
+    expect("cloudInit" in req).toBe(false);
+    expect("startAfterCreate" in req).toBe(false);
+  });
+
+  it("defaults to DHCP and omits empty sshKeys/tags", () => {
+    validService();
+    useWizardStore.getState().set({ sshKeys: "" }); // builder omits empty optional fields
+    const req = toProvisionRequest(useWizardStore.getState());
+    expect(req.ipConfig).toEqual({ mode: "dhcp" });
+    expect("sshKeys" in req).toBe(false);
+    expect("tags" in req).toBe(false);
+    expect("vlanTag" in req).toBe(false);
+  });
+});
+
+// ── Phase-C credentials (generate vs set) ────────────────────────────────────
+
+// A representative schema: a fixed-username credential (Postgres `postgres`,
+// usernameSettable:false), a settable-username credential, and a generate-only
+// credential (userSettable:false — the user can't set it at all).
+function credSchema(): CatalogCredential[] {
+  return [
+    {
+      name: "postgres",
+      username: "postgres",
+      usernameSettable: false,
+      userSettable: true,
+      generatedDefault: true,
+    },
+    {
+      name: "app_admin",
+      username: "admin",
+      usernameSettable: true,
+      userSettable: true,
+      generatedDefault: true,
+    },
+    {
+      name: "replication",
+      username: "repl",
+      usernameSettable: false,
+      userSettable: false,
+      generatedDefault: true,
+    },
+  ];
+}
+
+function serviceWithCreds(): WizardState {
+  validService(); // serviceId + valid sizing/network/ssh from Phase B
+  useWizardStore.getState().set({
+    serviceHasCredentials: true,
+    credentials: makeWizardCredentials(credSchema()),
+  });
+  return useWizardStore.getState();
+}
+
+/** Set one credential's choice by name (returns the fresh state). */
+function patchCred(name: string, patch: Partial<WizardState["credentials"][number]>): WizardState {
+  const st = useWizardStore.getState();
+  st.set({
+    credentials: st.credentials.map((c) => (c.name === name ? { ...c, ...patch } : c)),
+  });
+  return useWizardStore.getState();
+}
+
+describe("makeWizardCredentials", () => {
+  it("denormalises the schema and defaults every credential to generate", () => {
+    const creds = makeWizardCredentials(credSchema());
+    expect(creds.map((c) => c.mode)).toEqual(["generate", "generate", "generate"]);
+    expect(creds[0]).toMatchObject({
+      name: "postgres",
+      usernameSettable: false,
+      userSettable: true,
+      fixedUsername: "postgres",
+      username: "postgres",
+      password: "",
+    });
+    // Settable-username credential pre-fills the example username but stays blank
+    // password until the user sets it.
+    expect(creds[1]).toMatchObject({
+      name: "app_admin",
+      usernameSettable: true,
+      username: "admin",
+    });
+  });
+});
+
+describe("wizardSteps + stepIndex", () => {
+  it("plain creates get the bare seven steps (no Credentials)", () => {
+    const s = validVm();
+    const steps = wizardSteps(s);
+    expect(steps).not.toContain("credentials");
+    expect(steps.map((k) => STEP_LABEL[k])).toEqual([...TAB_NAMES]);
+  });
+
+  it("a service without credentials is unaffected", () => {
+    const s = validService(); // serviceHasCredentials stays false
+    expect(wizardSteps(s)).not.toContain("credentials");
+  });
+
+  it("a service with credentials inserts Credentials after Advanced", () => {
+    const steps = wizardSteps(serviceWithCreds());
+    expect(steps).toEqual([
+      "basics",
+      "image",
+      "size",
+      "networking",
+      "advanced",
+      "credentials",
+      "tags",
+      "review",
+    ]);
+    // Trailing tabs shift by one — resolved via stepIndex, never hardcoded.
+    expect(stepIndex(steps, "credentials")).toBe(5);
+    expect(stepIndex(steps, "tags")).toBe(6);
+    expect(stepIndex(steps, "review")).toBe(7);
+  });
+});
+
+describe("validateWizard — credentials", () => {
+  it("passes when every credential is generated (the default)", () => {
+    const s = serviceWithCreds();
+    expect(validateWizard(s).some((e) => e.field.startsWith("credential:"))).toBe(false);
+  });
+
+  it("flags a set password under 12 characters", () => {
+    serviceWithCreds();
+    const s = patchCred("postgres", { mode: "set", password: "short" });
+    const steps = wizardSteps(s);
+    const err = validateWizard(s).find((e) => e.field === "credential:postgres:password");
+    expect(err).toBeDefined();
+    expect(err!.tab).toBe(stepIndex(steps, "credentials"));
+    expect(err!.message).toContain(`at least ${MIN_CREDENTIAL_PASSWORD_LEN}`);
+  });
+
+  it("flags an empty set password (sub-12 covers empty)", () => {
+    serviceWithCreds();
+    const s = patchCred("postgres", { mode: "set", password: "" });
+    expect(validateWizard(s).some((e) => e.field === "credential:postgres:password")).toBe(true);
+  });
+
+  it("accepts a set password of exactly 12 (length-only; metacharacters allowed)", () => {
+    serviceWithCreds();
+    const s = patchCred("postgres", { mode: "set", password: 'a$b"c;d|e f!' }); // 12 chars
+    expect(s.credentials[0].password).toHaveLength(12);
+    expect(validateWizard(s).some((e) => e.field === "credential:postgres:password")).toBe(false);
+  });
+
+  it("does not validate generated credentials", () => {
+    serviceWithCreds();
+    // replication is generate-only; leave it generated with no value → no error.
+    const s = patchCred("app_admin", { mode: "set", password: "a-very-strong-passphrase" });
+    const errs = validateWizard(s);
+    expect(errs.some((e) => e.field === "credential:replication:password")).toBe(false);
+    expect(errs.some((e) => e.field === "credential:app_admin:password")).toBe(false);
+  });
+
+  it("shifts the tags-error tab when the Credentials step is present", () => {
+    serviceWithCreds();
+    const s = patchCred("postgres", { mode: "generate" });
+    useWizardStore.getState().set({ tags: ["Bad Tag"] });
+    const st = useWizardStore.getState();
+    const steps = wizardSteps(st);
+    const tagErr = validateWizard(st).find((e) => e.field === "tags");
+    expect(tagErr!.tab).toBe(stepIndex(steps, "tags")); // 6, not the bare-flow 5
+    expect(tagErr!.tab).toBe(6);
+    void s;
+  });
+});
+
+describe("toProvisionRequest — credential shaping", () => {
+  it("omits the credentials array when all are generated", () => {
+    const s = serviceWithCreds();
+    expect("credentials" in toProvisionRequest(s)).toBe(false);
+  });
+
+  it("includes only set credentials; omits username on a fixed-username credential", () => {
+    serviceWithCreds();
+    const s = patchCred("postgres", { mode: "set", password: "correct horse battery" });
+    const req = toProvisionRequest(s);
+    expect(req.credentials).toEqual([{ name: "postgres", password: "correct horse battery" }]);
+    // The fixed-username credential must NOT carry a username (server 400s).
+    expect("username" in req.credentials![0]).toBe(false);
+  });
+
+  it("sends username for a settable-username credential the user set", () => {
+    serviceWithCreds();
+    const s = patchCred("app_admin", {
+      mode: "set",
+      username: "dbadmin",
+      password: "another-strong-secret",
+    });
+    const req = toProvisionRequest(s);
+    expect(req.credentials).toEqual([
+      { name: "app_admin", username: "dbadmin", password: "another-strong-secret" },
+    ]);
+  });
+
+  it("omits a blank username even when usernameSettable (falls back to default)", () => {
+    serviceWithCreds();
+    const s = patchCred("app_admin", {
+      mode: "set",
+      username: "   ",
+      password: "another-strong-secret",
+    });
+    const req = toProvisionRequest(s);
+    expect(req.credentials).toEqual([{ name: "app_admin", password: "another-strong-secret" }]);
+  });
+
+  it("carries a mix: set credentials only, generated ones omitted", () => {
+    serviceWithCreds();
+    patchCred("postgres", { mode: "set", password: "pg-strong-passphrase" });
+    const s = patchCred("app_admin", {
+      mode: "set",
+      username: "dbadmin",
+      password: "app-strong-passphrase",
+    });
+    const req = toProvisionRequest(s);
+    expect(req.credentials).toEqual([
+      { name: "postgres", password: "pg-strong-passphrase" },
+      { name: "app_admin", username: "dbadmin", password: "app-strong-passphrase" },
+    ]);
+    // The generate-only credential never appears.
+    expect(req.credentials!.some((c) => c.name === "replication")).toBe(false);
   });
 });

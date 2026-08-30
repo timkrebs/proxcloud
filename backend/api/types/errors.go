@@ -12,7 +12,11 @@ type APIError struct {
 	// invalid_request | rate_limited | email_mismatch | account_exists |
 	// totp_challenge_expired | proxmox_auth_failed | proxmox_permission_denied |
 	// proxmox_unreachable | proxmox_error | agent_unavailable |
-	// console_disabled | timeout | internal
+	// console_disabled | unavailable | timeout | internal
+	//
+	// "unavailable" (HTTP 503) marks an enabled-but-not-ready optional capability —
+	// e.g. the service catalog is on but its snippet writer failed to initialize, so
+	// provisioning is temporarily unavailable while read-only endpoints keep serving.
 	Code       string `json:"code"`
 	Message    string `json:"message"`
 	PVEMessage string `json:"pveMessage,omitempty"`
