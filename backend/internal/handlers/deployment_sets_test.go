@@ -34,6 +34,12 @@ import (
 // a fake snippet writer, a deterministic readiness probe (so a member reaches ready
 // without a live listener), and a fast configuring poll.
 func newSetHarness(t *testing.T, mock *proxmoxtest.MockClient) (*harness, *catalogFakeWriter) {
+	return newSetHarnessReady(t, mock, true)
+}
+
+// newSetHarnessReady is newSetHarness with an explicit snippet-writer readiness,
+// so the degrade path (CatalogProvisionReady=false → CreateSet 503) is testable.
+func newSetHarnessReady(t *testing.T, mock *proxmoxtest.MockClient, provisionReady bool) (*harness, *catalogFakeWriter) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fake := storetest.New()
@@ -57,7 +63,7 @@ func newSetHarness(t *testing.T, mock *proxmoxtest.MockClient) (*harness, *catal
 		t.Fatalf("load catalog: %v", err)
 	}
 	api := &handlers.Deps{PVE: mock, Log: log, Store: fake, Authz: mw, Deploy: engine, Registry: reg, Broker: broker,
-		Catalog: cat, CatalogEnabled: true, SnippetDatastore: "local", DeploymentSetsEnabled: true}
+		Catalog: cat, CatalogEnabled: true, CatalogProvisionReady: provisionReady, SnippetDatastore: "local", DeploymentSetsEnabled: true}
 	h := httpserver.New(httpserver.Deps{
 		Cfg: &config.Config{}, Log: log, Auth: authH, Authz: mw,
 		Account: api.MountAccount, Admin: api.MountAdmin, Tenant: api.MountTenant,
@@ -272,6 +278,42 @@ func TestCreateSetOverQuota409ZeroRows(t *testing.T) {
 	sets, _ := hh.fake.ListDeploymentSets(context.Background(), tenantID)
 	if len(sets) != 0 {
 		t.Fatalf("an orphan set row survived an over-quota create: %+v", sets)
+	}
+}
+
+// TestCreateSetUnavailableWhenWriterNotReady: the catalog is enabled but the
+// snippet writer failed to initialize at boot (degrade, don't crash). CreateSet
+// must return 503 BEFORE any reserve/quota/deploy work — no member reservation,
+// no orphan set row, no Proxmox call.
+func TestCreateSetUnavailableWhenWriterNotReady(t *testing.T) {
+	mock := &proxmoxtest.MockClient{
+		OnCreatePool: func(context.Context, string, string) error {
+			t.Error("EnsureProjectPool must not run when provisioning is unavailable")
+			return nil
+		},
+		OnCreateVM: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			t.Error("CreateVM must not run when provisioning is unavailable")
+			return "", nil
+		},
+	}
+	hh, _ := newSetHarnessReady(t, mock, false) // snippet writer not ready
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	c := hh.cookie(t, userID)
+
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/deployment-sets", createSetBody(projID))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("create set with writer not ready = %d, want 503 (body %s)", rec.Code, rec.Body.String())
+	}
+	if env := decodeBody[types.ErrorEnvelope](t, rec); env.Error.Code != "unavailable" {
+		t.Fatalf("error code = %q, want unavailable", env.Error.Code)
+	}
+	for _, vmid := range []int{201, 202, 203} {
+		if s := hh.fake.OwnershipStatus(vmid); s != "" {
+			t.Errorf("member %d reservation leaked: %q (want none)", vmid, s)
+		}
+	}
+	if sets, _ := hh.fake.ListDeploymentSets(context.Background(), tenantID); len(sets) != 0 {
+		t.Fatalf("an orphan set row survived a 503 create: %+v", sets)
 	}
 }
 

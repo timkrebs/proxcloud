@@ -110,6 +110,14 @@ func (d *Deps) CreateSet(w http.ResponseWriter, r *http.Request) {
 	if !d.setsReady(w) {
 		return
 	}
+	// Degrade, don't crash: deployment sets place a cloud-init snippet for every
+	// member, so they need the SSH/SFTP snippet writer. If it failed to initialize
+	// at boot, fail honestly with 503 BEFORE any reserve/quota/deploy work — never
+	// leak a batch reservation or half-provision a set (mirrors ProvisionService).
+	if !d.CatalogProvisionReady {
+		httpserver.WriteError(w, serviceUnavailable("deployment-set provisioning is unavailable: snippet writer is not configured"))
+		return
+	}
 	if d.Deploy == nil {
 		httpserver.WriteError(w, &types.APIError{Code: "internal", Message: "deployment engine not configured", Status: http.StatusInternalServerError})
 		return

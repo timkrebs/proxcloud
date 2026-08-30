@@ -239,26 +239,14 @@ func Load() (*Config, error) {
 	if cfg.InsecureCookies && !cfg.Dev {
 		problems = append(problems, "PROXCLOUD_INSECURE_COOKIES must not be set in production")
 	}
-	// When the catalog is enabled, the SSH snippet-writer config must be complete
-	// (host-key verification is mandatory — no insecure fallback). With the flag
-	// off (default) these are inert, so a classic API-token-only deployment boots
-	// without them.
-	if cfg.CatalogEnabled {
-		for _, p := range []struct {
-			val, env string
-		}{
-			{cfg.ProxmoxNodeSSHHost, "PROXMOX_NODE_SSH_HOST"},
-			{cfg.ProxmoxNodeSSHUser, "PROXMOX_NODE_SSH_USER"},
-			{cfg.ProxmoxNodeSSHKeyPath, "PROXMOX_NODE_SSH_KEY_PATH"},
-			{cfg.ProxmoxNodeKnownHosts, "PROXMOX_NODE_KNOWN_HOSTS"},
-			{cfg.SnippetDatastore, "SNIPPET_DATASTORE"},
-			{cfg.SnippetStoragePath, "SNIPPET_STORAGE_PATH"},
-		} {
-			if p.val == "" {
-				problems = append(problems, p.env+" is required when CATALOG_ENABLED=true")
-			}
-		}
-	}
+	// The catalog SSH snippet-writer config is deliberately NOT validated fatally
+	// here. The catalog is an optional, feature-flagged capability: a misconfigured
+	// or unreadable snippet writer must DEGRADE (catalog provisioning returns 503)
+	// rather than crash-loop the whole control plane — auth, resources, and every
+	// other endpoint stay up. main.go builds the writer best-effort at boot, logs
+	// loudly when it can't, and keeps serving (ADR-0025). Host-key verification is
+	// still mandatory in NewSnippetWriter — there is no insecure fallback; the trust
+	// surface is unchanged, only the failure mode (degrade, not exit).
 	if (cfg.ConsoleUser == "") != (cfg.ConsolePassword == "") {
 		problems = append(problems, "PROXMOX_CONSOLE_USER and PROXMOX_CONSOLE_PASSWORD must be set together")
 	}

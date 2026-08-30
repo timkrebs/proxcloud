@@ -135,3 +135,29 @@ escalation of blast radius, it ships behind guardrails:
 
 See ADR-0026 (definition format the renderer consumes) and ADR-0028 (how a
 snippet-provisioned guest is detected as ready).
+
+## Addendum (2026-08-30): degrade, don't crash on a misconfigured writer
+
+Originally, with `CATALOG_ENABLED=true`, a snippet-writer that could not be built
+(missing SSH vars, an unreadable key, a bad `known_hosts`) was a fatal boot error:
+`config.Load` validated the six SSH vars as required, and `main.go` called
+`os.Exit(1)` if `NewSnippetWriter` failed. In practice this crash-looped the
+**entire** control plane (auth, resources, everything) for a misconfiguration of an
+optional, feature-flagged capability — a QA `.env` pointing `PROXMOX_NODE_SSH_KEY_PATH`
+at a host path absent inside the container took the whole backend down.
+
+The boot contract is now **degrade, not crash**:
+
+- `config.Load` no longer fatally validates the catalog SSH vars.
+- `main.go` builds the writer best-effort (`buildSnippetWriter`); on failure it logs
+  loudly and keeps serving, leaving `engine.Snippets` unset and catalog provisioning
+  **not-ready**.
+- `ProvisionService` and `CreateSet` short-circuit to **503 `unavailable`** before any
+  reserve/quota/deploy work, so a misconfig never leaks a reservation, half-provisions
+  a set, or reaches Proxmox. Read-only catalog list/get keep serving.
+- `catalog.Load()` stays fail-fast — a malformed embedded definition is a build bug,
+  not an ops misconfig.
+
+The trust surface is unchanged: host-key verification stays **mandatory** inside
+`NewSnippetWriter` (no `InsecureIgnoreHostKey`, no insecure fallback). Only the
+failure *mode* changed — from process exit to a scoped, honest 503.

@@ -47,8 +47,16 @@ func (w *catalogFakeWriter) RemoveSnippet(context.Context, string) error { retur
 
 // newCatalogHarness wires the real router with CATALOG_ENABLED on: the loaded
 // embedded catalog, a fake snippet writer on the engine, and a fast configuring
-// poll so an async deployment does not linger.
+// poll so an async deployment does not linger. Provisioning is ready.
 func newCatalogHarness(t *testing.T, mock *proxmoxtest.MockClient) (*harness, *catalogFakeWriter) {
+	return newCatalogHarnessReady(t, mock, true)
+}
+
+// newCatalogHarnessReady is newCatalogHarness with an explicit provisioning-ready
+// flag, so a test can exercise the degrade path: CATALOG_ENABLED on but the snippet
+// writer never initialized (CatalogProvisionReady=false). Read-only endpoints must
+// still serve; provisioning must 503 before any reserve/quota/deploy work.
+func newCatalogHarnessReady(t *testing.T, mock *proxmoxtest.MockClient, provisionReady bool) (*harness, *catalogFakeWriter) {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fake := storetest.New()
@@ -71,7 +79,7 @@ func newCatalogHarness(t *testing.T, mock *proxmoxtest.MockClient) (*harness, *c
 		t.Fatalf("load catalog: %v", err)
 	}
 	api := &handlers.Deps{PVE: mock, Log: log, Store: fake, Authz: mw, Deploy: engine, Registry: reg, Broker: broker,
-		Catalog: cat, CatalogEnabled: true, SnippetDatastore: "local"}
+		Catalog: cat, CatalogEnabled: true, CatalogProvisionReady: provisionReady, SnippetDatastore: "local"}
 	h := httpserver.New(httpserver.Deps{
 		Cfg: &config.Config{}, Log: log, Auth: authH, Authz: mw,
 		Account: api.MountAccount, Admin: api.MountAdmin, Tenant: api.MountTenant,
@@ -491,5 +499,56 @@ func TestServiceCatalogDisabled404(t *testing.T) {
 	}
 	if rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/service-catalog/postgresql/provision", provisionBody(projID)); rec.Code != http.StatusNotFound {
 		t.Fatalf("provision (disabled) = %d, want 404", rec.Code)
+	}
+}
+
+// TestProvisionServiceUnavailableWhenWriterNotReady is the degrade path: the
+// catalog is ENABLED but its snippet writer failed to initialize at boot
+// (CatalogProvisionReady=false). The core control plane keeps serving — read-only
+// catalog endpoints stay 200 — but provisioning short-circuits to 503 BEFORE any
+// reserve/quota/deploy work, so no reservation leaks and Proxmox is never touched.
+func TestProvisionServiceUnavailableWhenWriterNotReady(t *testing.T) {
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			t.Error("clusterSnapshot must not run: provisioning must 503 before any reserve/quota work")
+			return nil, nil
+		},
+		OnCreatePool: func(context.Context, string, string) error {
+			t.Error("EnsureProjectPool must not run when provisioning is unavailable")
+			return nil
+		},
+		OnCreateVM: func(context.Context, string, map[string]any) (proxmox.UPID, error) {
+			t.Error("CreateVM must not run when provisioning is unavailable")
+			return "", nil
+		},
+	}
+	hh, _ := newCatalogHarnessReady(t, mock, false) // enabled, but writer NOT ready
+	tenantID, projID, userID := seedTenant(hh, "contributor")
+	c := hh.cookie(t, userID)
+
+	// Read-only endpoints still serve off the embedded defs.
+	if rec := hh.req(t, c, http.MethodGet, "/api/tenants/"+tenantID+"/service-catalog", ""); rec.Code != http.StatusOK {
+		t.Fatalf("list (writer not ready) = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := hh.req(t, c, http.MethodGet, "/api/tenants/"+tenantID+"/service-catalog/postgresql", ""); rec.Code != http.StatusOK {
+		t.Fatalf("get (writer not ready) = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// Provisioning fails honestly with 503 and a clear message.
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantID+"/service-catalog/postgresql/provision", provisionBody(projID))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("provision (writer not ready) = %d, want 503 (body %s)", rec.Code, rec.Body.String())
+	}
+	env := decodeBody[types.ErrorEnvelope](t, rec)
+	if env.Error.Code != "unavailable" {
+		t.Fatalf("error code = %q, want unavailable", env.Error.Code)
+	}
+	if !strings.Contains(env.Error.Message, "snippet writer is not configured") {
+		t.Fatalf("error message = %q, want it to explain the snippet writer is not configured", env.Error.Message)
+	}
+
+	// No reservation may leak for a request refused before reserve.
+	if s := hh.fake.OwnershipStatus(106); s != "" {
+		t.Fatalf("a reservation leaked while provisioning was unavailable: %q", s)
 	}
 }

@@ -84,9 +84,17 @@ type Deps struct {
 	// route behavior (the routes always mount so the completeness tests see them;
 	// the handlers 404 when the feature is off). SnippetDatastore is the datastore
 	// id used in the cicustom snippet reference ("<datastore>:snippets/<file>").
-	Catalog          *catalog.Catalog
-	CatalogEnabled   bool
-	SnippetDatastore string
+	//
+	// CatalogProvisionReady reports whether the SSH/SFTP snippet writer was
+	// successfully initialized at boot. The catalog is optional and degrades: when
+	// CatalogEnabled is true but the writer could not be built (missing SSH vars, an
+	// unreadable key, a bad known_hosts), read-only catalog endpoints still serve but
+	// ProvisionService short-circuits to 503 BEFORE any reserve/quota/deploy work —
+	// a catalog misconfig must never take the core control plane down (ADR-0025).
+	Catalog               *catalog.Catalog
+	CatalogEnabled        bool
+	CatalogProvisionReady bool
+	SnippetDatastore      string
 
 	// DeploymentSetsEnabled gates the multi-guest deployment-set surface
 	// (ADR-0029/0030, the K3s cluster action). Like CatalogEnabled the routes always

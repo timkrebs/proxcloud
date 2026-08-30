@@ -94,6 +94,13 @@ func badRequest(msg string) *types.APIError {
 	return &types.APIError{Code: "invalid_request", Message: msg, Status: http.StatusBadRequest}
 }
 
+// serviceUnavailable is a 503 for an enabled-but-not-ready capability (e.g. the
+// catalog is on but its snippet writer could not be initialized). The core control
+// plane keeps serving; only the dependent action reports honestly that it is down.
+func serviceUnavailable(msg string) *types.APIError {
+	return &types.APIError{Code: "unavailable", Message: msg, Status: http.StatusServiceUnavailable}
+}
+
 // apiStatus mirrors httpserver.WriteError's status mapping: an *APIError's own
 // Status, else 500. Used to record the audited outcome for a handler-level
 // mutation on the same status the client will actually receive.

@@ -85,6 +85,15 @@ func (d *Deps) ProvisionService(w http.ResponseWriter, r *http.Request) {
 	if !d.catalogReady(w) {
 		return
 	}
+	// Degrade, don't crash: the catalog may be enabled while its SSH/SFTP snippet
+	// writer failed to initialize at boot (missing SSH vars, an unreadable key, a bad
+	// known_hosts). List/Get still work off the embedded defs, but provisioning
+	// cannot place a snippet — fail honestly with 503 BEFORE any reserve/quota/deploy
+	// work, so a catalog misconfig never leaks a reservation or hits Proxmox.
+	if !d.CatalogProvisionReady {
+		httpserver.WriteError(w, serviceUnavailable("catalog provisioning is unavailable: snippet writer is not configured"))
+		return
+	}
 	if d.Deploy == nil {
 		httpserver.WriteError(w, &types.APIError{Code: "internal", Message: "deployment engine not configured", Status: http.StatusInternalServerError})
 		return
