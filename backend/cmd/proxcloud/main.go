@@ -23,6 +23,7 @@ import (
 	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/authz"
 	"github.com/timkrebs9/proxcloud/backend/internal/bootstrap"
+	"github.com/timkrebs9/proxcloud/backend/internal/catalog"
 	"github.com/timkrebs9/proxcloud/backend/internal/config"
 	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
@@ -208,6 +209,38 @@ func runServe(log *slog.Logger) {
 	engine.Release = func(ctx context.Context, ownershipID string) error {
 		return st.ReleaseOwnership(ctx, ownershipID)
 	}
+
+	// Service catalog (ADR-0025/0026): off by default. When enabled, load and
+	// validate the embedded definitions (fail-fast on a malformed def) and build
+	// the SSH/SFTP snippet writer — the only node access beyond the API token —
+	// with mandatory host-key verification. The engine gains the writer so a
+	// catalog deployment can place its cloud-init before CreateVM.
+	var catalogDefs *catalog.Catalog
+	if cfg.CatalogEnabled {
+		catalogDefs, err = catalog.Load()
+		if err != nil {
+			log.Error("startup failed", "stage", "catalog-load", "err", err)
+			os.Exit(1)
+		}
+		snippetWriter, err := proxmox.NewSnippetWriter(proxmox.SnippetConfig{
+			Host:        cfg.ProxmoxNodeSSHHost,
+			User:        cfg.ProxmoxNodeSSHUser,
+			KeyPath:     cfg.ProxmoxNodeSSHKeyPath,
+			KnownHosts:  cfg.ProxmoxNodeKnownHosts,
+			StoragePath: cfg.SnippetStoragePath,
+			Log:         log,
+		})
+		if err != nil {
+			log.Error("startup failed", "stage", "snippet-writer", "err", err)
+			os.Exit(1)
+		}
+		engine.Snippets = snippetWriter
+		log.Info("service catalog enabled", "services", len(catalogDefs.List()),
+			"snippet_datastore", cfg.SnippetDatastore, "ssh_host", cfg.ProxmoxNodeSSHHost)
+	} else {
+		log.Info("service catalog disabled — set CATALOG_ENABLED=true to enable")
+	}
+
 	authzMW := &authz.Middleware{Store: st, Log: log}
 	// Auto-shutdown service (ADR-0019): shared by the HTTP schedule handlers (to
 	// materialize on edit) and the scheduler (to run the stop/warn/start handlers).
@@ -224,7 +257,9 @@ func runServe(log *slog.Logger) {
 	api := &handlers.Deps{PVE: pve, Log: log, Registry: registry, Broker: broker, Deploy: engine, Store: st, Authz: authzMW,
 		Mailer: mailer, FrontendOrigin: cfg.FrontendOrigin, InvitationTTL: cfg.InvitationTTL,
 		AutoShutdown: autoShutdown, AutoShutdownEnabled: cfg.AutoShutdownActive(),
-		TTL: ttlSvc, TTLEnabled: cfg.TTLActive()}
+		TTL: ttlSvc, TTLEnabled: cfg.TTLActive(),
+		Catalog: catalogDefs, CatalogEnabled: cfg.CatalogEnabled, SnippetDatastore: cfg.SnippetDatastore,
+		DeploymentSetsEnabled: cfg.DeploymentSetsEnabled}
 	if cfg.PricingEnabled() {
 		currency := cfg.PricingCurrency
 		if currency == "" {

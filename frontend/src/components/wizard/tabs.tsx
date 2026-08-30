@@ -197,6 +197,22 @@ export function ImageTab({ errs }: { errs: WizardError[] }) {
   const vzStorages = useNodeStorages(s.node, "vztmpl");
   const templates = useResources({ type: "qemu" });
 
+  // Service-catalog mode: the base image is defined by the service (rendered
+  // server-side), so there is no ISO/clone to pick here.
+  if (s.serviceId !== "") {
+    return (
+      <div>
+        <SectionHeading caption="Catalog services ship a predefined, tested base image — you don't choose one here.">
+          Base image
+        </SectionHeading>
+        <p className="text-[13px] leading-[1.5] text-ink-2">
+          {s.serviceName || "This service"} provisions its own base image and cloud-init
+          configuration. Continue to <strong>Size</strong> to adjust cores, memory, and disk.
+        </p>
+      </div>
+    );
+  }
+
   if (s.kind === "lxc") {
     return (
       <div>
@@ -578,6 +594,43 @@ export function AdvancedTab() {
   const s = useWizardStore();
   const qemu = s.kind === "qemu";
 
+  // Service-catalog mode: the superuser credential is generated server-side and
+  // shown once after creation, so the inline account fields don't apply. Only
+  // SSH keys are carried into the provision request.
+  if (s.serviceId !== "") {
+    return (
+      <div>
+        <SectionHeading caption="The service generates its superuser credential and shows it once after creation — Proxcloud never stores it.">
+          Provisioning
+        </SectionHeading>
+        <div className="mb-4 flex items-start gap-2 rounded-fluent border border-line bg-hover px-3 py-[10px] text-[13px] leading-[1.5] text-ink-2">
+          <Mi
+            name="info"
+            size={16}
+            color="var(--color-accent)"
+            style={{ flexShrink: 0, marginTop: 1 }}
+          />
+          <span>
+            {s.serviceName || "This service"} creates its superuser account automatically. The
+            generated password is shown once on the next screen.
+          </span>
+        </div>
+        <FormRow
+          label="SSH public keys"
+          help="One key per line; added to the login user on first boot."
+        >
+          <Textarea
+            value={s.sshKeys}
+            onChange={(e) => s.set({ sshKeys: e.target.value })}
+            rows={5}
+            placeholder="ssh-ed25519 AAAA…"
+            className="w-[420px]"
+          />
+        </FormRow>
+      </div>
+    );
+  }
+
   if (s.sourceMode === "clone") {
     return (
       <p className="text-[13px] leading-[1.5] text-ink-2">
@@ -790,6 +843,22 @@ export function ReviewTab({ errs }: { errs: WizardError[] }) {
         ["Start after create", s.startAfterCreate ? "Yes" : "No"],
       ],
     },
+    // Credentials summary (service mode) — origin only; never a secret value.
+    ...(s.serviceId !== "" && s.credentials.length > 0
+      ? [
+          {
+            title: "Credentials",
+            rows: s.credentials.map((c): [string, string] => [
+              c.name,
+              c.mode === "set"
+                ? c.usernameSettable && c.username.trim() !== ""
+                  ? `You set it (username ${c.username})`
+                  : "You set it"
+                : "Generated — shown once after create",
+            ]),
+          },
+        ]
+      : []),
     { title: "Tags", rows: [["Tags", s.tags.join(", ") || "—"]] },
   ];
 

@@ -1,10 +1,12 @@
 "use client";
 // Create wizard — design §3.3: tab strip with gating, sticky summary card,
-// sticky footer. Submit posts the real CreateGuestRequest and routes to the
-// deployment progress page.
-import { useEffect, useMemo, useState } from "react";
+// sticky footer. Submit posts the real CreateGuestRequest (bare VM/LXC) or, in
+// service-catalog mode (?service=<id>), a ProvisionServiceRequest — the service
+// def prefills name/sizing and defines the base image, and the one-time
+// generated credential is surfaced once before routing to the deployment page.
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import {
   AdvancedTab,
@@ -15,28 +17,39 @@ import {
   SizeTab,
   TagsTab,
 } from "@/components/wizard/tabs";
+import { CredentialsTab } from "@/components/wizard/CredentialsTab";
+import { CredentialReveal } from "@/components/catalog/CredentialReveal";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Mi } from "@/components/ui/icons";
 import { ApiError } from "@/lib/api/client";
+import type { ProvisionServiceResponse } from "@/lib/api/generated/types";
 import { isQuotaExceeded, useCreateGuest } from "@/lib/api/mutations";
 import { useProjectQuota } from "@/lib/api/quota";
 import { usePricing, useResources } from "@/lib/api/queries";
+import { useProvisionService, useService } from "@/lib/api/serviceCatalog";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 import { pushToast } from "@/lib/stores/toastStore";
 import { CostRows } from "@/components/wizard/CostRows";
 import {
-  TAB_NAMES,
+  STEP_LABEL,
   effectiveRemaining,
+  makeWizardCredentials,
+  stepIndex,
   toCreateRequest,
+  toProvisionRequest,
   useWizardStore,
   validateWizard,
+  wizardSteps,
 } from "@/lib/stores/wizardStore";
 
-export default function WizardPage() {
+function WizardPageInner() {
   const params = useParams<{ kind: string }>();
   const kind = params.kind === "lxc" ? "lxc" : "qemu";
+  const searchParams = useSearchParams();
+  const serviceId = searchParams.get("service");
+  const inServiceMode = serviceId !== null;
   const router = useRouter();
   const s = useWizardStore();
   const resources = useResources();
@@ -46,11 +59,40 @@ export default function WizardPage() {
   // 409 quota_exceeded is surfaced inline (distinct from the generic conflict
   // toast) — the backend names the tightest violated dimension/scope.
   const [quotaError, setQuotaError] = useState<string | null>(null);
+  // One-time generated credential from a catalog provision — shown once here,
+  // then we route to the deployment page (which never sees it again).
+  const [credential, setCredential] = useState<ProvisionServiceResponse | null>(null);
+
+  const service = useService(serviceId);
+  const svc = service.data;
 
   useEffect(() => {
     s.init(kind);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind]);
+
+  // Prefill from the service def once it loads (after init). Keyed by kind+id so
+  // switching services (or kind) re-applies; guarded so it never clobbers the
+  // user's later edits on a re-render.
+  const set = s.set;
+  const prefilledRef = useRef<string>("");
+  useEffect(() => {
+    if (!svc) return;
+    const key = `${kind}:${svc.id}`;
+    if (prefilledRef.current === key) return;
+    prefilledRef.current = key;
+    set({
+      serviceId: svc.id,
+      serviceName: svc.displayName,
+      serviceHasCredentials: svc.credentials.length > 0,
+      credentials: makeWizardCredentials(svc.credentials),
+      name: svc.id,
+      sourceMode: "iso",
+      cores: String(svc.sizing.default.cores),
+      memoryMb: String(svc.sizing.default.memoryMb),
+      diskGb: String(svc.sizing.default.diskGb),
+    });
+  }, [svc, kind, set]);
 
   const existingVmids = useMemo(() => (resources.data ?? []).map((g) => g.vmid), [resources.data]);
   // Bind sizing validation on the tighter of project vs tenant remaining.
@@ -59,14 +101,52 @@ export default function WizardPage() {
   const errs = validateWizard(s, existingVmids, remaining);
 
   const create = useCreateGuest();
+  const provision = useProvisionService(serviceId ?? "");
+  const pending = create.isPending || provision.isPending;
 
   const kindLabel = kind === "qemu" ? "virtual machine" : "LXC container";
-  const onReview = s.tab === TAB_NAMES.length - 1;
+  const heading = inServiceMode && svc ? `Create ${svc.displayName}` : `Create a ${kindLabel}`;
+  // Mode-aware ordered steps: a catalog service with credentials inserts the
+  // Credentials step; a plain create is unchanged. Every positional reference
+  // resolves through this list, never a hardcoded index.
+  const steps = wizardSteps(s);
+  const reviewIdx = stepIndex(steps, "review");
+  const onReview = s.tab === reviewIdx;
+  const active = steps[s.tab];
+  const tabErrs = errs.filter((e) => e.tab === s.tab);
 
   const submit = () => {
     setQuotaError(null);
     if (errs.length > 0) {
-      s.set({ tab: TAB_NAMES.length - 1, maxTab: TAB_NAMES.length - 1 });
+      s.set({ tab: reviewIdx, maxTab: reviewIdx });
+      return;
+    }
+    const onError = (err: unknown) => {
+      if (isQuotaExceeded(err)) {
+        // Send the user back to Size and show the sizing error inline.
+        setQuotaError(err instanceof ApiError ? err.message : "Over quota");
+        const sizeIdx = stepIndex(steps, "size");
+        s.set({ tab: sizeIdx, maxTab: Math.max(s.maxTab, sizeIdx) });
+        return;
+      }
+      pushToast({
+        kind: "err",
+        title: "Could not start the deployment",
+        desc: err instanceof ApiError ? err.detail : String(err),
+      });
+    };
+
+    if (inServiceMode) {
+      provision.mutate(toProvisionRequest(s), {
+        onSuccess: (res) => {
+          setSubmitted(true);
+          // Surface the generated password once, THEN route. If the (Phase C)
+          // user-supplied path returned no password, route straight through.
+          if (res.generatedPassword) setCredential(res);
+          else router.push(`/deployments/${res.deploymentId}`);
+        },
+        onError,
+      });
       return;
     }
     create.mutate(toCreateRequest(s), {
@@ -74,19 +154,7 @@ export default function WizardPage() {
         setSubmitted(true);
         router.push(`/deployments/${res.deploymentId}`);
       },
-      onError: (err) => {
-        if (isQuotaExceeded(err)) {
-          // Send the user back to Size and show the sizing error inline.
-          setQuotaError(err instanceof ApiError ? err.message : "Over quota");
-          s.set({ tab: 2, maxTab: Math.max(s.maxTab, 2) });
-          return;
-        }
-        pushToast({
-          kind: "err",
-          title: "Could not start the deployment",
-          desc: err instanceof ApiError ? err.detail : String(err),
-        });
-      },
+      onError,
     });
   };
 
@@ -97,31 +165,47 @@ export default function WizardPage() {
         <span className="text-ink-2"> &gt; </span>
         <Link href="/create">Create a resource</Link>
         <span className="text-ink-2"> &gt; </span>
-        <span className="text-ink-2">Create a {kindLabel}</span>
+        <span className="text-ink-2">{heading}</span>
       </nav>
-      <h1 className="text-[24px] font-semibold">Create a {kindLabel}</h1>
+      <h1 className="text-[24px] font-semibold">{heading}</h1>
+
+      {inServiceMode ? (
+        <div className="mt-3 flex max-w-[720px] items-start gap-2 rounded-fluent border border-line bg-hover px-3 py-[10px] text-[13px] leading-[1.5]">
+          <Mi
+            name="info"
+            size={16}
+            color="var(--color-accent)"
+            style={{ flexShrink: 0, marginTop: 1 }}
+          />
+          <div>
+            This service uses a predefined base image. A superuser credential is generated
+            automatically and shown <strong>once</strong> after you create it — Proxcloud does not
+            store it.
+          </div>
+        </div>
+      ) : null}
 
       {/* tab strip §3.3 */}
       <div className="mt-4 flex gap-[2px] border-b border-line">
-        {TAB_NAMES.map((name, i) => {
+        {steps.map((key, i) => {
           const locked = i > s.maxTab;
-          const active = i === s.tab;
-          const tabErr = errs.some((e) => e.tab === i) && s.maxTab >= i && !active;
+          const isActive = i === s.tab;
+          const tabErr = errs.some((e) => e.tab === i) && s.maxTab >= i && !isActive;
           return (
             <button
-              key={name}
+              key={key}
               type="button"
               disabled={locked}
               onClick={() => s.goTab(i)}
               className={`-mb-px cursor-pointer border-0 border-b-2 bg-transparent px-3 py-[9px] text-[14px] ${
-                active
+                isActive
                   ? "border-accent font-semibold text-ink"
                   : locked
                     ? "cursor-default border-transparent text-ink-3"
                     : "border-transparent text-ink-2 hover:text-ink"
               }`}
             >
-              {name}
+              {STEP_LABEL[key]}
               {tabErr ? <span className="ml-1 text-err">•</span> : null}
             </button>
           );
@@ -144,13 +228,14 @@ export default function WizardPage() {
               </div>
             </div>
           ) : null}
-          {s.tab === 0 ? <BasicsTab errs={errs.filter((e) => e.tab === 0)} /> : null}
-          {s.tab === 1 ? <ImageTab errs={errs.filter((e) => e.tab === 1)} /> : null}
-          {s.tab === 2 ? <SizeTab errs={errs.filter((e) => e.tab === 2)} /> : null}
-          {s.tab === 3 ? <NetworkingTab errs={errs.filter((e) => e.tab === 3)} /> : null}
-          {s.tab === 4 ? <AdvancedTab /> : null}
-          {s.tab === 5 ? <TagsTab errs={errs.filter((e) => e.tab === 5)} /> : null}
-          {s.tab === 6 ? <ReviewTab errs={errs} /> : null}
+          {active === "basics" ? <BasicsTab errs={tabErrs} /> : null}
+          {active === "image" ? <ImageTab errs={tabErrs} /> : null}
+          {active === "size" ? <SizeTab errs={tabErrs} /> : null}
+          {active === "networking" ? <NetworkingTab errs={tabErrs} /> : null}
+          {active === "advanced" ? <AdvancedTab /> : null}
+          {active === "credentials" ? <CredentialsTab errs={tabErrs} /> : null}
+          {active === "tags" ? <TagsTab errs={tabErrs} /> : null}
+          {active === "review" ? <ReviewTab errs={errs} /> : null}
         </div>
 
         {/* sticky summary card §3.3 (pricing lands later; summary is real) */}
@@ -159,6 +244,7 @@ export default function WizardPage() {
             {pricing.data?.enabled ? "Estimated cost" : "Resource summary"}
           </h3>
           {[
+            ...(inServiceMode ? [["Service", s.serviceName || svc?.displayName || "—"]] : []),
             ["Type", kind === "qemu" ? "Virtual machine" : "LXC container"],
             ["Project", s.projectName || "—"],
             ["Compute", `${s.cores || "—"} vCPU · ${s.memoryMb || "—"} MiB`],
@@ -194,20 +280,35 @@ export default function WizardPage() {
       <div className="sticky bottom-0 z-[5] -mx-8 mt-7 flex items-center gap-2 border-t border-line bg-card px-8 py-3">
         <Button
           variant="primary"
-          disabled={create.isPending || submitted || (onReview && tenantId === null)}
-          onClick={onReview ? submit : () => s.set({ tab: 6, maxTab: 6 })}
+          disabled={pending || submitted || (onReview && tenantId === null)}
+          onClick={onReview ? submit : () => s.set({ tab: reviewIdx, maxTab: reviewIdx })}
         >
-          {onReview ? (create.isPending ? "Creating…" : "Create") : "Review + create"}
+          {onReview ? (pending ? "Creating…" : "Create") : "Review + create"}
         </Button>
         <Button variant="secondary" disabled={s.tab === 0} onClick={() => s.prev()}>
           &lt; Previous
         </Button>
         {!onReview ? (
           <Button variant="secondary" onClick={() => s.next()}>
-            Next : {TAB_NAMES[s.tab + 1]} &gt;
+            Next : {STEP_LABEL[steps[s.tab + 1]]} &gt;
           </Button>
         ) : null}
       </div>
+
+      {credential ? (
+        <CredentialReveal
+          resp={credential}
+          onContinue={() => router.push(`/deployments/${credential.deploymentId}`)}
+        />
+      ) : null}
     </div>
+  );
+}
+
+export default function WizardPage() {
+  return (
+    <Suspense fallback={null}>
+      <WizardPageInner />
+    </Suspense>
   );
 }

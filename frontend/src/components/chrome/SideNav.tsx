@@ -62,6 +62,22 @@ const ROWS: Row[] = [
     <Svc name="allres" size={16} />,
     (p, t) => p === "/resources" && !t,
   ),
+  // Marketplace gallery lives on /create alongside the compute entry tiles. The
+  // catalog is backend-flag-gated (CATALOG_ENABLED); no capability flag is
+  // exposed to the client, so the row is always shown and the gallery hides its
+  // catalog section when the endpoint 404s.
+  item(
+    "Service catalog",
+    "/create",
+    <Mi name="bolt" size={16} color="var(--color-accent)" strokeWidth={1.4} />,
+    (p) => p === "/create",
+  ),
+  // Flag-gated like the catalog (DEPLOYMENT_SETS_ENABLED): no capability flag is
+  // exposed to the client, so the row is always shown and the list page renders a
+  // disabled/empty state when the endpoint 404s.
+  item("Deployment sets", "/deployment-sets", <Svc name="k8s" size={16} />, (p) =>
+    prefix("/deployment-sets")(p),
+  ),
   item(
     "Projects",
     "/projects",

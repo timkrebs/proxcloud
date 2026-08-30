@@ -1,0 +1,38 @@
+# Connect to your K3s cluster
+
+Your K3s control plane is up and the worker nodes have joined it. The Kubernetes
+API is reachable at the address below.
+
+- **API server:** `https://{{ .Host }}:{{ .Port }}`
+
+## Fetch your kubeconfig
+
+Proxcloud never holds your cluster credentials — the kubeconfig lives only on the
+control-plane node. SSH to the server (as the login user, with the key you
+supplied at creation) and copy it out, rewriting the loopback address to the
+server's real IP so you can reach the API from your workstation:
+
+```bash
+# On your workstation:
+ssh proxcloud@{{ .Host }} "sudo cat /etc/rancher/k3s/k3s.yaml" \
+  | sed "s/127.0.0.1/{{ .Host }}/" > ~/.kube/k3s-config
+
+export KUBECONFIG=~/.kube/k3s-config
+kubectl get nodes
+```
+
+You should see the control-plane node plus each worker in `Ready` state.
+
+## Join secret
+
+The cluster join token was generated for you and injected into every node at
+first boot. It is **never stored, shown, or retrievable by Proxcloud** — it
+exists only inside the nodes. To add a node by hand later, read the token on the
+server (`sudo cat /var/lib/rancher/k3s/server/node-token`) and point a new agent
+at `https://{{ .Host }}:{{ .Port }}`.
+
+## Security note
+
+The Kubernetes API is exposed on `{{ .Port }}/tcp` and the nodes speak the
+default flannel VXLAN on `8472/udp`. Keep the cluster on a trusted LAN segment and
+restrict `{{ .Port }}/tcp` with the guest firewall before running real workloads.

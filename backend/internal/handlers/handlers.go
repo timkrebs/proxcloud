@@ -17,6 +17,7 @@ import (
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
 	"github.com/timkrebs9/proxcloud/backend/internal/authz"
+	"github.com/timkrebs9/proxcloud/backend/internal/catalog"
 	"github.com/timkrebs9/proxcloud/backend/internal/console"
 	"github.com/timkrebs9/proxcloud/backend/internal/deploy"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
@@ -77,6 +78,22 @@ type Deps struct {
 	// routes always mount (and persist) but only project jobs when the feature is on.
 	TTL        *lifecycle.TTL
 	TTLEnabled bool
+
+	// Service catalog (ADR-0025/0026). Catalog is the loaded, validated set of
+	// platform services; nil when CATALOG_ENABLED is off. CatalogEnabled gates the
+	// route behavior (the routes always mount so the completeness tests see them;
+	// the handlers 404 when the feature is off). SnippetDatastore is the datastore
+	// id used in the cicustom snippet reference ("<datastore>:snippets/<file>").
+	Catalog          *catalog.Catalog
+	CatalogEnabled   bool
+	SnippetDatastore string
+
+	// DeploymentSetsEnabled gates the multi-guest deployment-set surface
+	// (ADR-0029/0030, the K3s cluster action). Like CatalogEnabled the routes always
+	// mount (so the completeness tests see them); the handlers 404 when the feature
+	// is off. A set rides the catalog + snippet writer, so the handler also requires
+	// a loaded Catalog — the flag alone does not enable it.
+	DeploymentSetsEnabled bool
 }
 
 // MountAccount attaches the tenant-agnostic, per-user account routes (paths
@@ -158,6 +175,17 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Get(p+"/projects/{projectId}/ttl-policy", d.GetProjectTTLPolicy)
 	r.Get(p+"/projects/{projectId}/ttls", d.ListProjectTTLs)
 
+	// Service catalog (ADR-0026). Always mounted (so the permission/audit
+	// completeness tests see them); the handlers 404 when CATALOG_ENABLED is off.
+	r.Get(p+"/service-catalog", d.ListServices)
+	r.Get(p+"/service-catalog/{serviceId}", d.GetService)
+
+	// Deployment sets (ADR-0029/0030). Always mounted; the handlers 404 when the
+	// feature (DEPLOYMENT_SETS_ENABLED + a loaded catalog) is off, mirroring the
+	// catalog. {setId} is tenant-level — the handler does its own tenant-filtered 404.
+	r.Get(p+"/deployment-sets", d.ListSets)
+	r.Get(p+"/deployment-sets/{setId}", d.GetSet)
+
 	r.Get(p+"/deployments/{id}", d.GetDeployment)
 	r.Get(p+"/tasks", d.ListTenantTasks)
 	r.Get(p+"/tasks/{upid}", d.GetTenantTask)
@@ -174,6 +202,13 @@ func (d *Deps) MountTenant(r chi.Router) {
 	r.Put(p+"/projects/{projectId}/schedule", d.PutProjectSchedule)
 	r.Delete(p+"/projects/{projectId}/schedule", d.DeleteProjectSchedule)
 	r.Put(p+"/projects/{projectId}/ttl-policy", d.PutProjectTTLPolicy)
+
+	r.Post(p+"/service-catalog/{serviceId}/provision", d.ProvisionService)
+
+	// Deployment sets (ADR-0029/0030): create, start/stop fan-out, delete.
+	r.Post(p+"/deployment-sets", d.CreateSet)
+	r.Delete(p+"/deployment-sets/{setId}", d.DeleteSet)
+	r.Post(p+"/deployment-sets/{setId}/{action}", d.SetAction)
 
 	r.Post(p+"/guests", d.CreateGuest)
 	r.Patch(p+"/guests/{node}/{type}/{vmid}/config", d.UpdateGuestConfig)

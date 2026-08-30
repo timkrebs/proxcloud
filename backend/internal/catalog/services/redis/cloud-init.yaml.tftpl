@@ -1,0 +1,85 @@
+#cloud-config
+# Redis first-boot user-data, rendered server-side by
+# internal/catalog/render.go and delivered as a snippet referenced by
+# `cicustom "user=<datastore>:snippets/<file>.yaml"` (ADR-0025).
+#
+# OVERRIDE CONTRACT (docs/proxmox/cloud-init.md §1.4, ADR-0025): when
+# `cicustom user=` is set, PVE DROPS the inline ciuser/cipassword/sshkeys — the
+# custom user-data is authoritative — so this file MUST carry the login
+# identity itself (users:/ssh_authorized_keys:). params.go never emits those
+# three inline params for a catalog guest.
+#
+# CREDENTIAL SAFETY (docs/proxmox/cloud-init.md §4, ADR-0027 §1, SECURITY-
+# CRITICAL): neither the raw `requirepass` value NOR the operator's SSH public
+# keys ever appear in this YAML or in a shell string. Only their render-time
+# base64 blobs are interpolated (base64 alphabet has no YAML/shell
+# metacharacters); they are decoded IN-GUEST at first boot. The password is set
+# with `redis-cli CONFIG SET`, then persisted with `CONFIG REWRITE` (Redis does
+# its own quoting on rewrite) — the raw value only ever lives in a double-quoted
+# shell variable, never in YAML structure or the redis.conf we hand-write.
+hostname: {{ .Hostname }}
+manage_etc_hosts: true
+
+# NOTE: ssh_authorized_keys is deliberately NOT set here — keys are installed via
+# base64-decode in runcmd below so a hostile key cannot break this YAML.
+users:
+  - name: {{ .LoginUser }}
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+
+package_update: true
+packages:
+  # qemu-guest-agent is REQUIRED: it is what makes the deploy engine's
+  # `configuring` step observe the guest's IP (ADR-0028, docs §3). redis-server
+  # pulls in redis-cli via redis-tools.
+  - qemu-guest-agent
+  - redis-server
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  # Install the operator's SSH public key(s) for the login user. Each key is
+  # base64-encoded at render time (docs/proxmox/cloud-init.md §4) so a hostile key
+  # string can never inject YAML structure or a shell command; it is decoded
+  # in-guest and appended to authorized_keys, one key per line.
+  - |
+    set -eu
+    SSH_DIR="/home/{{ .LoginUser }}/.ssh"
+    AK="$SSH_DIR/authorized_keys"
+    install -d -m 700 "$SSH_DIR"
+    : > "$AK"
+    {{- range .SSHKeysB64 }}
+    printf %s '{{ . }}' | base64 -d >> "$AK"
+    printf '\n' >> "$AK"
+    {{- end }}
+    chmod 600 "$AK"
+    chown -R "{{ .LoginUser }}:{{ .LoginUser }}" "$SSH_DIR"
+  # Bind on all interfaces (protected-mode off is safe ONLY because we require a
+  # password below) and set `requirepass` from the decoded credential. A homelab
+  # Redis is reached remotely; restrict this with the guest firewall / your LAN —
+  # NEVER expose Redis to the public internet (see next-steps). # SECURITY-REVIEW
+  - |
+    set -eu
+    REDIS_PASS="$(printf %s '{{ .SuperuserPassB64 }}' | base64 -d)"
+    CONF=/etc/redis/redis.conf
+
+    # Listen beyond localhost. These are STATIC, injection-free values.
+    sed -i 's/^bind .*/bind * -::*/' "$CONF"
+    sed -i 's/^protected-mode .*/protected-mode no/' "$CONF"
+    systemctl restart redis-server
+
+    # Wait for redis to accept connections (still unauthenticated at this point).
+    for _ in $(seq 1 30); do
+      if redis-cli ping >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+
+    # Set the password at runtime (the value is a double-quoted argv element, so
+    # shell/YAML metacharacters are inert), then persist it. CONFIG REWRITE lets
+    # Redis write and escape the value into redis.conf itself.
+    redis-cli CONFIG SET requirepass "$REDIS_PASS"
+    REDISCLI_AUTH="$REDIS_PASS" redis-cli CONFIG REWRITE
+    unset REDIS_PASS

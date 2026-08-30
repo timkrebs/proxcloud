@@ -1,0 +1,100 @@
+#cloud-config
+# PostgreSQL first-boot user-data, rendered server-side by
+# internal/catalog/render.go and delivered as a snippet referenced by
+# `cicustom "user=<datastore>:snippets/<file>.yaml"` (ADR-0025).
+#
+# OVERRIDE CONTRACT (docs/proxmox/cloud-init.md §1.4, ADR-0025): when
+# `cicustom user=` is set, PVE DROPS the inline ciuser/cipassword/sshkeys — the
+# custom user-data is authoritative — so this file MUST carry the login
+# identity itself (users:/ssh_authorized_keys:). params.go never emits those
+# three inline params for a catalog guest.
+#
+# TEMPLATING: rendered with Go text/template (double-brace actions). The .tftpl
+# extension matches prod's naming; the delimiters are Go, not Terraform.
+#
+# CREDENTIAL SAFETY (docs/proxmox/cloud-init.md §4, SECURITY-CRITICAL): neither
+# the raw superuser password NOR the operator's SSH public keys ever appear in
+# this YAML or in a shell string. Only their render-time base64 blobs are
+# interpolated (base64 alphabet has no YAML/shell metacharacters); they are
+# decoded IN-GUEST at first boot and used only as double-quoted values. A raw SSH
+# key with an embedded newline could otherwise inject a top-level runcmd: run as
+# root, so keys go through the SAME base64 pipeline as the password.
+hostname: {{ .Hostname }}
+manage_etc_hosts: true
+
+# NOTE: ssh_authorized_keys is deliberately NOT set here — keys are installed via
+# base64-decode in runcmd below so a hostile key cannot break this YAML.
+users:
+  - name: {{ .LoginUser }}
+    groups: [sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+
+package_update: true
+packages:
+  # qemu-guest-agent is REQUIRED: it is what makes the deploy engine's
+  # `configuring` step observe the guest's IP (ADR-0028, docs §3).
+  - qemu-guest-agent
+  - postgresql
+  - postgresql-contrib
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  - [ systemctl, enable, --now, postgresql ]
+  # Install the operator's SSH public key(s) for the login user. Each key is
+  # base64-encoded at render time (docs/proxmox/cloud-init.md §4) so a hostile key
+  # string can never inject YAML structure or a shell command; it is decoded
+  # in-guest and appended to authorized_keys, one key per line.
+  - |
+    set -eu
+    SSH_DIR="/home/{{ .LoginUser }}/.ssh"
+    AK="$SSH_DIR/authorized_keys"
+    install -d -m 700 "$SSH_DIR"
+    : > "$AK"
+    {{- range .SSHKeysB64 }}
+    printf %s '{{ . }}' | base64 -d >> "$AK"
+    printf '\n' >> "$AK"
+    {{- end }}
+    chmod 600 "$AK"
+    chown -R "{{ .LoginUser }}:{{ .LoginUser }}" "$SSH_DIR"
+  # Configure PostgreSQL, then set the superuser password. Every step keeps the
+  # decoded secret inside double-quoted shell variables / SQL literals and never
+  # writes it to a persistent file or the process argv.
+  - |
+    set -eu
+    # Decode the injected credential in-guest (never the raw value in YAML).
+    PGUSER_NAME="$(printf %s '{{ .SuperuserUserB64 }}' | base64 -d)"
+    PGUSER_PASS="$(printf %s '{{ .SuperuserPassB64 }}' | base64 -d)"
+
+    # Resolve the active cluster config dir (e.g. /etc/postgresql/16/main).
+    PG_CONF_DIR="$(dirname "$(sudo -u postgres psql -tAc 'SHOW config_file' 2>/dev/null || true)")"
+    if [ -z "$PG_CONF_DIR" ] || [ ! -d "$PG_CONF_DIR" ]; then
+      PG_CONF_DIR="$(find /etc/postgresql -maxdepth 2 -type d -name main | head -n1)"
+    fi
+
+    # Listen on the requested addresses so the service is reachable over TCP.
+    install -o postgres -g postgres -m 0644 /dev/null "$PG_CONF_DIR/conf.d/10-proxcloud.conf" 2>/dev/null || \
+      mkdir -p "$PG_CONF_DIR/conf.d"
+    printf "listen_addresses = '%s'\nport = %d\n" '{{ .ListenAddresses }}' {{ .Port }} \
+      > "$PG_CONF_DIR/conf.d/10-proxcloud.conf"
+
+    # Allow password (scram-sha-256) auth from the network. A homelab Postgres is
+    # reached remotely; restrict this with the guest firewall / your LAN (see the
+    # service's next-steps and ports).  # SECURITY-REVIEW: network exposure.
+    HBA="$PG_CONF_DIR/pg_hba.conf"
+    if [ -f "$HBA" ] && ! grep -q 'proxcloud-catalog' "$HBA"; then
+      {
+        echo "# proxcloud-catalog: remote password auth for the superuser"
+        echo "host    all    all    0.0.0.0/0    scram-sha-256"
+        echo "host    all    all    ::/0         scram-sha-256"
+      } >> "$HBA"
+    fi
+
+    systemctl restart postgresql
+
+    # Set the superuser role password via a psql SQL literal. Single quotes in
+    # the value are doubled ('' ) so the value cannot break out of the literal;
+    # the raw bytes only ever transit shell variables, never YAML.
+    PW_SQL="$(printf %s "$PGUSER_PASS" | sed "s/'/''/g")"
+    sudo -u postgres psql -c "ALTER ROLE \"$PGUSER_NAME\" WITH PASSWORD '$PW_SQL';"
