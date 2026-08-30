@@ -7,21 +7,7 @@
 # GitGuardian's generic "Generic Password" detector trips on the literal token; the
 # repo's own gitleaks gate (.gitleaks.toml, run in CI) already passes clean on these
 # files. Scope the ignore to those compose files only, so nothing else is masked.
-# The service-catalog credential tests carry SYNTHETIC fixtures only — hostile
-# injection strings (`aB3$(reboot)`…), dictionary passwords (`correcthorse12`),
-# and example SSH public keys (`ssh-ed25519 AAAAExample… user@host`). No real
-# secret is present: the credential-injection safety tests (ADR-0027) deliberately
-# feed these fakes through the base64 transport to prove they render as inert YAML.
-# The only real keys in the tree (deploy/terraform/keys/ci-deploy-*) are gitignored
-# and never committed. gitleaks (.gitleaks.toml, run in CI) passes clean on these
-# files, and the wave cleared the mandatory security review. Scope the ignore to
-# exactly these fixture-bearing test files, so nothing else is masked.
 version: 2
 secret:
   ignored-paths:
     - 'deploy/host/*/docker-compose.yml'
-    - 'backend/internal/catalog/credentials_test.go'
-    - 'backend/internal/catalog/render_test.go'
-    - 'backend/internal/deploy/params_test.go'
-    - 'backend/internal/handlers/service_catalog_test.go'
-    - 'backend/internal/handlers/deployment_sets_test.go'

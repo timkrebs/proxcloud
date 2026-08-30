@@ -28,11 +28,6 @@ var (
 	volIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 	// hostnameRe for nameserver/searchdomain values.
 	hostnameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.:-]{0,253}$`)
-	// snippetRefRe guards the cicustom snippet reference: it must be the
-	// volume-id form "<datastore>:snippets/proxcloud-<name>.yaml" (matching the
-	// SnippetWriter's confined filename allowlist), never an absolute path (which
-	// PVE treats as root-only) and never carrying extra cicustom options.
-	snippetRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*:snippets/proxcloud-[a-z0-9-]+\.yaml$`)
 )
 
 func validPVEID(s string) bool {
@@ -84,16 +79,6 @@ func Validate(req *types.CreateGuestRequest) error {
 		if !volIDRe.MatchString(req.Source.ISOVolID) {
 			return fail("ISO volume id has an invalid format")
 		}
-	case "image":
-		if req.Type != "qemu" {
-			return fail("image source is only valid for qemu")
-		}
-		if req.Source.ImageVolID == "" {
-			return fail("image volume is required")
-		}
-		if !volIDRe.MatchString(req.Source.ImageVolID) {
-			return fail("image volume id has an invalid format")
-		}
 	case "clone":
 		if req.Type != "qemu" {
 			return fail("clone source is only valid for qemu in v1")
@@ -105,7 +90,7 @@ func Validate(req *types.CreateGuestRequest) error {
 			return fail("clone mode must be full or linked")
 		}
 	default:
-		return fail("source mode must be iso, image, vztmpl, or clone")
+		return fail("source mode must be iso, vztmpl, or clone")
 	}
 
 	if req.Source.Mode != "clone" {
@@ -146,19 +131,6 @@ func Validate(req *types.CreateGuestRequest) error {
 		}
 		if ci.SearchDomain != "" && !hostnameRe.MatchString(ci.SearchDomain) {
 			return fail("search domain has an invalid format")
-		}
-	}
-	// Catalog provisioning delivers cloud-init via a cicustom snippet (ADR-0025).
-	// It is qemu-only and the snippet reference must be the confined volume-id form.
-	if req.Catalog != nil {
-		if req.Type != "qemu" {
-			return fail("catalog provisioning is qemu-only")
-		}
-		if req.Catalog.ServiceID == "" {
-			return fail("catalog serviceId is required")
-		}
-		if !snippetRefRe.MatchString(req.Catalog.SnippetRef) {
-			return fail("catalog snippetRef must be <datastore>:snippets/proxcloud-<name>.yaml")
 		}
 	}
 	return nil
@@ -238,59 +210,33 @@ func BuildCreateParams(req *types.CreateGuestRequest) (map[string]any, error) {
 		return p, nil
 	}
 
-	// qemu
+	// qemu from ISO
 	p["name"] = req.Name
 	p["ostype"] = "l26"
 	p["scsihw"] = "virtio-scsi-single"
+	p["scsi0"] = fmt.Sprintf("%s:%d", req.Storage, req.DiskGB)
+	p["ide2"] = req.Source.ISOVolID + ",media=cdrom"
+	p["boot"] = "order=scsi0;ide2"
 	p["agent"] = 1
-	switch req.Source.Mode {
-	case "image":
-		// Import a cloud/disk image as the boot DISK. A raw cloud .img is NOT a
-		// bootable optical image, so attaching it as a CD-ROM boots nothing and
-		// cloud-init never runs; import-from copies the image into scsi0 so the
-		// guest actually boots (prod imports the same image this way,
-		// deploy/terraform/main.tf). No ide2 CD-ROM in this mode.
-		p["scsi0"] = fmt.Sprintf("%s:0,import-from=%s", req.Storage, req.Source.ImageVolID)
-		p["boot"] = "order=scsi0"
-	default: // iso: blank data disk + the installer ISO on a CD-ROM.
-		p["scsi0"] = fmt.Sprintf("%s:%d", req.Storage, req.DiskGB)
-		p["ide2"] = req.Source.ISOVolID + ",media=cdrom"
-		p["boot"] = "order=scsi0;ide2"
-	}
 
-	// Cloud-init: a bare guest inlines the login identity (ciuser/cipassword/
-	// sshkeys); a catalog guest instead references a rendered snippet via cicustom
-	// and MUST NOT emit those inline params — PVE DROPS them when cicustom user= is
-	// set, so the snippet's own users:/chpasswd: is authoritative (ADR-0025,
-	// docs/proxmox/cloud-init.md §1.4). Both keep the generated cloud-init drive on
-	// ide0 and let PVE build network-config from ipconfig0 (which survives the
-	// user= override, §1.5).
-	isCatalog := req.Catalog != nil
-	if ci := req.CloudInit; ci != nil || isCatalog {
+	if ci := req.CloudInit; ci != nil {
+		// Cloud-init drive on ide0 (ide2 holds the installer ISO).
 		p["ide0"] = req.Storage + ":cloudinit"
-		if isCatalog {
-			p["cicustom"] = "user=" + req.Catalog.SnippetRef
-		} else {
-			if ci.User != "" {
-				p["ciuser"] = ci.User
-			}
-			if ci.Password != "" {
-				p["cipassword"] = ci.Password
-			}
-			if len(ci.SSHKeys) > 0 {
-				// PVE requires the sshkeys parameter URL-encoded.
-				p["sshkeys"] = url.QueryEscape(strings.Join(ci.SSHKeys, "\n"))
-			}
+		if ci.User != "" {
+			p["ciuser"] = ci.User
 		}
-		// Network/DNS ride the PVE-generated drive and are not overridden by
-		// cicustom user=, so both paths set them identically.
-		if ci != nil {
-			if ci.Nameserver != "" {
-				p["nameserver"] = ci.Nameserver
-			}
-			if ci.SearchDomain != "" {
-				p["searchdomain"] = ci.SearchDomain
-			}
+		if ci.Password != "" {
+			p["cipassword"] = ci.Password
+		}
+		if len(ci.SSHKeys) > 0 {
+			// PVE requires the sshkeys parameter URL-encoded.
+			p["sshkeys"] = url.QueryEscape(strings.Join(ci.SSHKeys, "\n"))
+		}
+		if ci.Nameserver != "" {
+			p["nameserver"] = ci.Nameserver
+		}
+		if ci.SearchDomain != "" {
+			p["searchdomain"] = ci.SearchDomain
 		}
 		if req.IPConfig != nil {
 			if req.IPConfig.Mode == "static" {

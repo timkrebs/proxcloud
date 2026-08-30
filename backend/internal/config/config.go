@@ -79,36 +79,6 @@ type Config struct {
 	LoginChallengeTTL time.Duration // default 5m
 	TOTPIssuer        string        // otpauth issuer label; default "Proxcloud"
 
-	// Service catalog (ADR-0025/0026). CatalogEnabled gates the whole catalog +
-	// its SSH trust surface; OFF by default, mirroring SchedulerEnabled. When on,
-	// the backend renders a service's cloud-init and delivers it as a snippet over
-	// SSH/SFTP to the node (there is no REST snippet upload), then references it
-	// with cicustom. The SSH fields are the ONLY node access beyond the API token,
-	// so they are validated fail-fast only when the catalog is enabled.
-	CatalogEnabled bool
-	// ProxmoxNodeSSHHost is the node SSH host (optionally host:port; default 22)
-	// the snippet writer connects to. Use a dedicated, least-privilege account.
-	ProxmoxNodeSSHHost string
-	ProxmoxNodeSSHUser string
-	// ProxmoxNodeSSHKeyPath is the private key for the snippet-writer account.
-	ProxmoxNodeSSHKeyPath string
-	// ProxmoxNodeKnownHosts pins the node's host key. Host-key verification is
-	// mandatory (ADR-0025) — there is no insecure escape hatch for the SSH channel.
-	ProxmoxNodeKnownHosts string
-	// SnippetDatastore is the datastore id used in the cicustom reference
-	// ("<datastore>:snippets/<file>"), e.g. "local". SnippetStoragePath is that
-	// datastore's node filesystem path the SFTP writer writes to, e.g.
-	// "/var/lib/vz/snippets".
-	SnippetDatastore   string
-	SnippetStoragePath string
-
-	// DeploymentSetsEnabled gates the multi-guest deployment-set surface
-	// (ADR-0029/0030 — the K3s cluster action). OFF by default. A set is a catalog
-	// action that rides the snippet writer, so it is only truly active when the
-	// catalog is also enabled (the handler gates on the loaded catalog); the flag
-	// itself is independent so the routes still mount for the completeness tests.
-	DeploymentSetsEnabled bool
-
 	// Optional flat-rate pricing; all cost UI is hidden when unset.
 	PricingCurrency    string
 	PricingVCPUMonth   float64
@@ -163,14 +133,6 @@ func Load() (*Config, error) {
 		SMTPFrom:           strings.TrimSpace(os.Getenv("SMTP_FROM")),
 		SMTPStartTLS:       envBool("SMTP_STARTTLS", true),
 		TOTPIssuer:         envOr("TOTP_ISSUER", "Proxcloud"),
-
-		CatalogEnabled:        envBool("CATALOG_ENABLED", false),
-		ProxmoxNodeSSHHost:    strings.TrimSpace(os.Getenv("PROXMOX_NODE_SSH_HOST")),
-		ProxmoxNodeSSHUser:    strings.TrimSpace(os.Getenv("PROXMOX_NODE_SSH_USER")),
-		ProxmoxNodeSSHKeyPath: strings.TrimSpace(os.Getenv("PROXMOX_NODE_SSH_KEY_PATH")),
-		ProxmoxNodeKnownHosts: strings.TrimSpace(os.Getenv("PROXMOX_NODE_KNOWN_HOSTS")),
-		SnippetDatastore:      envOr("SNIPPET_DATASTORE", "local"),
-		SnippetStoragePath:    envOr("SNIPPET_STORAGE_PATH", "/var/lib/vz/snippets"),
 	}
 	// Behind Caddy in production (ADR-0015), so trust the proxy's forwarded
 	// scheme by default there; explicit override via TRUST_PROXY_HEADERS.
@@ -226,7 +188,6 @@ func Load() (*Config, error) {
 	cfg.SchedulerEnabled = envBool("SCHEDULER_ENABLED", false)
 	cfg.AutoShutdownEnabled = envBool("AUTOSHUTDOWN_ENABLED", false)
 	cfg.TTLEnabled = envBool("TTL_ENABLED", false)
-	cfg.DeploymentSetsEnabled = envBool("DEPLOYMENT_SETS_ENABLED", false)
 	cfg.SchedulerInterval = parseDuration("SCHEDULER_INTERVAL", 30*time.Second, &problems)
 	cfg.AutoShutdownDefaultGrace = parseDuration("AUTOSHUTDOWN_DEFAULT_GRACE", 120*time.Second, &problems)
 	cfg.InvitationTTL = parseDuration("INVITATION_TTL", 72*time.Hour, &problems)
@@ -238,26 +199,6 @@ func Load() (*Config, error) {
 	}
 	if cfg.InsecureCookies && !cfg.Dev {
 		problems = append(problems, "PROXCLOUD_INSECURE_COOKIES must not be set in production")
-	}
-	// When the catalog is enabled, the SSH snippet-writer config must be complete
-	// (host-key verification is mandatory — no insecure fallback). With the flag
-	// off (default) these are inert, so a classic API-token-only deployment boots
-	// without them.
-	if cfg.CatalogEnabled {
-		for _, p := range []struct {
-			val, env string
-		}{
-			{cfg.ProxmoxNodeSSHHost, "PROXMOX_NODE_SSH_HOST"},
-			{cfg.ProxmoxNodeSSHUser, "PROXMOX_NODE_SSH_USER"},
-			{cfg.ProxmoxNodeSSHKeyPath, "PROXMOX_NODE_SSH_KEY_PATH"},
-			{cfg.ProxmoxNodeKnownHosts, "PROXMOX_NODE_KNOWN_HOSTS"},
-			{cfg.SnippetDatastore, "SNIPPET_DATASTORE"},
-			{cfg.SnippetStoragePath, "SNIPPET_STORAGE_PATH"},
-		} {
-			if p.val == "" {
-				problems = append(problems, p.env+" is required when CATALOG_ENABLED=true")
-			}
-		}
 	}
 	if (cfg.ConsoleUser == "") != (cfg.ConsolePassword == "") {
 		problems = append(problems, "PROXMOX_CONSOLE_USER and PROXMOX_CONSOLE_PASSWORD must be set together")

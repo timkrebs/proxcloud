@@ -520,15 +520,13 @@ func scanProject(row pgx.Row) (*Project, error) {
 // created_by is cast to text so a NULL creator scans cleanly into *string.
 const ownershipColumns = `id::text, tenant_id::text, project_id::text, vmid, guest_type,
 	node, created_by::text, status, pve_upid,
-	reserved_vcpu, reserved_ram_mb, reserved_disk_gb, auto_stopped, expired_at,
-	deployment_set_id::text, role, created_at, updated_at`
+	reserved_vcpu, reserved_ram_mb, reserved_disk_gb, auto_stopped, expired_at, created_at, updated_at`
 
 func scanOwnership(row pgx.Row) (*ResourceOwnership, error) {
 	var o ResourceOwnership
 	err := row.Scan(&o.ID, &o.TenantID, &o.ProjectID, &o.VMID, &o.GuestType,
 		&o.Node, &o.CreatedBy, &o.Status, &o.PVEUPID,
-		&o.ReservedVCPU, &o.ReservedRAMMB, &o.ReservedDiskGB, &o.AutoStopped, &o.ExpiredAt,
-		&o.DeploymentSetID, &o.Role, &o.CreatedAt, &o.UpdatedAt)
+		&o.ReservedVCPU, &o.ReservedRAMMB, &o.ReservedDiskGB, &o.AutoStopped, &o.ExpiredAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -743,8 +741,8 @@ func (s *PgStore) GetOwnershipByVMID(ctx context.Context, vmid int) (*ResourceOw
 func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) (*ResourceOwnership, error) {
 	const q = `INSERT INTO resource_ownership
 	             (tenant_id, project_id, vmid, guest_type, node, created_by, status,
-	              reserved_vcpu, reserved_ram_mb, reserved_disk_gb, deployment_set_id, role)
-	           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7, $8, $9, $10, $11::uuid, $12)
+	              reserved_vcpu, reserved_ram_mb, reserved_disk_gb)
+	           VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::uuid, $7, $8, $9, $10)
 	           ON CONFLICT (vmid) DO UPDATE SET
 	             tenant_id       = EXCLUDED.tenant_id,
 	             project_id      = EXCLUDED.project_id,
@@ -755,8 +753,6 @@ func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) 
 	             reserved_vcpu   = EXCLUDED.reserved_vcpu,
 	             reserved_ram_mb = EXCLUDED.reserved_ram_mb,
 	             reserved_disk_gb = EXCLUDED.reserved_disk_gb,
-	             deployment_set_id = EXCLUDED.deployment_set_id,
-	             role            = EXCLUDED.role,
 	             pve_upid        = NULL,
 	             auto_stopped    = false,
 	             expired_at      = NULL,
@@ -765,7 +761,7 @@ func (s *PgStore) CreateOwnership(ctx context.Context, p CreateOwnershipParams) 
 	           RETURNING ` + ownershipColumns
 	o, err := scanOwnership(s.q.QueryRow(ctx, q,
 		p.TenantID, p.ProjectID, p.VMID, p.GuestType, p.Node, p.CreatedBy, p.Status,
-		p.ReservedVCPU, p.ReservedRAMMB, p.ReservedDiskGB, p.DeploymentSetID, p.Role))
+		p.ReservedVCPU, p.ReservedRAMMB, p.ReservedDiskGB))
 	if err != nil {
 		// No row returned means ON CONFLICT matched a live (active/pending) row
 		// that the WHERE refused to revive — a real VMID collision.

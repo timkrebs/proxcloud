@@ -6,7 +6,6 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import type {
-  DeploymentSet,
   MetricsEvent,
   ScheduleWarningEvent,
   TaskEvent,
@@ -93,33 +92,6 @@ export function useEvents() {
         desc: `It will ${verb} ${when} — extend from its Lifecycle settings.`,
       });
       qc.invalidateQueries({ queryKey: ["ttl"] });
-      qc.invalidateQueries({ queryKey: ["resources"] });
-    });
-
-    // Deployment-set progress (ADR-0029). The backend scopes this frame to the
-    // owning tenant (delivered only when every named member VMID is owned), so it
-    // never leaks another tenant's cluster topology. The frame is a full
-    // DeploymentSet snapshot with live member names/statuses/connections, so we
-    // both seed the specific set's detail query (richer than the durable GET,
-    // which lacks names/connection) AND invalidate the list. It carries no secret
-    // — the join token exists only inside the members' rendered snippets.
-    es.addEventListener("deployment_set", (ev) => {
-      let data: DeploymentSet;
-      try {
-        data = JSON.parse((ev as MessageEvent).data) as DeploymentSet;
-      } catch {
-        return;
-      }
-      qc.setQueryData(qk.deploymentSet(activeTenantId ?? undefined, data.id), data);
-      // Invalidate ONLY the list (exact) — NOT the whole prefix, which would
-      // refetch the detail and clobber the just-seeded frame with the durable
-      // GET (which lacks member names/connection). The detail query polls itself
-      // while transitional, so it stays fresh without an extra fetch here.
-      qc.invalidateQueries({
-        queryKey: qk.deploymentSets(activeTenantId ?? undefined),
-        exact: true,
-      });
-      // A member's run/ownership state changed — refresh the resource list too.
       qc.invalidateQueries({ queryKey: ["resources"] });
     });
 

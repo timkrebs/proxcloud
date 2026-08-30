@@ -185,24 +185,6 @@ func buildRegistry() map[routeKey]Rule {
 		{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/{action}", ContributorRule},
 		{http.MethodDelete, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}", ContributorRule},
 		{http.MethodPost, "/api/tenants/{tenantId}/guests/{node}/{type}/{vmid}/console", ContributorRule},
-		// Service catalog (ADR-0026): the gallery is Reader; provisioning is a
-		// Contributor mutation (blocks a Reader from provisioning). {serviceId} is a
-		// global catalog id, resolved by the handler (not ResolveScope).
-		{http.MethodGet, "/api/tenants/{tenantId}/service-catalog", ReaderRule},
-		{http.MethodGet, "/api/tenants/{tenantId}/service-catalog/{serviceId}", ReaderRule},
-		{http.MethodPost, "/api/tenants/{tenantId}/service-catalog/{serviceId}/provision", ContributorRule},
-
-		// Deployment sets (ADR-0029/0030): the sets gallery + detail are Reader; the
-		// mutations (create / start-stop / delete) are Contributor, mirroring the
-		// single-guest surface. {setId} is a tenant-level id resolved by the handler's
-		// own tenant-filtered 404 (not ResolveScope), so it ships an entry here like
-		// every mounted route.
-		{http.MethodGet, "/api/tenants/{tenantId}/deployment-sets", ReaderRule},
-		{http.MethodPost, "/api/tenants/{tenantId}/deployment-sets", ContributorRule},
-		{http.MethodGet, "/api/tenants/{tenantId}/deployment-sets/{setId}", ReaderRule},
-		{http.MethodDelete, "/api/tenants/{tenantId}/deployment-sets/{setId}", ContributorRule},
-		{http.MethodPost, "/api/tenants/{tenantId}/deployment-sets/{setId}/{action}", ContributorRule},
-
 		{http.MethodGet, "/api/tenants/{tenantId}/deployments/{id}", ReaderRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/tasks", ReaderRule},
 		{http.MethodGet, "/api/tenants/{tenantId}/tasks/{upid}", ReaderRule},
