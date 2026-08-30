@@ -19,6 +19,13 @@ repos:
         args: [--allow-multiple-documents]
       - id: check-merge-conflict
       - id: check-added-large-files
+      
+  - repo: https://github.com/gitguardian/ggshield
+    rev: v1.52.2
+    hooks:
+      - id: ggshield
+        language_version: python3
+        stages: [pre-commit]
 
   # Secret scan of staged changes, reusing the repo's .gitleaks.toml.
   - repo: https://github.com/gitleaks/gitleaks
