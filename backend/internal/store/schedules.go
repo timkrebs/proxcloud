@@ -11,13 +11,13 @@ import (
 // scheduleColumns is the canonical SELECT/RETURNING projection for a Schedule
 // (uuid columns cast to text so they scan into Go strings, matching the rest of
 // the store). days_of_week is an integer[] that pgx scans into a Go []int.
-const scheduleColumns = `id::text, scope, tenant_id::text, project_id::text, vmid, set_id::text,
+const scheduleColumns = `id::text, scope, tenant_id::text, project_id::text, vmid,
 	shutdown_time, auto_start_time, days_of_week, timezone, grace_seconds, enabled, opt_out,
 	created_by::text, created_at, updated_at`
 
 func scanSchedule(row pgx.Row) (*Schedule, error) {
 	var s Schedule
-	err := row.Scan(&s.ID, &s.Scope, &s.TenantID, &s.ProjectID, &s.VMID, &s.SetID,
+	err := row.Scan(&s.ID, &s.Scope, &s.TenantID, &s.ProjectID, &s.VMID,
 		&s.ShutdownTime, &s.AutoStartTime, &s.DaysOfWeek, &s.Timezone, &s.GraceSeconds,
 		&s.Enabled, &s.OptOut, &s.CreatedBy, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -154,61 +154,6 @@ func (s *PgStore) DeleteProjectSchedule(ctx context.Context, tenantID, projectID
 	tag, err := s.q.Exec(ctx, q, tenantID, projectID)
 	if err != nil {
 		return fmt.Errorf("store: delete project schedule: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// UpsertSetSchedule implements ScheduleStore (ADR-0029). The ON CONFLICT target
-// infers the partial unique index schedules_set_uidx (tenant_id, set_id) WHERE
-// scope='set'. A set schedule never opts out (opt_out stays false).
-func (s *PgStore) UpsertSetSchedule(ctx context.Context, p UpsertSetScheduleParams) (*Schedule, error) {
-	const q = `INSERT INTO schedules
-	             (scope, tenant_id, project_id, vmid, set_id, shutdown_time, auto_start_time,
-	              days_of_week, timezone, grace_seconds, enabled, opt_out, created_by)
-	           VALUES ('set', $1::uuid, $2::uuid, NULL, $3::uuid, $4, $5, $6, $7, $8, $9, false, $10::uuid)
-	           ON CONFLICT (tenant_id, set_id) WHERE scope = 'set'
-	           DO UPDATE SET
-	             project_id      = EXCLUDED.project_id,
-	             shutdown_time   = EXCLUDED.shutdown_time,
-	             auto_start_time = EXCLUDED.auto_start_time,
-	             days_of_week    = EXCLUDED.days_of_week,
-	             timezone        = EXCLUDED.timezone,
-	             grace_seconds   = EXCLUDED.grace_seconds,
-	             enabled         = EXCLUDED.enabled,
-	             updated_at      = now()
-	           RETURNING ` + scheduleColumns
-	sched, err := scanSchedule(s.q.QueryRow(ctx, q,
-		p.TenantID, p.ProjectID, p.SetID, p.ShutdownTime, p.AutoStartTime,
-		p.DaysOfWeek, p.Timezone, p.GraceSeconds, p.Enabled, p.CreatedBy))
-	if err != nil {
-		return nil, fmt.Errorf("store: upsert set schedule: %w", err)
-	}
-	return sched, nil
-}
-
-// GetSetSchedule implements ScheduleStore.
-func (s *PgStore) GetSetSchedule(ctx context.Context, tenantID, setID string) (*Schedule, error) {
-	const q = `SELECT ` + scheduleColumns + ` FROM schedules
-	           WHERE scope = 'set' AND tenant_id = $1::uuid AND set_id = $2::uuid`
-	sched, err := scanSchedule(s.q.QueryRow(ctx, q, tenantID, setID))
-	if errors.Is(err, ErrNotFound) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: get set schedule: %w", err)
-	}
-	return sched, nil
-}
-
-// DeleteSetSchedule implements ScheduleStore.
-func (s *PgStore) DeleteSetSchedule(ctx context.Context, tenantID, setID string) error {
-	const q = `DELETE FROM schedules WHERE scope = 'set' AND tenant_id = $1::uuid AND set_id = $2::uuid`
-	tag, err := s.q.Exec(ctx, q, tenantID, setID)
-	if err != nil {
-		return fmt.Errorf("store: delete set schedule: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

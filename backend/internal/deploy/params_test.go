@@ -118,100 +118,6 @@ func TestBuildCreateParamsVM(t *testing.T) {
 	})
 }
 
-// imageReq is a qemu create from a cloud image imported as the boot disk (the
-// catalog's real path), rather than an installer ISO on a CD-ROM.
-func imageReq() *types.CreateGuestRequest {
-	return &types.CreateGuestRequest{
-		Type: "qemu", Name: "pg-01", Node: "pve01", VMID: 106,
-		Source: types.CreateSource{Mode: "image", ImageVolID: "local:iso/proxcloud-ubuntu-24.04.img"},
-		Cores:  2, MemoryMB: 2048, DiskGB: 16, Storage: "local-lvm", Bridge: "vmbr0",
-	}
-}
-
-// TestBuildCreateParamsImage locks the fix for the "VM never boots" bug: a cloud
-// image must be imported as the boot DISK (scsi0 import-from), NOT attached as a
-// CD-ROM (ide2). Nothing boots off a raw cloud .img on a CD-ROM.
-func TestBuildCreateParamsImage(t *testing.T) {
-	p, err := BuildCreateParams(imageReq())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p["scsi0"] != "local-lvm:0,import-from=local:iso/proxcloud-ubuntu-24.04.img" {
-		t.Errorf("scsi0 = %v, want import-from the cloud image", p["scsi0"])
-	}
-	if p["boot"] != "order=scsi0" {
-		t.Errorf("boot = %v, want order=scsi0 (disk boot, no CD-ROM)", p["boot"])
-	}
-	// A raw cloud image is not a bootable optical image — there must be NO CD-ROM.
-	if _, ok := p["ide2"]; ok {
-		t.Errorf("image mode must NOT set an ide2 CD-ROM (got %v)", p["ide2"])
-	}
-}
-
-func TestBuildCreateParamsCatalog(t *testing.T) {
-	req := imageReq()
-	req.StartAfterCreate = true
-	req.Catalog = &types.CatalogProvision{
-		ServiceID:  "postgresql",
-		SnippetRef: "local:snippets/proxcloud-106-postgresql.yaml",
-		Ports:      []int{5432},
-	}
-	req.IPConfig = &types.IPConfig{Mode: "dhcp"}
-
-	p, err := BuildCreateParams(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The image is imported as the boot disk; there is no CD-ROM.
-	if p["scsi0"] != "local-lvm:0,import-from=local:iso/proxcloud-ubuntu-24.04.img" {
-		t.Errorf("scsi0 = %v, want import-from the cloud image", p["scsi0"])
-	}
-	if _, ok := p["ide2"]; ok {
-		t.Errorf("catalog (image) create must NOT set an ide2 CD-ROM (got %v)", p["ide2"])
-	}
-	// cicustom points at the rendered snippet, and the cloud-init drive stays.
-	if p["cicustom"] != "user=local:snippets/proxcloud-106-postgresql.yaml" {
-		t.Errorf("cicustom = %v", p["cicustom"])
-	}
-	if p["ide0"] != "local-lvm:cloudinit" {
-		t.Errorf("ide0 = %v, want the cloud-init drive kept", p["ide0"])
-	}
-	if p["ipconfig0"] != "ip=dhcp" {
-		t.Errorf("ipconfig0 = %v, want dhcp (network survives cicustom user=)", p["ipconfig0"])
-	}
-	// The inline identity params MUST be absent — PVE drops them when cicustom
-	// user= is set, and emitting them would be a silent footgun (ADR-0025 §1.4).
-	for _, k := range []string{"ciuser", "cipassword", "sshkeys"} {
-		if _, ok := p[k]; ok {
-			t.Errorf("catalog create must NOT emit inline %q (cicustom user= drops it)", k)
-		}
-	}
-}
-
-func TestValidateCatalog(t *testing.T) {
-	t.Run("lxc catalog rejected", func(t *testing.T) {
-		req := lxcReq()
-		req.Catalog = &types.CatalogProvision{ServiceID: "x", SnippetRef: "local:snippets/proxcloud-1.yaml"}
-		if err := Validate(req); err == nil || !strings.Contains(err.Error(), "qemu-only") {
-			t.Fatalf("err = %v, want qemu-only", err)
-		}
-	})
-	t.Run("bad snippet ref rejected", func(t *testing.T) {
-		req := vmReq()
-		req.Catalog = &types.CatalogProvision{ServiceID: "x", SnippetRef: "/abs/path.yaml"}
-		if err := Validate(req); err == nil || !strings.Contains(err.Error(), "snippetRef") {
-			t.Fatalf("err = %v, want snippetRef", err)
-		}
-	})
-	t.Run("valid catalog accepted", func(t *testing.T) {
-		req := vmReq()
-		req.Catalog = &types.CatalogProvision{ServiceID: "postgresql", SnippetRef: "local:snippets/proxcloud-106-postgresql.yaml"}
-		if err := Validate(req); err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-	})
-}
-
 func TestBuildCloneParams(t *testing.T) {
 	base := func(mode string) *types.CreateGuestRequest {
 		return &types.CreateGuestRequest{
@@ -254,15 +160,6 @@ func TestValidateRejects(t *testing.T) {
 			r.Source = types.CreateSource{Mode: "iso", ISOVolID: "x"}
 		}, "only valid for qemu"},
 		{"missing template", func(r *types.CreateGuestRequest) { r.Type = "lxc"; r.Source = types.CreateSource{Mode: "vztmpl"} }, "template volume"},
-		{"image on lxc", func(r *types.CreateGuestRequest) {
-			r.Type = "lxc"
-			r.Source = types.CreateSource{Mode: "image", ImageVolID: "local:iso/x.img"}
-		}, "only valid for qemu"},
-		{"missing image volume", func(r *types.CreateGuestRequest) { r.Source = types.CreateSource{Mode: "image"} }, "image volume"},
-		{"bad image volid", func(r *types.CreateGuestRequest) {
-			r.Source = types.CreateSource{Mode: "image", ImageVolID: "not a volid"}
-		}, "image volume id"},
-		{"unknown source mode", func(r *types.CreateGuestRequest) { r.Source = types.CreateSource{Mode: "bogus"} }, "iso, image, vztmpl, or clone"},
 		{"bad cidr", func(r *types.CreateGuestRequest) { r.IPConfig = &types.IPConfig{Mode: "static", CIDR: "not-a-cidr"} }, "CIDR"},
 		{"bad tag", func(r *types.CreateGuestRequest) { r.Tags = []string{"Bad Tag"} }, "tag"},
 		{"bad vlan", func(r *types.CreateGuestRequest) { r.VLANTag = 5000 }, "vlan"},

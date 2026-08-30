@@ -58,7 +58,6 @@ type Store interface {
 	JobStore
 	ScheduleStore
 	TTLStore
-	DeploymentSetStore
 }
 
 // UserStore is the users aggregate.
@@ -414,53 +413,6 @@ type ScheduleStore interface {
 	// DeleteProjectSchedule removes a (tenant, project)'s project-scope schedule.
 	// ErrNotFound if there is none.
 	DeleteProjectSchedule(ctx context.Context, tenantID, projectID string) error
-	// UpsertSetSchedule inserts or replaces the set-scope schedule for a
-	// (tenant, set) (INSERT … ON CONFLICT (tenant_id, set_id) WHERE scope='set')
-	// and returns the stored row (ADR-0029). A set schedule fans out to member VMIDs.
-	UpsertSetSchedule(ctx context.Context, p UpsertSetScheduleParams) (*Schedule, error)
-	// GetSetSchedule returns the set-scope schedule for a (tenant, set), or ErrNotFound.
-	GetSetSchedule(ctx context.Context, tenantID, setID string) (*Schedule, error)
-	// DeleteSetSchedule removes a (tenant, set)'s set-scope schedule. ErrNotFound
-	// if there is none.
-	DeleteSetSchedule(ctx context.Context, tenantID, setID string) error
-}
-
-// DeploymentSetStore is the deployment-set aggregate (ADR-0029): the durable
-// grouping of N member guests provisioned by one catalog action and sharing one
-// lifecycle. Membership itself lives on resource_ownership (deployment_set_id +
-// role); this store owns the set row and the atomic multi-guest reservation.
-type DeploymentSetStore interface {
-	// CreateDeploymentSet inserts a set row (status defaults to 'provisioning')
-	// and returns it. The composite tenant/project isolation is enforced by the FK.
-	CreateDeploymentSet(ctx context.Context, p CreateDeploymentSetParams) (*DeploymentSet, error)
-	// GetDeploymentSet returns the set with the given id scoped to tenantID, or
-	// ErrNotFound. The tenant filter is in SQL (belt-and-suspenders); the caller
-	// still does its OWN 404 so a cross-tenant id is an indistinguishable 404.
-	GetDeploymentSet(ctx context.Context, tenantID, id string) (*DeploymentSet, error)
-	// ListDeploymentSets returns a tenant's sets (tenant filter in SQL), newest first.
-	ListDeploymentSets(ctx context.Context, tenantID string) ([]DeploymentSet, error)
-	// ListSetMembers returns the set's member ownership rows (deployment_set_id
-	// filter in SQL, joined through the set for the tenant scope), ordered by role
-	// then vmid so 'agent' rows sort before 'server' — the reverse-teardown order
-	// (ADR-0030). A cross-tenant setID returns no members.
-	ListSetMembers(ctx context.Context, tenantID, setID string) ([]ResourceOwnership, error)
-	// UpdateSetStatus transitions a set to a new lifecycle status (durable truth
-	// that survives a backend restart, unlike an in-memory Deployment). Tenant-scoped
-	// in SQL. ErrNotFound if the set id does not exist for the tenant.
-	UpdateSetStatus(ctx context.Context, tenantID, id, status string) error
-	// DeleteDeploymentSet removes the set row (the final step of a set teardown,
-	// after every member is destroyed/tombstoned). Members' deployment_set_id is
-	// nulled by the FK's ON DELETE SET NULL. Tenant-scoped in SQL; ErrNotFound if gone.
-	DeleteDeploymentSet(ctx context.Context, tenantID, id string) error
-	// ReserveOwnershipBatch reserves ALL N members or none, under ONE
-	// AdvisoryLock(AdvisoryKeyTenant) (ADR-0029): it computes usage once, then folds
-	// each member's delta into the running usage before checking the next member's
-	// quota (checkQuota hardcodes +1 count, so the batch must accumulate), and on
-	// success inserts N pending resource_ownership rows tagged with the set id +
-	// role. The first member that would exceed any project/tenant dimension returns
-	// a single ErrQuotaExceeded and rolls back the whole batch — no partial cluster
-	// is ever reserved, and the decision is made BEFORE any Proxmox call.
-	ReserveOwnershipBatch(ctx context.Context, p ReserveOwnershipBatchParams) ([]ResourceOwnership, error)
 }
 
 // Schedule is one durable auto-shutdown definition (ADR-0019). VMID is set only
@@ -469,11 +421,10 @@ type DeploymentSetStore interface {
 // guest from the project schedule (emits no jobs).
 type Schedule struct {
 	ID            string
-	Scope         string // "resource" | "project" | "set"
+	Scope         string // "resource" | "project"
 	TenantID      string
 	ProjectID     string
 	VMID          *int
-	SetID         *string // set only for scope 'set' (ADR-0029)
 	ShutdownTime  string  // "HH:MM"
 	AutoStartTime *string // "HH:MM"; nil = no auto-start
 	DaysOfWeek    []int   // 0..6 (Sun..Sat)
@@ -513,67 +464,6 @@ type UpsertProjectScheduleParams struct {
 	GraceSeconds  int
 	Enabled       bool
 	CreatedBy     *string
-}
-
-// UpsertSetScheduleParams are the inputs to UpsertSetSchedule (ADR-0029). A set
-// schedule applies to every member of the set (fan-out to member VMIDs); like a
-// project schedule it cannot opt out. ProjectID is the set's project (carried so
-// the row satisfies the composite FK to projects).
-type UpsertSetScheduleParams struct {
-	TenantID      string
-	ProjectID     string
-	SetID         string
-	ShutdownTime  string
-	AutoStartTime *string
-	DaysOfWeek    []int
-	Timezone      string
-	GraceSeconds  int
-	Enabled       bool
-	CreatedBy     *string
-}
-
-// DeploymentSet is one catalog action that created N linked guests sharing a
-// lifecycle (ADR-0029). Status is the durable truth (survives a backend restart,
-// unlike an in-memory Deployment). Members live on resource_ownership.
-type DeploymentSet struct {
-	ID        string
-	TenantID  string
-	ProjectID string
-	ServiceID string
-	Status    string // provisioning | ready | degraded | failed | deleting
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
-// CreateDeploymentSetParams are the inputs to CreateDeploymentSet. Status defaults
-// to 'provisioning' in the DB when empty.
-type CreateDeploymentSetParams struct {
-	TenantID  string
-	ProjectID string
-	ServiceID string
-	Status    string // "" -> DB default ('provisioning')
-}
-
-// BatchMember is one member of a ReserveOwnershipBatch: its VMID + role + the
-// provisioned allocation to reserve.
-type BatchMember struct {
-	VMID      int
-	GuestType string // "qemu" | "lxc"
-	Node      string
-	Role      string // "server" | "agent"
-	Reserved  Alloc
-}
-
-// ReserveOwnershipBatchParams are the inputs to ReserveOwnershipBatch. Snapshot is
-// the active-guest allocation map fetched BEFORE the lock (no PVE round-trip under
-// the advisory lock, ADR-0009). SetID tags every reserved member row.
-type ReserveOwnershipBatchParams struct {
-	TenantID  string
-	ProjectID string
-	SetID     string
-	CreatedBy *string
-	Snapshot  map[int]Alloc
-	Members   []BatchMember
 }
 
 // TTLStore is the TTL / ephemeral-resource aggregate (ADR-0020): a guest's
@@ -713,10 +603,6 @@ type CreateOwnershipParams struct {
 	ReservedVCPU   *int
 	ReservedRAMMB  *int64
 	ReservedDiskGB *int64
-	// DeploymentSetID + Role tag a set member (ADR-0029); nil for a standalone
-	// guest. ReserveOwnershipBatch sets them on each pending member row.
-	DeploymentSetID *string
-	Role            *string
 }
 
 // Alloc is a single guest's resource allocation, in quota units and PVE-free:
@@ -869,14 +755,8 @@ type ResourceOwnership struct {
 	// from a user-stop and an auto-shutdown stop; nil = not expired. Reversible:
 	// a user-initiated start clears it.
 	ExpiredAt *time.Time
-	// DeploymentSetID names the deployment set this row is a member of (ADR-0029),
-	// or nil for a standalone guest. Role is 'server' | 'agent' for a set member,
-	// nil otherwise. Membership is a nullable FK on this row, not a parallel table,
-	// so all existing ownership behaviour keeps working on a member unchanged.
-	DeploymentSetID *string
-	Role            *string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Quota holds per-scope limits; a nil field means unlimited.

@@ -36,8 +36,8 @@ func TestRunMigrationsCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunMigrations (first): %v", err)
 	}
-	if v1 != 8 {
-		t.Fatalf("expected schema version 8, got %d", v1)
+	if v1 != 7 {
+		t.Fatalf("expected schema version 7, got %d", v1)
 	}
 
 	// Idempotency: a second run is a no-op landing on the same version.
@@ -51,7 +51,7 @@ func TestRunMigrationsCreatesSchemaAndIsIdempotent(t *testing.T) {
 
 	// Every table from the data model must exist.
 	want := []string{
-		"audit_log", "deployment_set", "invitations", "jobs", "login_challenges", "memberships", "project_ttl_policy", "projects",
+		"audit_log", "invitations", "jobs", "login_challenges", "memberships", "project_ttl_policy", "projects",
 		"quotas", "recovery_codes", "resource_ownership", "schedules", "sessions", "tenants",
 		"totp_secrets", "ttls", "users",
 	}
