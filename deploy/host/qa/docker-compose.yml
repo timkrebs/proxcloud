@@ -43,6 +43,15 @@ services:
       LISTEN_ADDR: ":8080"
     ports:
       - "127.0.0.1:8080:8080"   # loopback only — health checks + smoke, not public
+    volumes:
+      # Service-catalog snippet-writer credentials (ADR-0025), backend-only,
+      # read-only. Holds id_ed25519 + known_hosts for the dedicated least-priv
+      # SSH user that writes cloud-init snippets to pve01. Harmless while empty:
+      # the backend DEGRADES (catalog provisioning → 503) if the key is missing.
+      # Files inside MUST be readable by UID 65532 (distroless nonroot) — mirror
+      # the postgres ./tls precedent: chown 65532:65532, chmod 400 the key.
+      # Placed + flipped on per docs/runbooks/enable-service-catalog-qa.md.
+      - ./snippet-writer:/etc/proxcloud/snippet-writer:ro
     depends_on:
       postgres:
         condition: service_healthy
