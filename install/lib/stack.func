@@ -1,0 +1,136 @@
+# shellcheck shell=bash
+# Proxcloud installer — render + deploy the compose stack (ADR-0031 §7/§11).
+#
+# Sourced by install/install.sh. Renders .env / docker-compose.yml / Caddyfile
+# into a 0700 host staging dir, pushes them via guest_push_stack, brings the
+# stack up with discrete `pct exec docker compose` steps, and enforces the
+# health gate — success is a 200 from the backend plus a matching semver,
+# never a zero exit from `compose up` (iron rule 5 applies to the installer).
+#
+# Exports: PC_PORTAL_URL (byte-identical to FRONTEND_ORIGIN by construction)
+
+# SC2034: the env-contract variables assigned below look "unused" but are
+# consumed by render() via ${!name} indirection (and swept into the redaction
+# set by name). Deliberately NOT exported — they must not leak into the
+# environment of child processes (pct/curl).
+# shellcheck disable=SC2034
+stack_deploy() {
+  # ── Secrets: openssl rand only (ADR-0032 §6); auto-redacted by name. ──────
+  POSTGRES_PASSWORD="$(secret_gen hex 24)"
+  SECRETS_KEY="$(secret_gen hex 64)"          # 32 bytes hex — config.go contract
+  ADMIN_PASSWORD="$(secret_gen alnum 20)"
+  ADMIN_USER="admin"
+
+  # ── Derived, non-secret settings ──────────────────────────────────────────
+  # backend → PVE hop only: PVE ships a self-signed cert by default, so the
+  # backend must skip verification on that ONE hop. Portal traffic is not
+  # affected. Advanced mode's proper-TLS options arrive in a later release.
+  PROXMOX_URL="https://${PC_PVE_HOST_IP:?}:8006"
+  PROXMOX_TOKEN_ID="${PC_PROXMOX_TOKEN_ID:?}"
+  PROXMOX_TOKEN_SECRET="${PC_PROXMOX_TOKEN_SECRET:?}"
+  PROXMOX_CONSOLE_USER="${PC_CONSOLE_USER-}"
+  PROXMOX_CONSOLE_PASSWORD="${PC_CONSOLE_PASSWORD-}"
+
+  # FRONTEND_ORIGIN and the printed portal URL derive from the SAME variable —
+  # originCheck compares exactly (router.go:199-202), so they must never diverge.
+  FRONTEND_ORIGIN="http://${PC_GUEST_IP:?}"
+  PC_PORTAL_URL="$FRONTEND_ORIGIN"
+  export PC_PORTAL_URL
+
+  mark_validated POSTGRES_PASSWORD SECRETS_KEY ADMIN_PASSWORD ADMIN_USER \
+    PROXMOX_URL PROXMOX_TOKEN_ID PROXMOX_TOKEN_SECRET \
+    PROXMOX_CONSOLE_USER PROXMOX_CONSOLE_PASSWORD FRONTEND_ORIGIN
+
+  # ── Render into a private staging dir (cleaned by the orchestrator trap) ──
+  PC_RENDER_DIR="$(mktemp -d)"
+  chmod 0700 "$PC_RENDER_DIR"
+  export PC_RENDER_DIR
+
+  render "$PC_PAYLOAD_DIR/guest/env.template"       "$PC_RENDER_DIR/.env"
+  chmod 0600 "$PC_RENDER_DIR/.env"
+  render "$PC_PAYLOAD_DIR/guest/docker-compose.yml" "$PC_RENDER_DIR/docker-compose.yml"
+  render "$PC_PAYLOAD_DIR/guest/Caddyfile.http"     "$PC_RENDER_DIR/Caddyfile"
+  cp "$PC_PAYLOAD_DIR/versions.env"                 "$PC_RENDER_DIR/versions.env"
+
+  guest_push_stack "$PC_RENDER_DIR"
+
+  # ── Bring-up: discrete steps so a failure names its step ──────────────────
+  log "pulling images (${IMAGE_BACKEND}:${APP_SEMVER}, ${IMAGE_FRONTEND}:${APP_SEMVER})"
+  run pct exec "$PC_VMID" -- bash -c \
+    'cd /opt/proxcloud && docker compose -p proxcloud pull'
+  log "starting the stack"
+  run pct exec "$PC_VMID" -- bash -c \
+    'cd /opt/proxcloud && docker compose -p proxcloud up -d'
+
+  _stack_health_gate
+  _stack_edge_check
+}
+
+# _stack_health_gate — poll the backend in-guest (5 min), then assert the
+# running semver matches APP_SEMVER. On failure, dump the backend log tail
+# and the exact command to re-read it (ADR-0031 §11).
+_stack_health_gate() {
+  log "health gate: waiting for the backend (up to 300s)"
+  local deadline healthy=0
+  deadline=$(( $(date +%s) + 300 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if pct exec "$PC_VMID" -- curl -fsS -o /dev/null --max-time 5 \
+        http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 5
+  done
+  if [ "$healthy" -ne 1 ]; then
+    warn "backend never became healthy — last 50 backend log lines:"
+    pct exec "$PC_VMID" -- bash -c \
+      'cd /opt/proxcloud && docker compose -p proxcloud logs --tail 50 backend' 2>&1 \
+      | tail -n 60 >&2 || true
+    die "health gate FAILED: no 200 from http://127.0.0.1:8080/api/health in the guest within 300s.
+  Re-read logs with:
+    pct exec $PC_VMID -- bash -c 'cd /opt/proxcloud && docker compose -p proxcloud logs backend'"
+  fi
+  log "backend is healthy"
+
+  if [ "$APP_SEMVER" = "dev" ]; then
+    warn "APP_SEMVER=dev — skipping the version assertion (non-release run)"
+    return 0
+  fi
+  # Release tags assert .semver; a 40-hex SHA tag (PC_SOURCE=local E2E against
+  # a main build) asserts .commit instead — SHA builds report semver
+  # 0.0.0-dev+<sha12>, so comparing semver would always fail (mirrors the
+  # deploy.sh ref-kind switch).
+  local field="semver"
+  case "$APP_SEMVER" in
+    *[!0-9a-f]*) ;;                                  # not pure hex → semver tag
+    ????????????????????????????????????????) field="commit" ;;  # 40-hex SHA
+  esac
+  local got
+  got="$(pct exec "$PC_VMID" -- bash -c \
+    "curl -fsS http://127.0.0.1:8080/api/v1/version | jq -r .${field}" 2>/dev/null)" || got=""
+  if [ "$got" != "$APP_SEMVER" ]; then
+    die "health gate FAILED: backend reports ${field} '${got:-<none>}', expected '$APP_SEMVER'.
+  The stack is running a different build than this installer shipped — do not
+  trust this deployment. Re-run the installer, pinning PC_VERSION if needed."
+  fi
+  log "version gate OK: backend ${field} = $got"
+}
+
+# _stack_edge_check — host-side probe through Caddy at the exact URL the
+# summary will print. This is the user's first click, tested for them.
+_stack_edge_check() {
+  local deadline
+  deadline=$(( $(date +%s) + 60 ))
+  while :; do
+    if curl -fsS -o /dev/null --max-time 5 "${PC_PORTAL_URL}/" 2>/dev/null; then
+      log "edge check OK: ${PC_PORTAL_URL}/ answers through Caddy"
+      return 0
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep 3
+  done
+  die "edge check FAILED: ${PC_PORTAL_URL}/ did not answer from the host.
+  The backend is healthy but the Caddy edge is not reachable — check
+    pct exec $PC_VMID -- bash -c 'cd /opt/proxcloud && docker compose -p proxcloud logs caddy'
+  and any firewall between this host and $PC_GUEST_IP."
+}

@@ -1,0 +1,198 @@
+# shellcheck shell=bash
+# Proxcloud installer — LXC guest creation (ADR-0031 §3/§4).
+#
+# Sourced by install/install.sh. Validates every guest input AT INTAKE (the
+# only line of defence — nothing user-supplied is interpolated before it
+# passes here), creates the unprivileged nesting+keyctl LXC, waits for DHCP,
+# gates on DNS and guest→PVE-API reachability, installs Docker, and prepares
+# /opt/proxcloud (dirs + in-guest Postgres TLS cert).
+#
+# Exports: PC_VMID PC_HOSTNAME PC_BRIDGE PC_STORAGE_ROOTFS PC_STORAGE_TMPL
+#          PC_CORES PC_MEMORY PC_DISK_GB PC_GUEST_IP
+
+# _vint <NAME> <min> <max> <what> — integer range validator; marks validated.
+_vint() {
+  local name="${1:?}" min="${2:?}" max="${3:?}" what="${4:?}" val
+  val="${!name:-}"
+  case "$val" in (''|*[!0-9]*) die "invalid $what: '$val' (not a number)";; esac
+  { [ "$val" -ge "$min" ] && [ "$val" -le "$max" ]; } \
+    || die "invalid $what: $val (allowed: $min-$max)"
+  mark_validated "$name"
+}
+
+# _in_list <needle> <hay...> — allowlist membership.
+_in_list() {
+  local needle="$1" x; shift
+  for x in "$@"; do [ "$x" = "$needle" ] && return 0; done
+  return 1
+}
+
+# guest_validate_inputs — intake validation for everything guest-shaped.
+guest_validate_inputs() {
+  validate PC_HOSTNAME '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$' "hostname"
+
+  validate PC_STORAGE_ROOTFS '^[A-Za-z0-9][A-Za-z0-9_.-]*$' "rootfs storage id"
+  _in_list "$PC_STORAGE_ROOTFS" "${PC_STORAGE_ROOTFS_OPTS[@]}" \
+    || die "storage '$PC_STORAGE_ROOTFS' is not an active storage with content 'rootdir' (allowed: ${PC_STORAGE_ROOTFS_OPTS[*]})"
+
+  validate PC_STORAGE_TMPL '^[A-Za-z0-9][A-Za-z0-9_.-]*$' "template storage id"
+  _in_list "$PC_STORAGE_TMPL" "${PC_STORAGE_TMPL_OPTS[@]}" \
+    || die "storage '$PC_STORAGE_TMPL' is not an active storage with content 'vztmpl' (allowed: ${PC_STORAGE_TMPL_OPTS[*]})"
+
+  validate PC_BRIDGE '^vmbr[0-9]{1,4}$' "bridge"
+  _in_list "$PC_BRIDGE" "${PC_BRIDGE_OPTS[@]}" \
+    || die "bridge '$PC_BRIDGE' does not exist on this host (found: ${PC_BRIDGE_OPTS[*]})"
+
+  if [ -z "${PC_VMID:-}" ]; then
+    PC_VMID="$(pvesh get /cluster/nextid 2>/dev/null)" \
+      || die "pvesh get /cluster/nextid failed — cannot pick a free VMID"
+  fi
+  _vint PC_VMID 100 999999999 "VMID"
+  if pct status "$PC_VMID" >/dev/null 2>&1; then
+    die "VMID $PC_VMID is already in use — pass PC_VMID=<free id> or let the installer pick one"
+  fi
+
+  _vint PC_CORES 1 64 "cores"
+  _vint PC_MEMORY 1024 262144 "memory (MB)"
+  _vint PC_DISK_GB 8 2048 "disk (GB)"
+
+  export PC_VMID PC_HOSTNAME PC_BRIDGE PC_STORAGE_ROOTFS PC_STORAGE_TMPL PC_CORES PC_MEMORY PC_DISK_GB
+}
+
+# _guest_template — newest debian-12-standard from `pveam available`,
+# downloaded to PC_STORAGE_TMPL when absent (never a hardcoded filename that
+# rots on a point release — ADR-0031 §3). Sets PC_TEMPLATE_REF.
+_guest_template() {
+  run pveam update
+  local tmpl
+  tmpl="$(pveam available --section system 2>/dev/null \
+    | awk '$2 ~ /^debian-12-standard/ {print $2}' | sort -V | tail -n1)"
+  [ -n "$tmpl" ] \
+    || die "no debian-12-standard template in 'pveam available' — check the host's template mirror / internet access"
+  if pveam list "$PC_STORAGE_TMPL" 2>/dev/null | awk '{print $1}' | grep -qF "vztmpl/$tmpl"; then
+    log "template $tmpl already present on $PC_STORAGE_TMPL"
+  else
+    log "downloading template $tmpl to $PC_STORAGE_TMPL (this can take a minute)"
+    run pveam download "$PC_STORAGE_TMPL" "$tmpl"
+  fi
+  PC_TEMPLATE_REF="${PC_STORAGE_TMPL}:vztmpl/${tmpl}"
+}
+
+guest_create() {
+  guest_validate_inputs
+  _guest_template
+
+  # ── Create: ONE argv array; unprivileged + nesting,keyctl (both, or Docker
+  #    dies on first pull — ADR-0031 §3); tag 'proxcloud' is load-bearing for
+  #    re-run detection and uninstall. ────────────────────────────────────────
+  log "creating LXC $PC_VMID ($PC_HOSTNAME): ${PC_CORES}c/${PC_MEMORY}MB/${PC_DISK_GB}GB on $PC_STORAGE_ROOTFS, bridge $PC_BRIDGE (DHCP)"
+  run pct create "$PC_VMID" "$PC_TEMPLATE_REF" \
+    --hostname "$PC_HOSTNAME" \
+    --unprivileged 1 \
+    --features nesting=1,keyctl=1 \
+    --ostype debian \
+    --cores "$PC_CORES" \
+    --memory "$PC_MEMORY" \
+    --swap 512 \
+    --rootfs "${PC_STORAGE_ROOTFS}:${PC_DISK_GB}" \
+    --net0 "name=eth0,bridge=${PC_BRIDGE},ip=dhcp,firewall=0" \
+    --onboot 1 \
+    --tags proxcloud
+
+  run pct start "$PC_VMID"
+
+  # ── Wait for a global IPv4 on eth0 (DHCP), 120s ───────────────────────────
+  log "waiting for the guest to obtain a DHCP lease on eth0 (up to 120s)"
+  local deadline ip=""
+  deadline=$(( $(date +%s) + 120 ))
+  while :; do
+    ip="$(pct exec "$PC_VMID" -- ip -4 -o addr show dev eth0 scope global 2>/dev/null \
+      | awk '{print $4}' | cut -d/ -f1 | head -n1)" || ip=""
+    [ -n "$ip" ] && break
+    [ "$(date +%s)" -lt "$deadline" ] || die "guest $PC_VMID got no IPv4 on eth0 within 120s.
+  Is there a DHCP server on bridge $PC_BRIDGE? Check with:
+    pct exec $PC_VMID -- ip addr show eth0
+  or use Advanced mode with a static IP in a later release."
+    sleep 3
+  done
+  PC_GUEST_IP="$ip"
+  validate PC_GUEST_IP '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' "guest IP"
+  export PC_GUEST_IP
+  log "guest IP: $PC_GUEST_IP"
+
+  # ── DNS gate: the compose pull needs ghcr.io to resolve in-guest ──────────
+  if ! pct exec "$PC_VMID" -- getent hosts ghcr.io >/dev/null 2>&1; then
+    die "the guest cannot resolve ghcr.io — DNS inside the container is broken.
+  Check the DHCP-provided resolver: pct exec $PC_VMID -- cat /etc/resolv.conf"
+  fi
+  log "DNS gate OK (ghcr.io resolves in-guest)"
+
+  # ── Back-check: the backend will call https://$PC_PVE_HOST_IP:8006 ────────
+  if ! pct exec "$PC_VMID" -- curl -ksS -o /dev/null --max-time 10 \
+      "https://${PC_PVE_HOST_IP}:8006" >/dev/null 2>&1; then
+    die "the guest cannot reach the PVE API at https://${PC_PVE_HOST_IP}:8006 —
+  the backend would boot but every Proxmox call would fail. Check firewall
+  rules between bridge $PC_BRIDGE and the host, then re-run."
+  fi
+  log "guest → PVE API reachability OK (https://${PC_PVE_HOST_IP}:8006)"
+
+  _guest_install_docker
+  _guest_prepare_dirs
+}
+
+# _guest_install_docker — mirrors deploy/host/common/bin/first-boot.sh logic
+# (base packages, get.docker.com when docker is absent, enable+start). NOTE:
+# no `deploy` user on purpose — the stack runs as in-container root, a
+# deliberate, recorded deviation (ADR-0031 §5).
+_guest_install_docker() {
+  log "installing base packages + Docker in the guest (a few minutes on first run)"
+  run pct exec "$PC_VMID" -- bash -c \
+    'export DEBIAN_FRONTEND=noninteractive; apt-get update -y'
+  run pct exec "$PC_VMID" -- bash -c \
+    'export DEBIAN_FRONTEND=noninteractive; apt-get install -y ca-certificates curl jq openssl'
+  run pct exec "$PC_VMID" -- bash -c \
+    'command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh'
+  run pct exec "$PC_VMID" -- systemctl enable --now docker
+}
+
+# _guest_prepare_dirs — /opt/proxcloud layout + the in-guest self-signed
+# Postgres TLS cert (gen-postgres-cert.sh recipe: config.go fails closed when
+# PROXCLOUD_ENV=production and DATABASE_URL is not TLS; sslmode=require
+# encrypts without CA verification, so self-signed suffices; uid/gid 70 = the
+# postgres user in postgres:16-alpine; key MUST be 600 or Postgres refuses).
+_guest_prepare_dirs() {
+  run pct exec "$PC_VMID" -- mkdir -p /opt/proxcloud /opt/proxcloud/caddy /opt/proxcloud/tls
+  # shellcheck disable=SC2016  # fixed in-guest script — $d expands IN the guest
+  run pct exec "$PC_VMID" -- bash -c \
+    'set -e; d=/opt/proxcloud/tls
+     if [ -s "$d/server.crt" ] && [ -s "$d/server.key" ]; then
+       printf "postgres tls: cert already present\n"
+     else
+       openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+         -subj "/CN=proxcloud-postgres" \
+         -keyout "$d/server.key" -out "$d/server.crt"
+     fi
+     chown 70:70 "$d/server.crt" "$d/server.key"
+     chmod 600 "$d/server.key"; chmod 644 "$d/server.crt"'
+}
+
+# guest_push_stack <staging-dir> — deliver the rendered artefacts (ADR-0031
+# §4: pct push from a 0700 staging dir, never SSH). The .env lands 0600.
+guest_push_stack() {
+  local staging="${1:?guest_push_stack: staging dir required}"
+  local f
+  for f in docker-compose.yml .env Caddyfile versions.env; do
+    [ -f "$staging/$f" ] || die "internal error: rendered file missing from staging: $f"
+  done
+  run pct push "$PC_VMID" "$staging/docker-compose.yml" /opt/proxcloud/docker-compose.yml --perms 0644
+  run pct push "$PC_VMID" "$staging/.env" /opt/proxcloud/.env --perms 0600
+  run pct push "$PC_VMID" "$staging/Caddyfile" /opt/proxcloud/caddy/Caddyfile --perms 0644
+  run pct push "$PC_VMID" "$staging/versions.env" /opt/proxcloud/versions.env --perms 0644
+  # The in-guest `proxcloud` helper CLI ships in Phase 3 (ADR-0031 §10);
+  # push it when present, skip gracefully when not.
+  if [ -f "$PC_PAYLOAD_DIR/proxcloud" ]; then
+    run pct push "$PC_VMID" "$PC_PAYLOAD_DIR/proxcloud" /usr/local/bin/proxcloud --perms 0755
+  else
+    log "in-guest 'proxcloud' helper not in this payload (arrives in a later phase) — skipping"
+  fi
+}

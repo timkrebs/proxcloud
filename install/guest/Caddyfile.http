@@ -1,0 +1,27 @@
+# Proxcloud appliance edge — plain-HTTP default (ADR-0031 §7).
+# Site :80 matches ANY Host: a fresh install has an IP, not a DNS name, and a
+# hostname-keyed site block would 404 the exact URL the installer prints.
+# Handle blocks mirror deploy/host/qa/caddy/Caddyfile: /api/* to the backend
+# with SSE/WS passthrough (flush_interval -1, HTTP/1.1 pinned), everything
+# else to the frontend. Caddy sets X-Forwarded-Proto itself; with
+# TRUST_PROXY_HEADERS on in production the backend issues correct non-Secure
+# cookies over HTTP — no insecure flag is (or may be) set.
+
+{
+	admin localhost:2019
+}
+
+:80 {
+	@api path /api/*
+	handle @api {
+		reverse_proxy proxcloud-backend:8080 {
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+	handle {
+		reverse_proxy proxcloud-frontend:3000
+	}
+}

@@ -1,0 +1,192 @@
+# shellcheck shell=bash
+# Proxcloud installer — Proxmox identity, role, token + verification gate.
+# Implements ADR-0032 §Decision EXACTLY: one user (proxcloud@pve), one role
+# (Proxcloud), one token (proxcloud@pve!app), privsep ON, ACL granted to BOTH
+# the user and the token, idempotent convergence (role modify / token
+# recreate), and a live verification gate before anything is written.
+#
+# Exports:
+#   PC_PROXMOX_TOKEN_ID      proxcloud@pve!<token-name>
+#   PC_PROXMOX_TOKEN_SECRET  minted secret (redaction-registered; .env only)
+#   PC_CONSOLE_USER / PC_CONSOLE_PASSWORD  (both empty if console check fails)
+#   PC_GRANTED_PRIVS         the exact privilege string granted (for summary)
+
+PC_PVE_USER="proxcloud@pve"
+PC_PVE_ROLE="Proxcloud"
+
+# The authoritative privilege set — copied VERBATIM from ADR-0032 §1. Where
+# any other document disagrees, the ADR wins.
+PC_BASE_PRIVS="VM.Audit VM.Allocate VM.Clone \
+VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk \
+VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options \
+VM.PowerMgmt VM.Console VM.Snapshot VM.Snapshot.Rollback \
+Datastore.Audit Datastore.AllocateSpace Datastore.AllocateTemplate \
+Sys.Audit Pool.Audit Pool.Allocate SDN.Use"
+
+# _token_privs — the full set for the detected PVE major. Exactly one
+# version-dependent privilege (ADR-0032 §1); preflight already rejected
+# any major that is not 8 or 9.
+_token_privs() {
+  case "${PC_PVE_MAJOR:?}" in
+    9) printf '%s %s' "$PC_BASE_PRIVS" "VM.GuestAgent.Audit" ;;
+    8) printf '%s %s' "$PC_BASE_PRIVS" "VM.Monitor" ;;
+    *) die "internal error: unsupported PVE major '$PC_PVE_MAJOR' reached token setup" ;;
+  esac
+}
+
+# _token_consent — print the exact scope before creating anything (ADR-0032
+# §1: nobody's hypervisor gets a new credential from a script they did not
+# see the scope of).
+_token_consent() {
+  printf '\n'
+  printf 'The installer will create this Proxmox identity:\n'
+  printf '  user  %s   role  %s   token  %s!%s (privsep on)\n' \
+    "$PC_PVE_USER" "$PC_PVE_ROLE" "$PC_PVE_USER" "$PC_TOKEN_NAME"
+  printf '\nPrivileges granted at path / (why, per group):\n'
+  printf '  VM.Audit/Allocate/Clone/PowerMgmt      guest lifecycle: list, create, clone, power\n'
+  printf '  VM.Config.*                            every field the create/resize wizards write\n'
+  printf '  VM.Snapshot(+.Rollback)                snapshot blade incl. restore\n'
+  printf '  VM.Console                             console blade (API side)\n'
+  printf '  Datastore.Audit/AllocateSpace/AllocateTemplate  storages, disks, templates/ISOs\n'
+  printf '  Sys.Audit                              node status + rrddata metrics (read-only)\n'
+  printf '  Pool.Audit/Pool.Allocate               project pools + pool= on guest create\n'
+  printf '  SDN.Use                                attach guest NICs to a bridge (PVE 8.2+)\n'
+  case "$PC_PVE_MAJOR" in
+    9) printf '  VM.GuestAgent.Audit                    read-only guest-agent (IP display); PVE 9 name\n' ;;
+    8) printf '  VM.Monitor                             read-only guest-agent (IP display); PVE 8 name\n' ;;
+  esac
+  printf '\nExplicitly NOT granted: Sys.Modify, Permissions.Modify, Datastore.Allocate,\n'
+  printf 'Realm.Allocate, User.Modify, VM.GuestAgent.Unrestricted, VM.Backup,\n'
+  printf 'Sys.Console, Sys.PowerMgmt — no host admin, no privilege grants, no guest exec.\n\n'
+  PC_ACCEPT_PRIVS="${PC_ACCEPT_PRIVS:-}"
+  ask_yesno PC_ACCEPT_PRIVS "Create this identity with exactly this scope?" y
+  [ "$PC_ACCEPT_PRIVS" = "y" ] || die "declined — no Proxmox objects were created"
+}
+
+token_setup() {
+  PC_TOKEN_NAME="${PC_TOKEN_NAME:-app}"
+  validate PC_TOKEN_NAME '^[A-Za-z][A-Za-z0-9._-]{0,63}$' "token name"
+  PC_PROXMOX_TOKEN_ID="${PC_PVE_USER}!${PC_TOKEN_NAME}"
+  mark_validated PC_PROXMOX_TOKEN_ID
+
+  _token_consent
+
+  # ── Console password + user (ADR-0032 §4: websockets reject token auth) ───
+  PC_CONSOLE_PASSWORD="$(secret_gen alnum 24)"
+  PC_CONSOLE_USER="$PC_PVE_USER"
+
+  if pveum user list --output-format json 2>/dev/null \
+      | jq -e --arg u "$PC_PVE_USER" '.[] | select(.userid == $u)' >/dev/null; then
+    log "user $PC_PVE_USER already exists — keeping it (re-runs never delete the user)"
+  else
+    run pveum user add "$PC_PVE_USER" --comment "Proxcloud control plane (installer-created)"
+  fi
+  # Set/rotate the console password via STDIN — never argv (`ps` must never
+  # show it). `pveum passwd` prompts twice, so feed it twice.
+  # Fallback if a PVE build's `pveum passwd` refuses a pipe:
+  #   pvesh set /access/password --userid proxcloud@pve --password-stdin
+  # (older pvesh lacks --password-stdin; --password <val> would put the secret
+  # on argv and MUST NOT be used).
+  log "setting console password for $PC_PVE_USER (via stdin)"
+  if ! printf '%s\n%s\n' "$PC_CONSOLE_PASSWORD" "$PC_CONSOLE_PASSWORD" \
+      | pveum passwd "$PC_PVE_USER" >/dev/null 2>&1; then
+    die "pveum passwd $PC_PVE_USER failed — see the pvesh fallback comment in install/lib/token.func"
+  fi
+
+  # ── Role: add or converge (role modify replaces the set wholesale, healing
+  #    hand-built roles from the stale README — ADR-0032 §3) ─────────────────
+  local privs
+  privs="$(_token_privs)"
+  PC_GRANTED_PRIVS="$privs"
+  if pveum role list --output-format json 2>/dev/null \
+      | jq -e --arg r "$PC_PVE_ROLE" '.[] | select(.roleid == $r)' >/dev/null; then
+    log "role $PC_PVE_ROLE exists — converging privileges (role modify replaces the set)"
+    run pveum role modify "$PC_PVE_ROLE" --privs "$privs"
+  else
+    run pveum role add "$PC_PVE_ROLE" --privs "$privs"
+  fi
+
+  # ── ACL to the USER (privsep intersection side 1; also bounds the console
+  #    login — ADR-0032 §2) ──────────────────────────────────────────────────
+  run pveum acl modify / --roles "$PC_PVE_ROLE" --users "$PC_PVE_USER"
+
+  # ── Token: recreate (a PVE token secret is shown once and unrecoverable;
+  #    reuse is impossible by design — ADR-0032 §3) ──────────────────────────
+  if pveum user token list "$PC_PVE_USER" --output-format json 2>/dev/null \
+      | jq -e --arg t "$PC_TOKEN_NAME" '.[] | select(.tokenid == $t)' >/dev/null; then
+    warn "token $PC_PROXMOX_TOKEN_ID exists — REMOVING and RECREATING it. Anything else still using this token stops working (use PC_TOKEN_NAME=<other> to keep it)."
+    run pveum user token remove "$PC_PVE_USER" "$PC_TOKEN_NAME"
+  fi
+  # Deliberately NOT via run(): the output contains the secret and must never
+  # be logged. Captured straight into a variable, parsed with jq, redacted.
+  local token_json
+  if ! token_json="$(pveum user token add "$PC_PVE_USER" "$PC_TOKEN_NAME" \
+      --privsep 1 --output-format json 2>/dev/null)"; then
+    die "pveum user token add $PC_PROXMOX_TOKEN_ID failed — run 'pveum user token list $PC_PVE_USER' to inspect"
+  fi
+  PC_PROXMOX_TOKEN_SECRET="$(printf '%s' "$token_json" | jq -r '.value // empty')"
+  unset token_json
+  [ -n "$PC_PROXMOX_TOKEN_SECRET" ] \
+    || die "token was created but no secret came back (unexpected pveum output format)"
+  redact_register "$PC_PROXMOX_TOKEN_SECRET"
+  log "token $PC_PROXMOX_TOKEN_ID minted (secret captured; will only be written to the guest .env)"
+
+  # ── ACL to the TOKEN (privsep intersection side 2 — without this every API
+  #    call 403s with an unhelpful error) ────────────────────────────────────
+  run pveum acl modify / --roles "$PC_PVE_ROLE" --tokens "$PC_PROXMOX_TOKEN_ID"
+
+  _token_verify
+  mark_validated PC_PROXMOX_TOKEN_SECRET PC_CONSOLE_USER PC_CONSOLE_PASSWORD
+  export PC_PROXMOX_TOKEN_ID PC_PROXMOX_TOKEN_SECRET PC_CONSOLE_USER PC_CONSOLE_PASSWORD PC_GRANTED_PRIVS
+}
+
+# _token_verify — ADR-0032 §5: prove the credential works before writing a
+# .env or starting a stack. Loopback (127.0.0.1:8006) on purpose: no DNS, no
+# cert trust decision; -k applies to this probe only.
+_token_verify() {
+  # (a) ACL sanity: catches the privsep-intersection mistake by name.
+  local perms
+  perms="$(pveum user token permissions "$PC_PVE_USER" "$PC_TOKEN_NAME" \
+    --path / --output-format json 2>/dev/null || printf '{}')"
+  if ! printf '%s' "$perms" | jq -e 'length > 0' >/dev/null 2>&1; then
+    die "verification (1/3) FAILED: token has an EMPTY effective permission set.
+  With privsep on, effective perms = user perms ∩ token perms; the role must be
+  ACL-granted to BOTH. Inspect: pveum user token permissions $PC_PVE_USER $PC_TOKEN_NAME --path /"
+  fi
+  log "verification (1/3) OK: token permission set is non-empty"
+
+  # (b) Live authoritative check with the real token string. The Authorization
+  # header goes to curl as a config file ON STDIN (--config -) so the secret
+  # never appears in argv, /proc, or shell history (ADR-0032 §5).
+  local url code
+  for url in "https://127.0.0.1:8006/api2/json/version" \
+             "https://127.0.0.1:8006/api2/json/cluster/resources"; do
+    code="$(printf 'header = "Authorization: PVEAPIToken=%s=%s"\n' \
+        "$PC_PROXMOX_TOKEN_ID" "$PC_PROXMOX_TOKEN_SECRET" \
+      | curl -ksS -o /dev/null -w '%{http_code}' --config - "$url" 2>/dev/null)" \
+      || code="000"
+    case "$code" in
+      2*) ;;
+      *) die "verification (2/3) FAILED: GET $url with the minted token returned HTTP $code.
+  The token exists but PVE rejects it — check the ACL grants
+  (pveum acl list) and that the Proxcloud role carries the expected privileges." ;;
+    esac
+  done
+  log "verification (2/3) OK: live API accepts the token (/version, /cluster/resources)"
+
+  # (c) Console login check — a failure WARNS but does not abort: the Console
+  # blade renders its honest disabled state instead (ADR-0032 §5.3).
+  code="$(printf 'data-urlencode = "username=%s"\ndata-urlencode = "password=%s"\n' \
+      "$PC_CONSOLE_USER" "$PC_CONSOLE_PASSWORD" \
+    | curl -ksS -o /dev/null -w '%{http_code}' --config - \
+      -X POST "https://127.0.0.1:8006/api2/json/access/ticket" 2>/dev/null)" \
+    || code="000"
+  case "$code" in
+    2*)
+      log "verification (3/3) OK: console login ticket issued for $PC_CONSOLE_USER" ;;
+    *)
+      warn "verification (3/3): console login for $PC_CONSOLE_USER failed (HTTP $code) — continuing WITHOUT console credentials; the Console blade will show its disabled state"
+      PC_CONSOLE_USER=""
+      PC_CONSOLE_PASSWORD="" ;;
+  esac
+}

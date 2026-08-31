@@ -1,0 +1,29 @@
+# Proxcloud appliance edge — `tls internal` variant (Caddy local CA).
+#
+# *** UNUSED IN PHASE 1. *** Shipped for the later Advanced-mode TLS option
+# (ADR-0031 §7): when selected, the installer renders THIS file instead of
+# Caddyfile.http and flips the printed URL + FRONTEND_ORIGIN to
+# https://%%SITE_HOST%% from the same single source of truth. Browsers will
+# warn about the local CA until its root is trusted — that is why plain HTTP
+# is the default.
+
+{
+	admin localhost:2019
+}
+
+%%SITE_HOST%% {
+	tls internal
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy proxcloud-backend:8080 {
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+	handle {
+		reverse_proxy proxcloud-frontend:3000
+	}
+}

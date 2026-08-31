@@ -1,0 +1,66 @@
+# shellcheck shell=bash
+# Proxcloud installer — final summary panel (ADR-0031 §8, ADR-0032 §1).
+#
+# Sourced by install/install.sh. Prints the facts the user needs (URL, login,
+# guest, granted scope) and reveals the generated admin password EXACTLY ONCE,
+# to the tty. Nothing in this file goes through log()/_log_sink — the summary
+# (and above all the password) must never land in /var/log/proxcloud-install.log.
+
+# _tty_out <text...> — write to the controlling tty when there is one (the
+# install log is fed only by log()/run(); plain stdout is already outside the
+# log-tee, /dev/tty additionally survives stdout redirection).
+_tty_out() {
+  if [ -w /dev/tty ]; then
+    printf '%s\n' "$*" > /dev/tty
+  else
+    printf '%s\n' "$*"
+  fi
+}
+
+summary_print() {
+  local line='──────────────────────────────────────────────────────────────────────'
+  _tty_out ""
+  _tty_out "┌$line┐"
+  _tty_out "  Proxcloud is installed and healthy."
+  _tty_out ""
+  _tty_out "  Portal URL:   ${PC_PORTAL_URL:?}"
+  _tty_out "  Login:        admin@proxcloud.local"
+  _tty_out "  Password:     ${ADMIN_PASSWORD:?}"
+  _tty_out ""
+  _tty_out "  This password is shown ONCE and is not stored anywhere on the host."
+  _tty_out "  Sign in and change it in Settings right away."
+  _tty_out ""
+  _tty_out "  Guest:        LXC $PC_VMID ($PC_HOSTNAME) @ $PC_GUEST_IP  [tag: proxcloud]"
+  _tty_out "  Storage:      rootfs on $PC_STORAGE_ROOTFS ($PC_DISK_GB GB), templates on $PC_STORAGE_TMPL"
+  _tty_out "  Bridge:       $PC_BRIDGE (DHCP — reserve this lease in your router;"
+  _tty_out "                a lease change breaks FRONTEND_ORIGIN until reconfigured)"
+  _tty_out "  App version:  $APP_SEMVER (installer $INSTALLER_VERSION)"
+  _tty_out ""
+  if [ -n "${PC_CONSOLE_USER:-}" ]; then
+    _tty_out "  Console:      enabled via the $PC_CONSOLE_USER login (password lives only"
+    _tty_out "                in the guest's /opt/proxcloud/.env)"
+  else
+    _tty_out "  Console:      DISABLED — the console login check failed during install;"
+    _tty_out "                the Console blade shows its disabled state (re-run to retry)"
+  fi
+  _tty_out ""
+  _tty_out "  Proxmox scope granted to proxcloud@pve / token 'proxcloud@pve!${PC_TOKEN_NAME}'"
+  _tty_out "  (role Proxcloud, path /, privsep on):"
+  local p
+  for p in ${PC_GRANTED_PRIVS:?}; do
+    _tty_out "    - $p"
+  done
+  _tty_out "  Not granted: Sys.Modify, Permissions.Modify, Datastore.Allocate,"
+  _tty_out "  VM.GuestAgent.Unrestricted, VM.Backup, Sys.Console, Sys.PowerMgmt."
+  _tty_out ""
+  _tty_out "  Note: the portal is plain HTTP on your LAN. Browse it ONLY by the URL"
+  _tty_out "  above — a different hostname fails mutations until reconfigured."
+  _tty_out ""
+  _tty_out "  Uninstall:    host-side uninstall.sh (ships in a later phase); until"
+  _tty_out "                then: pct stop $PC_VMID && pct destroy $PC_VMID, then remove"
+  _tty_out "                /etc/proxcloud-installer.conf (PVE objects: pveum user"
+  _tty_out "                token remove / user delete / role delete)."
+  _tty_out "  Install log:  $PC_LOG_FILE (no secrets — everything logged is redacted)"
+  _tty_out "└$line┘"
+  _tty_out ""
+}

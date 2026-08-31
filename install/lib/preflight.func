@@ -1,0 +1,128 @@
+# shellcheck shell=bash
+# Proxcloud installer — preflight checks (ADR-0031 §1).
+#
+# Sourced by install/install.sh. Verifies this is a root shell on a supported
+# Proxmox VE host, collects the storage/bridge allowlists that the prompts are
+# constrained to, and probes GHCR anonymously so a private image fails the run
+# in the first minute, not after a guest was created.
+#
+# Exports:
+#   PC_PVE_MAJOR            8 or 9 (anything else dies)
+#   PC_STORAGE_ROOTFS_OPTS  array — storages that can hold container rootfs
+#   PC_STORAGE_TMPL_OPTS    array — storages that can hold vztmpl templates
+#   PC_BRIDGE_OPTS          array — vmbr* bridges present on the host
+#   PC_PVE_HOST_IP          set by preflight_detect_host_ip <bridge>
+
+declare -a PC_STORAGE_ROOTFS_OPTS=()
+declare -a PC_STORAGE_TMPL_OPTS=()
+declare -a PC_BRIDGE_OPTS=()
+
+preflight_run() {
+  # ── Root ───────────────────────────────────────────────────────────────────
+  [ "$(id -u)" -eq 0 ] || die "the installer must run as root on the Proxmox VE host"
+
+  # ── PVE host tooling ───────────────────────────────────────────────────────
+  local cmd
+  for cmd in pveversion pveum pct pvesh pvesm pveam; do
+    command -v "$cmd" >/dev/null 2>&1 \
+      || die "'$cmd' not found — this does not look like a Proxmox VE host. Run the installer in a root shell ON the PVE node."
+  done
+
+  # ── PVE major version (drives the ADR-0032 privilege branch) ───────────────
+  local pvestr
+  pvestr="$(pveversion 2>/dev/null | head -n1)" || die "pveversion failed — cannot determine the PVE version"
+  PC_PVE_MAJOR="$(printf '%s' "$pvestr" | awk -F/ '{print $2}' | cut -d. -f1)"
+  case "$PC_PVE_MAJOR" in
+    8|9) log "Proxmox VE major version: $PC_PVE_MAJOR ($pvestr)" ;;
+    *)   die "unsupported Proxmox VE version '$pvestr' — the installer supports PVE 8 and 9 only (refusing to guess the privilege set, ADR-0032 §1)" ;;
+  esac
+  export PC_PVE_MAJOR
+
+  # ── Host tools the installer itself needs ─────────────────────────────────
+  for cmd in curl openssl; do
+    command -v "$cmd" >/dev/null 2>&1 \
+      || die "'$cmd' is required but missing — install it first (apt-get install -y $cmd) and re-run"
+  done
+  if ! command -v jq >/dev/null 2>&1; then
+    # The ONLY host mutation the installer performs outside PVE objects — and
+    # only with consent (ADR-0031: nothing touches the host silently).
+    PC_INSTALL_JQ="${PC_INSTALL_JQ:-}"
+    ask_yesno PC_INSTALL_JQ "jq is required but not installed. Install it now via apt-get?" y
+    [ "$PC_INSTALL_JQ" = "y" ] || die "jq is required — install it (apt-get install -y jq) and re-run"
+    run apt-get install -y jq
+  fi
+
+  # ── Storage allowlists (prompts may ONLY offer these) ─────────────────────
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && PC_STORAGE_ROOTFS_OPTS+=("$line")
+  done < <(pvesm status --content rootdir 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}')
+  [ "${#PC_STORAGE_ROOTFS_OPTS[@]}" -gt 0 ] \
+    || die "no active storage supports container root disks (content 'rootdir') — enable one in Datacenter → Storage, then re-run"
+
+  while IFS= read -r line; do
+    [ -n "$line" ] && PC_STORAGE_TMPL_OPTS+=("$line")
+  done < <(pvesm status --content vztmpl 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}')
+  [ "${#PC_STORAGE_TMPL_OPTS[@]}" -gt 0 ] \
+    || die "no active storage supports container templates (content 'vztmpl') — enable one in Datacenter → Storage, then re-run"
+
+  # ── Bridge allowlist ───────────────────────────────────────────────────────
+  local ifpath
+  for ifpath in /sys/class/net/vmbr*; do
+    [ -e "$ifpath" ] || continue
+    line="${ifpath##*/}"
+    [[ "$line" =~ ^vmbr[0-9]{1,4}$ ]] && PC_BRIDGE_OPTS+=("$line")
+  done
+  [ "${#PC_BRIDGE_OPTS[@]}" -gt 0 ] \
+    || die "no vmbr* bridge found on this host — create a Linux bridge (typically vmbr0) first"
+
+  log "storages (rootfs): ${PC_STORAGE_ROOTFS_OPTS[*]}"
+  log "storages (templates): ${PC_STORAGE_TMPL_OPTS[*]}"
+  log "bridges: ${PC_BRIDGE_OPTS[*]}"
+
+  preflight_probe_ghcr
+}
+
+# preflight_detect_host_ip <bridge> — the guest's PROXMOX_URL points at the
+# host's address on the bridge the guest is attached to. Called after the
+# bridge prompt; exports PC_PVE_HOST_IP.
+preflight_detect_host_ip() {
+  local bridge="${1:?preflight_detect_host_ip: bridge required}"
+  PC_PVE_HOST_IP="$(ip -4 -o addr show dev "$bridge" scope global 2>/dev/null \
+    | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+  [ -n "$PC_PVE_HOST_IP" ] \
+    || die "could not detect an IPv4 address on bridge '$bridge' — the guest needs to reach the PVE API via this bridge. Pick a bridge that carries the host's management IP."
+  validate PC_PVE_HOST_IP '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' "host IP on $bridge"
+  export PC_PVE_HOST_IP
+  log "PVE host IP on $bridge: $PC_PVE_HOST_IP"
+}
+
+# preflight_probe_ghcr — anonymous manifest HEAD against GHCR for the backend
+# image at APP_SEMVER. This is exactly what the guest's docker pull will do;
+# failing here (private package, missing tag) saves the user a full guest
+# create before the real error. APP_SEMVER=dev (PC_SOURCE=local checkouts)
+# skips with a warning — dev tags are never published.
+preflight_probe_ghcr() {
+  if [ "${APP_SEMVER:-dev}" = "dev" ]; then
+    warn "APP_SEMVER=dev — skipping the GHCR image probe (non-release run; the compose pull will fail unless images tagged 'dev' exist)"
+    return 0
+  fi
+  local repo_path token code
+  repo_path="${IMAGE_BACKEND#ghcr.io/}"
+  # Anonymous registry bearer token: public, short-lived, obtainable by anyone;
+  # NOT a Proxcloud secret (argv exposure is fine for this one).
+  token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo_path}:pull" | jq -r '.token // empty')" || token=""
+  [ -n "$token" ] || die "could not obtain an anonymous GHCR pull token for ${repo_path} — check outbound HTTPS from this host"
+  code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $token" \
+    -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+    "https://ghcr.io/v2/${repo_path}/manifests/${APP_SEMVER}")"
+  if [ "$code" != "200" ]; then
+    die "anonymous pull probe for ${IMAGE_BACKEND}:${APP_SEMVER} failed (HTTP $code).
+  Most likely the GHCR package is not Public — the repository owner must flip
+  'proxcloud-backend' and 'proxcloud-frontend' package visibility to Public
+  (github.com → Packages → package settings → Danger Zone → Change visibility).
+  If the packages are public, the tag ${APP_SEMVER} may not exist for this release."
+  fi
+  log "GHCR probe OK: ${IMAGE_BACKEND}:${APP_SEMVER} is anonymously pullable"
+}

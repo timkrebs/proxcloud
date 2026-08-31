@@ -1,0 +1,99 @@
+# Proxcloud appliance stack (installer-rendered — ADR-0031 §7).
+# Adapted from the QA compose shape (deploy/host/qa/docker-compose.yml) minus
+# the QA-only seed service and the snippet-writer mount. The percent-percent
+# placeholders are substituted by the installer's render() before this file is
+# pushed to /opt/proxcloud/docker-compose.yml in the guest; images are pinned
+# to the exact release semver (never `latest`, ADR-0033 §3).
+#
+# Run from /opt/proxcloud with: docker compose -p proxcloud <cmd>
+name: proxcloud
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: proxcloud-postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-proxcloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in /opt/proxcloud/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-proxcloud}
+    # TLS is mandatory: the backend fails closed when PROXCLOUD_ENV=production
+    # and DATABASE_URL is not TLS. The self-signed cert in ./tls is generated
+    # in-guest by the installer (uid 70, key mode 600).
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgres-tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgres-tls/server.key
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./tls:/etc/postgres-tls:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-proxcloud} -d ${POSTGRES_DB:-proxcloud}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  backend:
+    image: "%%IMAGE_BACKEND%%:%%APP_SEMVER%%"
+    container_name: proxcloud-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PROXCLOUD_ENV: production
+      LISTEN_ADDR: ":8080"
+    ports:
+      - "127.0.0.1:8080:8080"   # loopback only — the installer's health gate; Caddy is the public edge
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: "%%IMAGE_FRONTEND%%:%%APP_SEMVER%%"
+    container_name: proxcloud-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"   # loopback only
+    depends_on:
+      - backend
+
+  # One-shot migrator (profile-gated): docker compose -p proxcloud run --rm migrator
+  migrator:
+    image: "%%IMAGE_BACKEND%%:%%APP_SEMVER%%"
+    restart: "no"
+    profiles: ["migrate"]
+    env_file: .env
+    environment:
+      PROXCLOUD_ENV: production
+    entrypoint: ["/proxcloud", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: proxcloud-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  pgdata:
+    name: proxcloud-pgdata
+  caddy-data:
+    name: proxcloud-caddy-data
+  caddy-config:
+    name: proxcloud-caddy-config
