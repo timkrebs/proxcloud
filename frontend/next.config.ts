@@ -23,7 +23,9 @@ const backendOrigin = process.env.BACKEND_ORIGIN ?? "http://localhost:8080";
 //   ws://localhost:8080) → connect-src must allow that cross-origin target.
 // The branch is decided at config-eval time: `next build`/`next start` run with
 // NODE_ENV=production, so the shipped CSP is exactly the strict base below.
-const isDev = process.env.NODE_ENV !== "production";
+// Strict equality: an unusual/typo'd NODE_ENV must yield the PROD policy, not
+// the loosened dev one (fail closed).
+const isDev = process.env.NODE_ENV === "development";
 
 // Compose one CSP directive: base sources always, devOnly sources appended in dev.
 const directive = (name: string, base: string[], devOnly: string[] = []): string =>
