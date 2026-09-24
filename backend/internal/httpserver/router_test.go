@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"hash/maphash"
 	"log/slog"
 	"net"
 	"net/http"
@@ -113,10 +114,11 @@ func TestTrustedProxyHeaders(t *testing.T) {
 		remote, xfp, xff = r.RemoteAddr, r.Header.Get("X-Forwarded-Proto"), r.Header.Get("X-Forwarded-For")
 	}))
 
-	// Trusted peer (10.x): recover the real client IP; keep X-Forwarded-Proto.
+	// Trusted peer (10.x): recover the real client IP from the X-Real-IP the
+	// edge overwrites; keep X-Forwarded-Proto.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "10.1.2.3:5555"
-	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	req.Header.Set("X-Real-IP", "203.0.113.9")
 	req.Header.Set("X-Forwarded-Proto", "https")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if remote != "203.0.113.9" {
@@ -124,6 +126,16 @@ func TestTrustedProxyHeaders(t *testing.T) {
 	}
 	if xfp != "https" {
 		t.Fatalf("trusted X-Forwarded-Proto = %q, want https", xfp)
+	}
+
+	// Trusted peer with only X-Forwarded-For: its first hop is client input, so
+	// it is never consulted — the direct peer stays the key.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.1.2.3:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if remote != "10.1.2.3:5555" {
+		t.Fatalf("XFF-only RemoteAddr = %q, want the peer 10.1.2.3:5555 (XFF is never honored)", remote)
 	}
 
 	// Untrusted/direct peer: strip forwarded headers, leave RemoteAddr alone.
@@ -312,7 +324,8 @@ func TestForwardedIPValidation(t *testing.T) {
 		{"valid X-Real-IP honored (edge-overwrite contract)", "203.0.113.9", "", "203.0.113.9"},
 		{"garbage X-Real-IP falls back to peer", "not-an-ip", "", "10.1.2.3:5555"},
 		{"injection payload falls back to peer", "1.2.3.4; DROP TABLE", "", "10.1.2.3:5555"},
-		{"garbage X-Real-IP, valid XFF → XFF first hop", "zzz", "198.51.100.7, 10.1.2.3", "198.51.100.7"},
+		{"garbage X-Real-IP never falls through to client-chosen XFF", "zzz", "198.51.100.7, 10.1.2.3", "10.1.2.3:5555"},
+		{"XFF alone is never honored", "", "198.51.100.7", "10.1.2.3:5555"},
 		{"garbage in both falls back to peer", "zzz", "also-garbage, 10.1.2.3", "10.1.2.3:5555"},
 		{"IPv6 X-Real-IP parses", "2001:db8::7", "", "2001:db8::7"},
 		{"no headers → peer unchanged", "", "", "10.1.2.3:5555"},
@@ -326,13 +339,17 @@ func TestForwardedIPValidation(t *testing.T) {
 	}
 }
 
-// TestRateLimitSessionAndIPBuckets is the ADR-0034 keying regression (H-1.3):
-// in the tunneled topology every user shares the proxy's peer IP, so an
-// unauthenticated flood must land in the IP bucket while cookie-bearing
-// requests ride their own per-session bucket — the flood cannot 429 signed-in
-// users. The exempt probe path never counts.
+// TestRateLimitSessionAndIPBuckets is the ADR-0034 keying regression: in the
+// tunneled topology every user can share the proxy's peer IP, so an
+// unauthenticated flood must land in the IP bucket while VALIDATED sessions
+// ride their own buckets — the flood cannot 429 signed-in users. A cookie the
+// server never validated is just an anonymous request and shares the IP
+// bucket. The exempt probe path never counts.
 func TestRateLimitSessionAndIPBuckets(t *testing.T) {
 	limiter := newAPIRateLimiter(3, time.Minute)
+	for _, s := range []string{"session-token-alice", "session-token-bob"} {
+		limiter.rememberSession(maphash.String(limiter.seed, s)) // as markValidSession does after Authenticate
+	}
 	h := rateLimit(limiter, "/api/health")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -356,9 +373,13 @@ func TestRateLimitSessionAndIPBuckets(t *testing.T) {
 	if code := send("/api/x", ""); code != http.StatusTooManyRequests {
 		t.Fatalf("unauth flood overflow = %d, want 429", code)
 	}
-	// …but a cookie-bearing request from the SAME IP has its own bucket.
+	// A made-up cookie buys nothing: it shares the exhausted IP bucket.
+	if code := send("/api/x", "never-validated"); code != http.StatusTooManyRequests {
+		t.Fatalf("unvalidated cookie during unauth flood = %d, want 429 (shares the IP bucket)", code)
+	}
+	// …but a validated session from the SAME IP has its own bucket.
 	if code := send("/api/x", "session-token-alice"); code != http.StatusOK {
-		t.Fatalf("cookie-bearing request during unauth flood = %d, want 200 (own bucket)", code)
+		t.Fatalf("validated session during unauth flood = %d, want 200 (own bucket)", code)
 	}
 	// A different session is a different bucket too.
 	if code := send("/api/x", "session-token-bob"); code != http.StatusOK {

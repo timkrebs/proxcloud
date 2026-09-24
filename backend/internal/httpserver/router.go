@@ -85,14 +85,15 @@ func New(d Deps) http.Handler {
 	r.Use(trustedProxyHeaders(d.Cfg))
 	r.Use(accessLog(d.Log))
 	r.Use(hostAllowlist(d.Cfg))
-	// Global per-client request throttle. Authenticated requests key on a fast
-	// hash of the session cookie value; cookie-less requests key on the resolved
-	// client IP — so an unauthenticated flood sharing the tunnel/proxy IP cannot
-	// 429 signed-in users (ADR-0034). Only the on-box probes (/api/health, the CD
-	// gate's /api/v1/version) are exempt; the streaming routes are NOT — a stream
-	// counts once at open, which stops a random-cookie flood from exhausting the
-	// DB pool via per-open session lookups.
-	r.Use(rateLimit(newAPIRateLimiter(apiRateLimitPerMin, time.Minute), "/api/health", "/api/v1/version"))
+	// Global per-client request throttle. A session that Authenticate has
+	// accepted draws from its own bucket (see markValidSession below); every
+	// other request draws from its client IP's bucket — so neither an
+	// unauthenticated flood sharing the tunnel/proxy IP nor made-up cookie values
+	// can starve signed-in users (ADR-0034). Only the on-box probes (/api/health,
+	// the CD gate's /api/v1/version) are exempt; the streaming routes are NOT — a
+	// stream counts once at open.
+	apiLimiter := newAPIRateLimiter(apiRateLimitPerMin, time.Minute)
+	r.Use(rateLimit(apiLimiter, "/api/health", "/api/v1/version"))
 	r.Use(originCheck(d.Cfg))
 	r.Use(limitBody(maxRequestBodyBytes, "/api/events", "/api/console/ws/"))
 	r.Use(timeoutExcept(15*time.Second, "/api/events", "/api/console/ws/"))
@@ -136,6 +137,9 @@ func New(d Deps) http.Handler {
 		// (/tenants/{tenantId}) behind the authz chain.
 		r.Group(func(r chi.Router) {
 			r.Use(d.Auth.Authenticate)
+			// Only now is the session cookie proven live: from here on it earns
+			// its own rate-limit bucket. Must stay directly after Authenticate.
+			r.Use(apiLimiter.markValidSession)
 
 			// --- flat account + stream surface ---
 			r.Post("/auth/logout", d.Auth.Logout)
@@ -384,34 +388,24 @@ func peerInCIDRs(remoteAddr string, cidrs []*net.IPNet) bool {
 	return false
 }
 
-// firstForwardedIP returns the real client IP the trusted proxy reported, or
-// nil when neither header carries a parseable IP.
+// firstForwardedIP returns the real client IP the trusted proxy reported in
+// X-Real-IP, or nil (the caller keeps the direct peer) when it is absent or
+// does not parse as an IP.
 //
-// X-Real-IP is preferred over X-Forwarded-For — but that is safe ONLY under the
-// deployment contract (ADR-0034) that the edge proxy ALWAYS OVERWRITES
-// X-Real-IP with the connection's real client IP (Caddy: `header_up X-Real-IP
-// {client_ip}` in deploy/host/*/caddy). Caddy manages X-Forwarded-For itself
-// but passes a client-supplied X-Real-IP through untouched unless told to set
-// it, so the backend must never trust the header from a proxy that does not
-// overwrite it. Both candidates are net.ParseIP-validated here: a non-IP value
-// is ignored (fall through / fall back to the direct peer), never copied into
-// RemoteAddr.
+// X-Real-IP is the ONLY header honored, and only under the deployment contract
+// (ADR-0034) that the edge proxy ALWAYS OVERWRITES it with the connection's
+// real client IP (Caddy: `header_up X-Real-IP {client_ip}` in
+// deploy/host/*/caddy). X-Forwarded-For is deliberately never consulted: its
+// first entry is whatever the client sent, and a trusted peer that does not
+// set X-Real-IP (a loopback port, a future internal hop) would otherwise hand
+// that client-chosen value straight to the rate-limit key and audit rows.
+// Falling back to the peer can only merge buckets, never let a client pick one.
 func firstForwardedIP(r *http.Request) net.IP {
-	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
-		if ip := net.ParseIP(strings.Trim(xr, "[]")); ip != nil {
-			return ip
-		}
+	xr := strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	if xr == "" {
+		return nil
 	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first := xff
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			first = xff[:i]
-		}
-		if ip := net.ParseIP(strings.Trim(strings.TrimSpace(first), "[]")); ip != nil {
-			return ip
-		}
-	}
-	return nil
+	return net.ParseIP(strings.Trim(xr, "[]"))
 }
 
 // maxRequestBodyBytes caps the request body the API reads on non-streaming
