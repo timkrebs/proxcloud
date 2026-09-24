@@ -653,6 +653,27 @@ func TestSecondFactorLockoutAcrossChallenges(t *testing.T) {
 	if failures != secondFactorFailThreshold {
 		t.Fatalf("test drove %d failures, want exactly the threshold %d", failures, secondFactorFailThreshold)
 	}
+	// The audit trail marks the lock: the failure that engaged it (401) and,
+	// once per lock, the first refused attempt (429).
+	lockRows := func() (engaged, blocked int) {
+		t.Helper()
+		for _, e := range fs.allAudit() {
+			var d map[string]any
+			if e.Action != "totp.login" || json.Unmarshal(e.Detail, &d) != nil || d["second_factor_locked"] != true {
+				continue
+			}
+			switch d["status"] {
+			case float64(http.StatusUnauthorized):
+				engaged++
+			case float64(http.StatusTooManyRequests):
+				blocked++
+			}
+		}
+		return engaged, blocked
+	}
+	if engaged, blocked := lockRows(); engaged != 1 || blocked != 0 {
+		t.Fatalf("after the locking failure: %d lock-engaged / %d blocked audit rows, want 1 / 0", engaged, blocked)
+	}
 
 	// A further CORRECT password still mints a challenge (the password lockout
 	// was legitimately reset)…
@@ -669,6 +690,16 @@ func TestSecondFactorLockoutAcrossChallenges(t *testing.T) {
 			failures, rec.Code, rec.Body)
 	}
 	assertErrCode(t, rec, "rate_limited")
+	if _, blocked := lockRows(); blocked != 1 {
+		t.Fatalf("after the first refused attempt: %d blocked audit rows, want 1", blocked)
+	}
+	// Further refusals during the same lock are not audited again.
+	if rec := postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"000000"}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second refused attempt = %d, want 429", rec.Code)
+	}
+	if _, blocked := lockRows(); blocked != 1 {
+		t.Fatalf("after a second refused attempt: %d blocked audit rows, want still 1", blocked)
+	}
 
 	// The lock is bounded: after the window a VALID code signs in and clears it.
 	clock = clock.Add(secondFactorLock + time.Minute)

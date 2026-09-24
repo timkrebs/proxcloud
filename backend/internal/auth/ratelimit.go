@@ -31,10 +31,6 @@ const (
 	accountFailThreshold = 5
 	accountLockBase      = time.Minute
 	accountLockMax       = 15 * time.Minute
-	// accountFailDecay: a failure streak decays — the counter resets once this
-	// much time passes since the LAST failure, so no account accumulates
-	// failures forever.
-	accountFailDecay = 15 * time.Minute
 
 	// Second-factor (TOTP/recovery-code) counter, keyed per account (user id)
 	// and NOT reset by a correct password: ~10 consecutive failures lock the
@@ -44,17 +40,26 @@ const (
 	// Argon2 speed.
 	secondFactorFailThreshold = 10
 	secondFactorLock          = 15 * time.Minute
-	secondFactorFailDecay     = 15 * time.Minute
+
+	// failureDecay: a failure streak resets only after this long WITHOUT a
+	// failure. It must be far longer than the maximum lock: if the streak
+	// decayed as soon as a lock expired, an attacker would earn a fresh set of
+	// threshold guesses after every lock instead of one guess per lock — the
+	// streak must still be at the threshold when the lock lifts, so the very
+	// next failure re-locks.
+	failureDecay = 2 * time.Hour
 
 	// maxEmailBytes: RFC 5321's address ceiling. Longer inputs are rejected by
 	// the handler BEFORE any limiter map is touched, so the account maps never
 	// hash attacker-sized inputs (keys are fixed-size SHA-256 anyway).
 	maxEmailBytes = 254
 
-	// maxLimiterEntries hard-caps each limiter map. At the cap, the
-	// oldest-expiring entry is evicted to admit the new one — bounded memory
-	// under a distinct-key flood, at worst forgetting the stalest offender.
+	// maxLimiterEntries hard-caps each limiter map so a distinct-key flood
+	// cannot grow memory without bound.
 	maxLimiterEntries = 10_000
+	// limiterPruneEvery is the minimum gap between sweeps of expired entries,
+	// so a key flood cannot force a full-map scan on every request.
+	limiterPruneEvery = 10 * time.Second
 )
 
 // limiterState tracks a decaying failure streak for one key and, once the
@@ -63,24 +68,123 @@ type limiterState struct {
 	failures    int
 	lastFailure time.Time
 	lockedUntil time.Time
+	// blockSeen: a request has already been refused during the current lock —
+	// lets the caller audit the first refusal of each lock, not every one.
+	blockSeen bool
 }
 
-// expiresAt is the instant this entry stops mattering (used for prune +
-// oldest-expiring eviction): the later of lock expiry and failure decay.
-func (s *limiterState) expiresAt(decay time.Duration) time.Time {
-	e := s.lastFailure.Add(decay)
+// expiresAt is the instant this entry stops mattering: the later of lock
+// expiry and failure decay.
+func (s *limiterState) expiresAt() time.Time {
+	e := s.lastFailure.Add(failureDecay)
 	if s.lockedUntil.After(e) {
 		return s.lockedUntil
 	}
 	return e
 }
 
+// failureTracker is one bounded, decaying failure map and its lock policy.
+// Callers hold LoginLimiter.mu.
+type failureTracker struct {
+	entries   map[string]*limiterState
+	lastPrune time.Time
+	threshold int
+	lockBase  time.Duration
+	lockMax   time.Duration
+	escalate  bool // double the lock per failure past the threshold (capped)
+}
+
+func newFailureTracker(threshold int, lockBase, lockMax time.Duration, escalate bool) *failureTracker {
+	return &failureTracker{
+		entries:   map[string]*limiterState{},
+		threshold: threshold, lockBase: lockBase, lockMax: lockMax, escalate: escalate,
+	}
+}
+
+// protected reports whether an entry must never be evicted to make room: it
+// is locked now, or its streak has reached the threshold (its next failure
+// re-locks). Evicting such an entry would unlock an account under attack — a
+// flood of junk keys must never buy an attacker a victim's lock.
+func (t *failureTracker) protected(s *limiterState, now time.Time) bool {
+	return now.Before(s.lockedUntil) || s.failures >= t.threshold
+}
+
+// locked reports whether key is locked at now.
+func (t *failureTracker) locked(key string, now time.Time) bool {
+	s := t.entries[key]
+	return s != nil && now.Before(s.lockedUntil)
+}
+
+// recordFailure applies one failure to key. engaged reports that this failure
+// set a lock. tracked is false only when key is new and the map is full of
+// protected entries: the failure then goes uncounted rather than evicting an
+// active lock (the per-IP limiter still applies to it).
+func (t *failureTracker) recordFailure(key string, now time.Time) (engaged, tracked bool) {
+	if now.Sub(t.lastPrune) >= limiterPruneEvery {
+		t.lastPrune = now
+		for k, s := range t.entries {
+			if !now.Before(s.expiresAt()) {
+				delete(t.entries, k)
+			}
+		}
+	}
+	s := t.entries[key]
+	if s == nil {
+		if len(t.entries) >= maxLimiterEntries && !t.evictOne(now) {
+			return false, false
+		}
+		s = &limiterState{}
+		t.entries[key] = s
+	}
+	if now.Sub(s.lastFailure) > failureDecay {
+		s.failures = 0 // the streak decayed — never a permanent count
+	}
+	s.failures++
+	s.lastFailure = now
+	if s.failures >= t.threshold {
+		backoff := t.lockMax
+		if t.escalate {
+			backoff = t.lockBase << (s.failures - t.threshold)
+			if backoff <= 0 || backoff > t.lockMax {
+				backoff = t.lockMax
+			}
+		}
+		s.lockedUntil = now.Add(backoff)
+		s.blockSeen = false
+		engaged = true
+	}
+	return engaged, true
+}
+
+// evictOne removes the UNPROTECTED entry whose relevance ends soonest and
+// reports whether it found one. O(n), but it only runs when a new key meets a
+// full map, and only on failed-credential paths already bounded by the per-IP
+// limiter and the password-hash semaphore.
+func (t *failureTracker) evictOne(now time.Time) bool {
+	var victim string
+	var soonest time.Time
+	for k, s := range t.entries {
+		if t.protected(s, now) {
+			continue
+		}
+		if e := s.expiresAt(); victim == "" || e.Before(soonest) {
+			victim, soonest = k, e
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(t.entries, victim)
+	return true
+}
+
 // LoginLimiter is safe for concurrent use.
 type LoginLimiter struct {
 	mu           sync.Mutex
-	attempts     map[string][]time.Time   // per-IP fixed window
-	accounts     map[string]*limiterState // per-account password lockout (IP-independent)
-	secondFactor map[string]*limiterState // per-account 2FA lockout (password-independent)
+	attempts     map[string][]time.Time // per-IP fixed window, keyed by LimiterIPKey
+	lastIPPrune  time.Time
+	accounts     *failureTracker // per-account password lockout (IP-independent)
+	secondFactor *failureTracker // per-account 2FA lockout (password-independent)
 	sem          chan struct{}
 	now          func() time.Time
 }
@@ -89,8 +193,8 @@ type LoginLimiter struct {
 func NewLoginLimiter() *LoginLimiter {
 	return &LoginLimiter{
 		attempts:     map[string][]time.Time{},
-		accounts:     map[string]*limiterState{},
-		secondFactor: map[string]*limiterState{},
+		accounts:     newFailureTracker(accountFailThreshold, accountLockBase, accountLockMax, true),
+		secondFactor: newFailureTracker(secondFactorFailThreshold, secondFactorLock, secondFactorLock, false),
 		sem:          make(chan struct{}, bcryptConcurrent),
 		now:          time.Now,
 	}
@@ -104,74 +208,12 @@ func accountKey(email string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pruneStates deletes every fully-expired entry (lock elapsed AND failure
-// streak decayed). Called on the write paths so idle keys never accumulate.
-func pruneStates(m map[string]*limiterState, now time.Time, decay time.Duration) {
-	for k, s := range m {
-		if !now.Before(s.expiresAt(decay)) {
-			delete(m, k)
-		}
-	}
-}
-
-// evictOldestExpiring removes the entry whose relevance ends soonest, making
-// room at the hard cap.
-func evictOldestExpiring(m map[string]*limiterState, decay time.Duration) {
-	var oldestKey string
-	var oldest time.Time
-	for k, s := range m {
-		if e := s.expiresAt(decay); oldestKey == "" || e.Before(oldest) {
-			oldestKey, oldest = k, e
-		}
-	}
-	if oldestKey != "" {
-		delete(m, oldestKey)
-	}
-}
-
-// recordFailureLocked applies one failure to key in m with the given decay/
-// threshold/lock policy. escalate=true doubles the lock per extra failure
-// (capped at lockMax); false applies the flat lockMax window. Caller holds mu.
-func (l *LoginLimiter) recordFailureLocked(m map[string]*limiterState, key string, decay time.Duration, threshold int, lockBase, lockMax time.Duration, escalate bool) {
-	now := l.now()
-	pruneStates(m, now, decay)
-	s := m[key]
-	if s == nil {
-		if len(m) >= maxLimiterEntries {
-			evictOldestExpiring(m, decay)
-		}
-		s = &limiterState{}
-		m[key] = s
-	}
-	if now.Sub(s.lastFailure) > decay {
-		s.failures = 0 // the streak decayed — never a permanent count
-	}
-	s.failures++
-	s.lastFailure = now
-	if s.failures >= threshold {
-		backoff := lockMax
-		if escalate {
-			backoff = lockBase << (s.failures - threshold)
-			if backoff <= 0 || backoff > lockMax {
-				backoff = lockMax
-			}
-		}
-		s.lockedUntil = now.Add(backoff)
-	}
-}
-
-// allowLocked reports whether key is not currently locked in m. Caller holds mu.
-func (l *LoginLimiter) allowLocked(m map[string]*limiterState, key string) bool {
-	s := m[key]
-	return s == nil || !l.now().Before(s.lockedUntil)
-}
-
 // AllowAccount reports whether the account is NOT currently locked out. Check it
 // before spending a credential verification so a locked account short-circuits.
 func (l *LoginLimiter) AllowAccount(email string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.allowLocked(l.accounts, accountKey(email))
+	return !l.accounts.locked(accountKey(email), l.now())
 }
 
 // RecordFailure counts a failed login for the account and, past the threshold,
@@ -181,104 +223,128 @@ func (l *LoginLimiter) AllowAccount(email string) bool {
 func (l *LoginLimiter) RecordFailure(email string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.recordFailureLocked(l.accounts, accountKey(email), accountFailDecay,
-		accountFailThreshold, accountLockBase, accountLockMax, true)
+	l.accounts.recordFailure(accountKey(email), l.now())
 }
 
 // ResetAccount clears an account's failures/lockout after a successful login.
 // It deliberately does NOT touch the second-factor counter (see
-// RecordSecondFactorFailure).
+// ReserveSecondFactorAttempt).
 func (l *LoginLimiter) ResetAccount(email string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.accounts, accountKey(email))
+	delete(l.accounts.entries, accountKey(email))
 }
 
-// AllowSecondFactor reports whether the account's 2FA step is not locked.
-// Checked in LoginTOTP before any code/recovery verification.
-func (l *LoginLimiter) AllowSecondFactor(userID string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.allowLocked(l.secondFactor, userID)
+// SecondFactorVerdict is the outcome of reserving one second-factor attempt.
+type SecondFactorVerdict struct {
+	// Allowed: the attempt may be verified. When false, refuse it (429).
+	Allowed bool
+	// EngagesLock: this attempt brought the streak to the threshold — if it
+	// fails, the 2FA step is now locked. Worth recording in the audit trail.
+	EngagesLock bool
+	// FirstBlock: Allowed is false and this is the first refused attempt of
+	// the current lock — audit it once rather than on every refusal.
+	FirstBlock bool
 }
 
-// RecordSecondFactorFailure counts one failed TOTP/recovery attempt for the
-// account (keyed by user id — server-resolved, fixed-size, never
-// attacker-chosen). A CORRECT PASSWORD DOES NOT RESET THIS COUNTER: only a
-// successful second factor (ResetSecondFactor) clears it, and the streak
-// decays after secondFactorFailDecay idle. Past the threshold the 2FA step is
-// locked for the flat, bounded secondFactorLock window.
-func (l *LoginLimiter) RecordSecondFactorFailure(userID string) {
+// ReserveSecondFactorAttempt checks the account's 2FA lock and, when it is
+// open, counts this attempt as a failure in the SAME critical section. Counting
+// up front is what makes the bound hold under concurrency: requests racing the
+// last few slots each take one, and the one that reaches the threshold engages
+// the lock for everything after it — none can slip past a check another is
+// about to invalidate. A successful second factor refunds the attempts
+// (ResetSecondFactor). A correct PASSWORD never resets this counter. Keyed by
+// user id — server-resolved, never attacker-chosen. When the attempt cannot be
+// counted at all (map full of locked accounts), it is refused: fail closed.
+func (l *LoginLimiter) ReserveSecondFactorAttempt(userID string) SecondFactorVerdict {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.recordFailureLocked(l.secondFactor, userID, secondFactorFailDecay,
-		secondFactorFailThreshold, secondFactorLock, secondFactorLock, false)
+	now := l.now()
+	if s := l.secondFactor.entries[userID]; s != nil && now.Before(s.lockedUntil) {
+		first := !s.blockSeen
+		s.blockSeen = true
+		return SecondFactorVerdict{FirstBlock: first}
+	}
+	engaged, tracked := l.secondFactor.recordFailure(userID, now)
+	if !tracked {
+		return SecondFactorVerdict{}
+	}
+	return SecondFactorVerdict{Allowed: true, EngagesLock: engaged}
+}
+
+// secondFactorLocked reports whether the account's 2FA step is locked.
+func (l *LoginLimiter) secondFactorLocked(userID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.secondFactor.locked(userID, l.now())
 }
 
 // ResetSecondFactor clears the 2FA counter after a successful second factor.
 func (l *LoginLimiter) ResetSecondFactor(userID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.secondFactor, userID)
+	delete(l.secondFactor.entries, userID)
 }
 
-// Allow records an attempt for ip and reports whether it is within the
-// window. Called before the credential check so failures and successes
-// count alike (a success resets via Reset).
+// Allow records an attempt from ip and reports whether it is within the
+// window. Called before the credential check so failures and successes count
+// alike (a success resets via Reset). Keyed by LimiterIPKey, so an IPv6 client
+// cannot rotate through its /64 for fresh windows.
 func (l *LoginLimiter) Allow(ip string) bool {
+	key := LimiterIPKey(ip)
 	now := l.now()
 	cutoff := now.Add(-loginWindow)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if _, known := l.attempts[ip]; !known && len(l.attempts) >= maxLimiterEntries {
-		// Hard cap: evict the IP whose newest attempt is oldest (fully expired
-		// first, else the stalest window) so the map cannot grow without bound.
-		var oldestKey string
-		var oldest time.Time
-		for k, ts := range l.attempts {
-			var newest time.Time
-			if len(ts) > 0 {
-				newest = ts[len(ts)-1]
-			}
-			if oldestKey == "" || newest.Before(oldest) {
-				oldestKey, oldest = k, newest
-			}
-		}
-		if oldestKey != "" {
-			delete(l.attempts, oldestKey)
-		}
+	if _, known := l.attempts[key]; !known {
+		l.makeRoomForIPLocked(now, cutoff)
 	}
-
-	kept := l.attempts[ip][:0]
-	for _, t := range l.attempts[ip] {
+	kept := l.attempts[key][:0]
+	for _, t := range l.attempts[key] {
 		if t.After(cutoff) {
 			kept = append(kept, t)
 		}
 	}
 	if len(kept) >= loginMaxPerIP {
-		l.attempts[ip] = kept
+		l.attempts[key] = kept
 		return false
 	}
-	l.attempts[ip] = append(kept, now)
+	l.attempts[key] = append(kept, now)
+	return true
+}
 
-	// Opportunistic prune so idle IPs don't accumulate forever.
-	if len(l.attempts) > 4096 {
+// makeRoomForIPLocked keeps the per-IP map under maxLimiterEntries without a
+// scan per request: expired windows are swept at most once per
+// limiterPruneEvery, and if the map is still full an arbitrary entry is
+// dropped (O(1)). Dropping an IP window only forgets that IP's recent
+// attempts; it grants no one more than a fresh window.
+func (l *LoginLimiter) makeRoomForIPLocked(now, cutoff time.Time) {
+	if len(l.attempts) < maxLimiterEntries {
+		return
+	}
+	if now.Sub(l.lastIPPrune) >= limiterPruneEvery {
+		l.lastIPPrune = now
 		for k, ts := range l.attempts {
 			if len(ts) == 0 || !ts[len(ts)-1].After(cutoff) {
 				delete(l.attempts, k)
 			}
 		}
 	}
-	return true
+	for k := range l.attempts {
+		if len(l.attempts) < maxLimiterEntries {
+			break
+		}
+		delete(l.attempts, k)
+	}
 }
 
 // Reset clears an IP's window after a successful login.
 func (l *LoginLimiter) Reset(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.attempts, ip)
+	delete(l.attempts, LimiterIPKey(ip))
 }
 
 // AcquireBcrypt bounds concurrent hash comparisons; the release func must
@@ -291,11 +357,29 @@ func (l *LoginLimiter) AcquireBcrypt() func() {
 // clientIP extracts the remote IP. The trustedProxyHeaders middleware has
 // already set RemoteAddr to the real client IP for requests from a trusted
 // proxy (validated with net.ParseIP), and left it as the direct peer otherwise
-// — so this is never a spoofed or non-IP forwarded value.
+// — so this is never a spoofed or non-IP forwarded value. It is the full
+// address, as recorded in audit and session rows; rate limiters key on
+// LimiterIPKey instead.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// LimiterIPKey is the rate-limit key for a client address. An IPv6 client is
+// bucketed by its /64: a single subscriber typically controls a whole /64 (2^64
+// addresses), so per-address keys would hand one attacker unlimited fresh
+// buckets. IPv4 (including IPv4-mapped IPv6) keys on the full address. A value
+// that is not an IP is returned unchanged.
+func LimiterIPKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.String()
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
