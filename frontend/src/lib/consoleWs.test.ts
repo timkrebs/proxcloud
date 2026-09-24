@@ -26,7 +26,10 @@ describe("consoleWsUrl", () => {
 
   it("env set → env origin used unchanged", () => {
     expect(
-      consoleWsUrl("sess-3", "wss://ws.example.com:9443", { protocol: "http:", host: "portal.lan" }),
+      consoleWsUrl("sess-3", "wss://ws.example.com:9443", {
+        protocol: "http:",
+        host: "portal.lan",
+      }),
     ).toBe("wss://ws.example.com:9443/api/console/ws/sess-3");
   });
 
