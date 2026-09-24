@@ -59,8 +59,11 @@ idle_of()      { case "$1" in blue) echo green;; green) echo blue;; *) echo blue
 read_live()    { tr -d '[:space:]' <"$STATE_DIR/live-color" 2>/dev/null || true; }
 
 ensure_infra() {
-  docker network inspect proxcloud-edge     >/dev/null 2>&1 || docker network create proxcloud-edge
-  docker network inspect proxcloud-data-net >/dev/null 2>&1 || docker network create proxcloud-data-net
+  # Refuse BEFORE any container is touched if the edge network still needs its
+  # one-time migration: Caddy's compose pins an address on it, and bringing
+  # Caddy up against the old network would take the edge down mid-deploy.
+  bash "$ROOT/bin/ensure-networks.sh" \
+    || die "edge network needs its one-time migration (docs/runbooks/prod-edge-network-migration.md) — nothing was changed"
   compose_data  up -d
   compose_caddy up -d
 }

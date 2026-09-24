@@ -104,12 +104,25 @@ unset `PROXCLOUD_ENV` (Dev DB rule) — but staging then no longer mirrors prod.
 
 ## 3. Networks & loopback port map
 
-Two **external** docker networks on prod (created by `bootstrap.sh`):
+Two **external** docker networks on prod, created only by
+`bin/ensure-networks.sh` (called from `bootstrap.sh`, `up-infra.sh`, and every
+`deploy.sh` run):
 
 | network              | members                                   |
 |----------------------|-------------------------------------------|
 | `proxcloud-edge`     | caddy + both colors' backend & frontend   |
 | `proxcloud-data-net` | both colors' backend + `proxcloud-data-postgres` |
+
+`proxcloud-edge` has **pinned addressing** (ADR-0034): subnet `10.254.254.0/24`,
+gateway `10.254.254.1`, Caddy fixed at `10.254.254.10`, and dynamic addresses
+only from `10.254.254.128/25` so no container can take Caddy's. The trust chain
+depends on those addresses: cloudflared runs on the host and reaches Caddy via
+`127.0.0.1:80` (the only published port — tunnel-only), arriving from the
+gateway, which is the one source Caddy takes `CF-Connecting-IP` from; the
+backend in turn reads `X-Real-IP` only from Caddy's address
+(`TRUSTED_PROXY_CIDRS=10.254.254.10/32`). If the existing network has other
+addressing, `ensure-networks.sh` refuses and every deploy stops before touching a
+container — see `docs/runbooks/prod-edge-network-migration.md`.
 
 Caddy resolves color containers by name (`proxcloud-blue-backend:8080`,
 `proxcloud-green-frontend:3000`). Each color also publishes **loopback-only**

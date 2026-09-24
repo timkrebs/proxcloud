@@ -2,7 +2,8 @@
 # when active.caddy -> blue.caddy. /api/* (REST + SSE at /api/events + console
 # WS at /api/console/ws/*) goes to the backend with buffering off and HTTP/1.1
 # pinned so the Upgrade handshake survives; everything else to the frontend.
-@api path /api/*
+# `/api` itself must match too, or it falls through to the frontend route.
+@api path /api /api/*
 handle @api {
 	reverse_proxy proxcloud-blue-backend:8080 {
 		flush_interval -1                 # SSE: flush events immediately, no buffering
@@ -15,8 +16,8 @@ handle @api {
 		# ({client_ip} = CF-Connecting-IP when the peer is a trusted_proxies
 		# cloudflared, else the TCP peer). Caddy manages X-Forwarded-For itself
 		# but passes a CLIENT-SUPPLIED X-Real-IP through untouched unless set
-		# here — and the backend prefers X-Real-IP, so this overwrite is what
-		# makes that preference safe (rate-limit keys, audit/session IPs).
+		# here — and the backend reads client IPs ONLY from X-Real-IP, so this
+		# overwrite is what makes that safe (rate-limit keys, audit/session IPs).
 		header_up X-Real-IP {client_ip}
 		transport http {
 			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
@@ -24,5 +25,9 @@ handle @api {
 	}
 }
 handle {
-	reverse_proxy proxcloud-blue-frontend:3000
+	reverse_proxy proxcloud-blue-frontend:3000 {
+		# Overwrite X-Real-IP here too, so nothing the frontend might forward
+		# can carry a client-supplied value.
+		header_up X-Real-IP {client_ip}
+	}
 }

@@ -18,9 +18,12 @@ if [ "$(id -u)" -ne 0 ]; then
   exec sudo -n "$0" "$@"
 fi
 
-# 1. external docker networks (colors + caddy + postgres attach by name)
-docker network inspect proxcloud-edge     >/dev/null 2>&1 || docker network create proxcloud-edge
-docker network inspect proxcloud-data-net >/dev/null 2>&1 || docker network create proxcloud-data-net
+# 1. external docker networks (colors + caddy + postgres attach by name), with
+#    proxcloud-edge on its pinned addressing. An existing edge network with
+#    other addressing needs a one-time migration: finish every other step, then
+#    fail loudly at the end so the provisioning run shows it.
+network_migration_pending=0
+bash "$ROOT/bin/ensure-networks.sh" || network_migration_pending=1
 
 # 2. directory tree
 mkdir -p "$ROOT/state" "$ROOT/data/snapshots" "$ROOT/data/tls" "$ROOT/caddy/upstream"
@@ -77,4 +80,8 @@ fi
 # 7. Postgres TLS cert LAST so its 70:70 ownership is not clobbered by the chowns
 "$ROOT/bin/gen-postgres-cert.sh" "$ROOT/data/tls"
 
+if [ "$network_migration_pending" -ne 0 ]; then
+  echo "prod bootstrap: complete EXCEPT the edge network — migrate it (docs/runbooks/prod-edge-network-migration.md); deploys refuse until then" >&2
+  exit 3
+fi
 echo "prod bootstrap: complete"
