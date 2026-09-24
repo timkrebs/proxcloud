@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -10,7 +11,6 @@ import (
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
-	"github.com/timkrebs9/proxcloud/backend/internal/store"
 )
 
 // snapNameRe is PVE's snapshot-name rule (config-id: alnum start, then
@@ -80,12 +80,23 @@ func (d *Deps) RollbackSnapshot(w http.ResponseWriter, r *http.Request) {
 		httpserver.WriteError(w, err)
 		return
 	}
-	target := store.Alloc{VCPU: cfgInt(snapCfg, "cores"), RAMMB: pveMemoryMB(cfgString(snapCfg, "memory"))}
-	if target.VCPU == 0 && target.RAMMB == 0 && (snapCfg["cores"] != nil || snapCfg["memory"] != nil) {
-		d.logger().Warn("rollback quota gate: snapshot cores/memory unparseable — dimension not gated",
-			"vmid", ref.VMID, "snapshot", name)
+	// A rollback restores the snapshot's cores/sockets/memory, which may exceed
+	// today's — gate it exactly like a config grow. Fail closed: sizing that
+	// cannot be read refuses the rollback instead of letting it through ungated.
+	vcpu, ramMB, serr := rollbackGrowthTarget(ref.Type, snapCfg)
+	if errors.Is(serr, errUnlimitedCores) {
+		httpserver.WriteError(w, &types.APIError{
+			Code:    "conflict",
+			Message: "This container snapshot sets no CPU limit, so rolling back would let the container use every host core — a size quota cannot verify. The rollback was refused.",
+			Status:  http.StatusConflict,
+		})
+		return
 	}
-	if gerr := d.enforceGrowth(r, ref, target); gerr != nil {
+	if serr != nil {
+		httpserver.WriteError(w, sizingUnreadable("snapshot", serr))
+		return
+	}
+	if gerr := d.enforceGrowth(r, ref, vcpu, ramMB); gerr != nil {
 		httpserver.WriteError(w, gerr)
 		return
 	}

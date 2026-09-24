@@ -192,7 +192,7 @@ func TestReserveGuestGrowthRaceRespectsCap(t *testing.T) {
 			defer cancel()
 			err := s.ReserveGuestGrowth(cctx, ReserveGrowthParams{
 				TenantID: tenantID, ProjectID: p1, VMID: vmid, Snapshot: snap,
-				Target: Alloc{VCPU: 6}, // +4 each; the cap admits one
+				TargetVCPU: 6, // +4 each; the cap admits one
 			})
 			var qe ErrQuotaExceeded
 			switch {
@@ -220,5 +220,79 @@ func TestReserveGuestGrowthRaceRespectsCap(t *testing.T) {
 	}
 	if tenantUsage.VCPU != 24 {
 		t.Fatalf("usage after race = %d vCPU, want 24 (9 guests at live 2 + the winner's reserved footprint 6)", tenantUsage.VCPU)
+	}
+}
+
+// TestGrowthReservationMonotonicSQL pins the SQL half of the disk-quota bypass
+// fix against real Postgres: GREATEST ignores NULLs, so a nil dimension stays
+// untouched, an absent reservation takes the new value, and a lower value never
+// lowers a stored one; the reads and writes are tenant-filtered in SQL; and a
+// repeated disk grow is charged each time on top of the prior reservation.
+func TestGrowthReservationMonotonicSQL(t *testing.T) {
+	s := requireStore(t)
+	if _, err := s.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	resetQuotaTables(t, s)
+	t.Cleanup(func() { resetQuotaTables(t, s) })
+	ctx := context.Background()
+	tenantID, p1, _ := seedTenantProject(t, s)
+	const vmid = 3100
+	if _, err := s.CreateOwnership(ctx, CreateOwnershipParams{
+		TenantID: tenantID, ProjectID: p1, VMID: vmid, GuestType: "qemu", Node: "pve01", Status: "active",
+	}); err != nil {
+		t.Fatalf("CreateOwnership: %v", err)
+	}
+	read := func() *ResourceOwnership {
+		t.Helper()
+		o, err := s.GetLiveOwnershipForTenant(ctx, tenantID, vmid)
+		if err != nil {
+			t.Fatalf("GetLiveOwnershipForTenant: %v", err)
+		}
+		return o
+	}
+
+	// Absent reservation takes the value; nil dimensions stay NULL.
+	v6 := 6
+	if err := s.SetOwnershipReservation(ctx, tenantID, vmid, &v6, nil, nil); err != nil {
+		t.Fatalf("SetOwnershipReservation: %v", err)
+	}
+	if o := read(); o.ReservedVCPU == nil || *o.ReservedVCPU != 6 || o.ReservedRAMMB != nil || o.ReservedDiskGB != nil {
+		t.Fatalf("after first write: vcpu=%v ram=%v disk=%v, want 6/nil/nil", o.ReservedVCPU, o.ReservedRAMMB, o.ReservedDiskGB)
+	}
+
+	// A lower value never lowers; a new dimension is still written.
+	v3, r4096 := 3, int64(4096)
+	if err := s.SetOwnershipReservation(ctx, tenantID, vmid, &v3, &r4096, nil); err != nil {
+		t.Fatalf("SetOwnershipReservation (lower): %v", err)
+	}
+	if o := read(); *o.ReservedVCPU != 6 || o.ReservedRAMMB == nil || *o.ReservedRAMMB != 4096 {
+		t.Fatalf("after lower write: vcpu=%v ram=%v, want 6 (unchanged) / 4096", o.ReservedVCPU, o.ReservedRAMMB)
+	}
+
+	// Another tenant can neither read nor write the row.
+	const foreign = "00000000-0000-0000-0000-000000000000"
+	if _, err := s.GetLiveOwnershipForTenant(ctx, foreign, vmid); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign read err = %v, want ErrNotFound", err)
+	}
+	v99 := 99
+	if err := s.SetOwnershipReservation(ctx, foreign, vmid, &v99, nil, nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign write err = %v, want ErrNotFound", err)
+	}
+	if o := read(); *o.ReservedVCPU != 6 {
+		t.Fatalf("foreign write leaked: vcpu=%d, want 6", *o.ReservedVCPU)
+	}
+
+	// Each disk grow is charged on top of the previous reservation.
+	snap := map[int]Alloc{vmid: {VCPU: 2, RAMMB: 2048, DiskGB: 32}}
+	for i, want := range []int64{42, 52} {
+		if err := s.ReserveGuestGrowth(ctx, ReserveGrowthParams{
+			TenantID: tenantID, ProjectID: p1, VMID: vmid, Snapshot: snap, GrowDiskGB: 10,
+		}); err != nil {
+			t.Fatalf("disk grow %d: %v", i+1, err)
+		}
+		if o := read(); o.ReservedDiskGB == nil || *o.ReservedDiskGB != want {
+			t.Fatalf("after disk grow %d: reserved_disk_gb=%v, want %d", i+1, o.ReservedDiskGB, want)
+		}
 	}
 }

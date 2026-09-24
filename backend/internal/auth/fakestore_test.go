@@ -655,6 +655,10 @@ func (f *fakeStore) SetOwnershipReservation(context.Context, string, int, *int, 
 	return nil
 }
 
+func (f *fakeStore) GetLiveOwnershipForTenant(context.Context, string, int) (*store.ResourceOwnership, error) {
+	return nil, store.ErrNotFound
+}
+
 func (f *fakeStore) ReserveOwnership(_ context.Context, p store.ReserveOwnershipParams) (*store.ResourceOwnership, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

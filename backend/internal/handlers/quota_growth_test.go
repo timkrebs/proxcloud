@@ -3,7 +3,10 @@ package handlers_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -173,6 +176,10 @@ func TestResizePerDiskDelta(t *testing.T) {
 // let both land in the same headroom).
 func TestGrowthReservationVisibleToCreate(t *testing.T) {
 	mock := &proxmoxtest.MockClient{
+		// No sockets key: PVE's default of 1 socket, so vCPU == cores.
+		OnGuestConfig: func(context.Context, proxmox.GuestRef) (map[string]any, error) {
+			return map[string]any{"cores": float64(2)}, nil
+		},
 		OnSetGuestConfig: func(context.Context, proxmox.GuestRef, map[string]any) (proxmox.UPID, error) {
 			return "UPID:pve01:0:0:0:qmconfig:101:u@pam:", nil
 		},
@@ -243,7 +250,7 @@ func TestConcurrentGrowsOneWins(t *testing.T) {
 			defer wg.Done()
 			err := fake.ReserveGuestGrowth(context.Background(), store.ReserveGrowthParams{
 				TenantID: tenantA, ProjectID: projA, VMID: vmid, Snapshot: snap,
-				Target: store.Alloc{VCPU: 6}, // +4 each; only one fits
+				TargetVCPU: 6, // +4 each; only one fits
 			})
 			var qe store.ErrQuotaExceeded
 			switch {
@@ -267,5 +274,295 @@ func TestConcurrentGrowsOneWins(t *testing.T) {
 	}
 	if tenantUsage.VCPU > 8 {
 		t.Fatalf("usage after race = %d vCPU, exceeds the cap 8", tenantUsage.VCPU)
+	}
+}
+
+// --- Repeated data-disk grows are each charged; reservations never go down ---
+
+// TestResizeRepeatedDataDiskGrowIsCharged replays the security review's
+// proof of concept: tenant disk cap 45 GiB, boot disk 32 GiB, data disk scsi1
+// 10 GiB. Every scsi1 grow used to build its target from the boot disk's live
+// size, so only the first grow was ever charged, and a later boot-disk grow
+// LOWERED the stored reservation. Each grow must now be charged on top of the
+// effective footprint, and the reservation may only rise.
+func TestResizeRepeatedDataDiskGrowIsCharged(t *testing.T) {
+	var mu sync.Mutex
+	sizes := map[string]int{"scsi0": 32, "scsi1": 10}
+	var resizes int32
+	mock := &proxmoxtest.MockClient{
+		// PVE's maxdisk only ever reflects the boot disk.
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return []proxmox.RawResource{
+				{ID: "qemu/101", Type: "qemu", VMID: 101, Node: "pve01", MaxCPU: 2, MaxMem: 2048 << 20, MaxDisk: int64(sizes["scsi0"]) << 30},
+			}, nil
+		},
+		OnGuestConfig: func(context.Context, proxmox.GuestRef) (map[string]any, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return map[string]any{
+				"scsi0": fmt.Sprintf("local-lvm:vm-101-disk-0,size=%dG", sizes["scsi0"]),
+				"scsi1": fmt.Sprintf("local-lvm:vm-101-disk-1,size=%dG", sizes["scsi1"]),
+			}, nil
+		},
+		// Model PVE applying each accepted resize immediately.
+		OnResizeDisk: func(_ context.Context, _ proxmox.GuestRef, disk, size string) (proxmox.UPID, error) {
+			atomic.AddInt32(&resizes, 1)
+			n, err := strconv.Atoi(strings.TrimSuffix(size, "G"))
+			if err != nil {
+				t.Errorf("unexpected resize size %q", size)
+			}
+			mu.Lock()
+			sizes[disk] = n
+			mu.Unlock()
+			return "UPID:pve01:0:0:0:resize:101:u@pam:", nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	hh.fake.AddQuota("tenant", tenantA, nil, nil, qti64ptr(45), nil)
+	hh.fake.AddOwnership(tenantA, projA, 101, "qemu", "pve01", "active", nil)
+	c := hh.cookie(t, userA)
+	path := "/api/tenants/" + tenantA + "/guests/pve01/qemu/101/resize"
+	reservedDisk := func() int64 {
+		t.Helper()
+		own, err := hh.fake.GetOwnershipByVMID(context.Background(), 101)
+		if err != nil || own.ReservedDiskGB == nil {
+			t.Fatalf("reserved_disk_gb unavailable (err %v)", err)
+		}
+		return *own.ReservedDiskGB
+	}
+	grow := func(body string, want int) {
+		t.Helper()
+		rec := hh.req(t, c, http.MethodPost, path, body)
+		if rec.Code != want {
+			t.Fatalf("resize %s = %d, want %d (body %s)", body, rec.Code, want, rec.Body.String())
+		}
+		if want == http.StatusConflict {
+			if env := decodeBody[types.ErrorEnvelope](t, rec); env.Error.Code != "quota_exceeded" {
+				t.Fatalf("resize %s error code = %q, want quota_exceeded", body, env.Error.Code)
+			}
+		}
+	}
+
+	// scsi1 10 → 20: +10 on top of the 32 GiB footprint = 42 ≤ 45.
+	grow(`{"disk":"scsi1","sizeGib":20}`, http.StatusAccepted)
+	if got := reservedDisk(); got != 42 {
+		t.Fatalf("after first data-disk grow: reserved %d, want 42", got)
+	}
+	// scsi1 20 → 30: +10 on top of the effective 42 = 52 > 45. This grow used
+	// to be free.
+	grow(`{"disk":"scsi1","sizeGib":30}`, http.StatusConflict)
+	// scsi0 32 → 33: +1 on top of 42 = 43 — the reservation RISES. The old code
+	// persisted max(live 32, target 33) = 33, lowering it and reopening headroom.
+	grow(`{"disk":"scsi0","sizeGib":33}`, http.StatusAccepted)
+	if got := reservedDisk(); got != 43 {
+		t.Fatalf("after boot-disk grow: reserved %d, want 43 (must never drop below 42)", got)
+	}
+	// The PoC's follow-up +39 grow is refused: 43 + 39 > 45.
+	grow(`{"disk":"scsi1","sizeGib":59}`, http.StatusConflict)
+	if n := atomic.LoadInt32(&resizes); n != 2 {
+		t.Fatalf("ResizeDisk reached Proxmox %d times, want 2 (only the in-quota grows)", n)
+	}
+}
+
+// TestReservationNeverLowered drives the fake store directly: a request whose
+// target sits below the stored reservation is not a grow and must leave it
+// alone, a direct lower write is ignored, and each disk grow stacks.
+func TestReservationNeverLowered(t *testing.T) {
+	ctx := context.Background()
+	fake := storetest.New()
+	tenantA := fake.AddTenant("A", "a")
+	projA := fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	fake.AddOwnership(tenantA, projA, 101, "qemu", "pve01", "active", nil)
+	snap := map[int]store.Alloc{101: {VCPU: 2, RAMMB: 2048, DiskGB: 32}}
+	reserve := func(p store.ReserveGrowthParams) {
+		t.Helper()
+		p.TenantID, p.ProjectID, p.VMID, p.Snapshot = tenantA, projA, 101, snap
+		if err := fake.ReserveGuestGrowth(ctx, p); err != nil {
+			t.Fatalf("ReserveGuestGrowth(%+v): %v", p, err)
+		}
+	}
+	own := func() *store.ResourceOwnership {
+		t.Helper()
+		o, err := fake.GetOwnershipByVMID(ctx, 101)
+		if err != nil {
+			t.Fatalf("GetOwnershipByVMID: %v", err)
+		}
+		return o
+	}
+
+	reserve(store.ReserveGrowthParams{TargetVCPU: 6})
+	reserve(store.ReserveGrowthParams{TargetVCPU: 4}) // below the reservation: not a grow
+	if v := own().ReservedVCPU; v == nil || *v != 6 {
+		t.Fatalf("reserved_vcpu = %v, want 6 (a lower target must not lower it)", v)
+	}
+	three := 3
+	if err := fake.SetOwnershipReservation(ctx, tenantA, 101, &three, nil, nil); err != nil {
+		t.Fatalf("SetOwnershipReservation: %v", err)
+	}
+	if v := own().ReservedVCPU; *v != 6 {
+		t.Fatalf("reserved_vcpu = %d after a lower write, want 6", *v)
+	}
+	reserve(store.ReserveGrowthParams{GrowDiskGB: 5})
+	reserve(store.ReserveGrowthParams{GrowDiskGB: 5})
+	if d := own().ReservedDiskGB; d == nil || *d != 42 {
+		t.Fatalf("reserved_disk_gb = %v, want 42 (32 + 5 + 5)", d)
+	}
+	if other := fake.AddTenant("B", "b"); fake.SetOwnershipReservation(ctx, other, 101, &three, nil, nil) == nil {
+		t.Fatal("another tenant wrote this guest's reservation")
+	}
+}
+
+// --- vCPU is sockets × cores, on config updates and rollbacks alike ---
+
+// TestConfigGrowChargesSockets: quota counts PVE's maxcpu, which for a VM is
+// sockets × cores. On a 2-socket guest, raising cores 2 → 4 adds 4 vCPU; the
+// old code compared the requested cores (4) to maxcpu (4) and charged nothing.
+func TestConfigGrowChargesSockets(t *testing.T) {
+	var writes int32
+	cfg := map[string]any{"sockets": float64(2), "cores": float64(2)}
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			return []proxmox.RawResource{
+				{ID: "qemu/101", Type: "qemu", VMID: 101, Node: "pve01", MaxCPU: 4, MaxMem: 2048 << 20, MaxDisk: 10 << 30},
+			}, nil
+		},
+		OnGuestConfig: func(context.Context, proxmox.GuestRef) (map[string]any, error) { return cfg, nil },
+		OnSetGuestConfig: func(context.Context, proxmox.GuestRef, map[string]any) (proxmox.UPID, error) {
+			atomic.AddInt32(&writes, 1)
+			return "UPID:pve01:0:0:0:qmconfig:101:u@pam:", nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	hh.fake.AddQuota("tenant", tenantA, iptr(6), nil, nil, nil)
+	hh.fake.AddOwnership(tenantA, projA, 101, "qemu", "pve01", "active", nil)
+	c := hh.cookie(t, userA)
+	path := "/api/tenants/" + tenantA + "/guests/pve01/qemu/101/config"
+
+	// 2 × 4 = 8 vCPU: +4 on 4 > 6.
+	if rec := hh.req(t, c, http.MethodPatch, path, `{"cores":4}`); rec.Code != http.StatusConflict {
+		t.Fatalf("cores 2→4 on 2 sockets = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	if n := atomic.LoadInt32(&writes); n != 0 {
+		t.Fatalf("SetGuestConfig reached Proxmox %d times on a refused grow", n)
+	}
+	// 2 × 3 = 6 vCPU: exactly at the cap.
+	if rec := hh.req(t, c, http.MethodPatch, path, `{"cores":3}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("cores 2→3 on 2 sockets = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	own, err := hh.fake.GetOwnershipByVMID(context.Background(), 101)
+	if err != nil || own.ReservedVCPU == nil || *own.ReservedVCPU != 6 {
+		t.Fatalf("reserved_vcpu = %v (err %v), want 6", own.ReservedVCPU, err)
+	}
+	// A malformed sockets value fails closed.
+	cfg["sockets"] = "two"
+	if rec := hh.req(t, c, http.MethodPatch, path, `{"cores":3}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("malformed sockets = %d, want 502 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRollbackFailsClosed: snapshot sizing that cannot be read refuses the
+// rollback instead of letting it through ungated, and a VM snapshot's sockets
+// count toward its vCPU.
+func TestRollbackFailsClosed(t *testing.T) {
+	var rollbacks int32
+	snapConfigs := map[string]map[string]any{
+		"garbled": {"cores": "lots", "memory": float64(2048)},
+		"badmem":  {"cores": float64(2), "memory": "huge"},
+		"sockets": {"cores": float64(2), "sockets": float64(2), "memory": float64(2048)}, // 4 vCPU
+	}
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			return []proxmox.RawResource{
+				{ID: "qemu/101", Type: "qemu", VMID: 101, Node: "pve01", MaxCPU: 2, MaxMem: 2048 << 20, MaxDisk: 10 << 30},
+			}, nil
+		},
+		OnSnapshotConfig: func(_ context.Context, _ proxmox.GuestRef, name string) (map[string]any, error) {
+			return snapConfigs[name], nil
+		},
+		OnRollbackSnapshot: func(context.Context, proxmox.GuestRef, string) (proxmox.UPID, error) {
+			atomic.AddInt32(&rollbacks, 1)
+			return "UPID:pve01:0:0:0:qmrollback:101:u@pam:", nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	hh.fake.AddQuota("tenant", tenantA, iptr(2), qti64ptr(2048), nil, nil) // caps == current size
+	hh.fake.AddOwnership(tenantA, projA, 101, "qemu", "pve01", "active", nil)
+	c := hh.cookie(t, userA)
+	base := "/api/tenants/" + tenantA + "/guests/pve01/qemu/101/snapshots/"
+
+	for _, tc := range []struct {
+		snap     string
+		wantCode int
+		wantErr  string
+	}{
+		{"garbled", http.StatusBadGateway, "proxmox_error"},
+		{"badmem", http.StatusBadGateway, "proxmox_error"},
+		// cores 2 matches today's maxcpu, but 2 sockets make it 4 vCPU — used to
+		// pass ungated.
+		{"sockets", http.StatusConflict, "quota_exceeded"},
+	} {
+		rec := hh.req(t, c, http.MethodPost, base+tc.snap+"/rollback", "")
+		if rec.Code != tc.wantCode {
+			t.Fatalf("rollback %s = %d, want %d (body %s)", tc.snap, rec.Code, tc.wantCode, rec.Body.String())
+		}
+		if env := decodeBody[types.ErrorEnvelope](t, rec); env.Error.Code != tc.wantErr {
+			t.Fatalf("rollback %s error code = %q, want %q", tc.snap, env.Error.Code, tc.wantErr)
+		}
+	}
+	if n := atomic.LoadInt32(&rollbacks); n != 0 {
+		t.Fatalf("RollbackSnapshot reached Proxmox %d times, want 0", n)
+	}
+}
+
+// TestRollbackUnlimitedContainerRefused: a container snapshot without cores has
+// no CPU limit at all — the container may use every host core — so its vCPU
+// cannot be quota-checked and the rollback is refused.
+func TestRollbackUnlimitedContainerRefused(t *testing.T) {
+	var rollbacks int32
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			return []proxmox.RawResource{
+				{ID: "lxc/200", Type: "lxc", VMID: 200, Node: "pve01", MaxCPU: 2, MaxMem: 512 << 20, MaxDisk: 8 << 30},
+			}, nil
+		},
+		OnSnapshotConfig: func(context.Context, proxmox.GuestRef, string) (map[string]any, error) {
+			return map[string]any{"memory": float64(512)}, nil
+		},
+		OnRollbackSnapshot: func(context.Context, proxmox.GuestRef, string) (proxmox.UPID, error) {
+			atomic.AddInt32(&rollbacks, 1)
+			return "UPID:pve01:0:0:0:vzrollback:200:u@pam:", nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	hh.fake.AddOwnership(tenantA, projA, 200, "lxc", "pve01", "active", nil)
+	c := hh.cookie(t, userA)
+
+	rec := hh.req(t, c, http.MethodPost, "/api/tenants/"+tenantA+"/guests/pve01/lxc/200/snapshots/pre/rollback", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unlimited-cores rollback = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	if env := decodeBody[types.ErrorEnvelope](t, rec); env.Error.Code != "conflict" {
+		t.Fatalf("error code = %q, want conflict", env.Error.Code)
+	}
+	if n := atomic.LoadInt32(&rollbacks); n != 0 {
+		t.Fatalf("RollbackSnapshot reached Proxmox %d times, want 0", n)
 	}
 }

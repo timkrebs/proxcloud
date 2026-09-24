@@ -1006,7 +1006,9 @@ func checkGrowthFake(scope string, q *store.Quota, usage store.QuotaUsage, delta
 
 // ReserveGuestGrowth mirrors the real store's growth check + reservation in
 // memory: check under f.mu (the fake's serialization stand-in for the advisory
-// lock), then persist max(live, target) per requested dimension on the row.
+// lock), then persist effective+charge monotonically. The footprint/charge/
+// reservation math is the store's own exported helpers, so the fake cannot
+// drift from PgStore on the rules the quota tests rely on.
 func (f *Fake) ReserveGuestGrowth(_ context.Context, p store.ReserveGrowthParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1017,90 +1019,82 @@ func (f *Fake) ReserveGuestGrowth(_ context.Context, p store.ReserveGrowthParams
 	if !ok {
 		return fmt.Errorf("storetest: reserve guest growth: vmid %d missing from snapshot", p.VMID)
 	}
-	o, ok := f.ownership[p.VMID]
-	if !ok || o.TenantID != p.TenantID || (o.Status != "active" && o.Status != "pending") {
+	o, ok := f.liveOwnershipForTenantLocked(p.TenantID, p.VMID)
+	if !ok {
 		return store.ErrNotFound
 	}
-	// Delta vs the EFFECTIVE footprint max(live, existing reservation), mirroring
-	// PgStore.ReserveGuestGrowth (idempotent retries are free).
-	eff := live
-	if o.ReservedVCPU != nil && *o.ReservedVCPU > eff.VCPU {
-		eff.VCPU = *o.ReservedVCPU
-	}
-	if o.ReservedRAMMB != nil && *o.ReservedRAMMB > eff.RAMMB {
-		eff.RAMMB = *o.ReservedRAMMB
-	}
-	if o.ReservedDiskGB != nil && *o.ReservedDiskGB > eff.DiskGB {
-		eff.DiskGB = *o.ReservedDiskGB
-	}
-	var delta store.Alloc
-	if p.Target.VCPU > 0 && p.Target.VCPU > eff.VCPU {
-		delta.VCPU = p.Target.VCPU - eff.VCPU
-	}
-	if p.Target.RAMMB > 0 && p.Target.RAMMB > eff.RAMMB {
-		delta.RAMMB = p.Target.RAMMB - eff.RAMMB
-	}
-	if p.Target.DiskGB > 0 && p.Target.DiskGB > eff.DiskGB {
-		delta.DiskGB = p.Target.DiskGB - eff.DiskGB
+	eff := store.EffectiveFootprint(live, o)
+	charge := store.GrowthCharge(eff, p)
+	if charge == (store.Alloc{}) {
+		return nil
 	}
 	tenantUsage, byProject := f.computeUsageLocked(p.TenantID, p.Snapshot)
-	if err := checkGrowthFake("project", f.quotas["project|"+p.ProjectID], byProject[p.ProjectID], delta); err != nil {
+	if err := checkGrowthFake("project", f.quotas["project|"+p.ProjectID], byProject[p.ProjectID], charge); err != nil {
 		return err
 	}
-	if err := checkGrowthFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, delta); err != nil {
+	if err := checkGrowthFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, charge); err != nil {
 		return err
 	}
-	if p.Target.VCPU > 0 {
-		v := live.VCPU
-		if p.Target.VCPU > v {
-			v = p.Target.VCPU
-		}
-		o.ReservedVCPU = &v
-	}
-	if p.Target.RAMMB > 0 {
-		v := live.RAMMB
-		if p.Target.RAMMB > v {
-			v = p.Target.RAMMB
-		}
-		o.ReservedRAMMB = &v
-	}
-	if p.Target.DiskGB > 0 {
-		v := live.DiskGB
-		if p.Target.DiskGB > v {
-			v = p.Target.DiskGB
-		}
-		o.ReservedDiskGB = &v
-	}
-	o.UpdatedAt = f.Now()
+	rv, rr, rd := store.ReservationValues(eff, charge)
+	f.setReservationMonotonicLocked(o, rv, rr, rd)
 	return nil
 }
 
-// SetOwnershipReservation mirrors PgStore: write the reservation columns on a
-// live, tenant-owned row; nil leaves a column untouched.
+// GetLiveOwnershipForTenant mirrors PgStore: the tenant's live (active|pending)
+// row for vmid; a foreign or dead row is ErrNotFound.
+func (f *Fake) GetLiveOwnershipForTenant(_ context.Context, tenantID string, vmid int) (*store.ResourceOwnership, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("GetLiveOwnershipForTenant"); err != nil {
+		return nil, err
+	}
+	o, ok := f.liveOwnershipForTenantLocked(tenantID, vmid)
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *o
+	return &cp, nil
+}
+
+func (f *Fake) liveOwnershipForTenantLocked(tenantID string, vmid int) (*store.ResourceOwnership, bool) {
+	o, ok := f.ownership[vmid]
+	if !ok || o.TenantID != tenantID || (o.Status != "active" && o.Status != "pending") {
+		return nil, false
+	}
+	return o, true
+}
+
+// SetOwnershipReservation mirrors PgStore: on a live, tenant-owned row each
+// column becomes max(stored, new) — nil leaves it untouched and nothing can
+// lower it (the SQL's GREATEST semantics).
 func (f *Fake) SetOwnershipReservation(_ context.Context, tenantID string, vmid int, rv *int, rr, rd *int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.failed("SetOwnershipReservation"); err != nil {
 		return err
 	}
-	o, ok := f.ownership[vmid]
-	if !ok || o.TenantID != tenantID || (o.Status != "active" && o.Status != "pending") {
+	o, ok := f.liveOwnershipForTenantLocked(tenantID, vmid)
+	if !ok {
 		return store.ErrNotFound
 	}
-	if rv != nil {
+	f.setReservationMonotonicLocked(o, rv, rr, rd)
+	return nil
+}
+
+func (f *Fake) setReservationMonotonicLocked(o *store.ResourceOwnership, rv *int, rr, rd *int64) {
+	if rv != nil && (o.ReservedVCPU == nil || *rv > *o.ReservedVCPU) {
 		v := *rv
 		o.ReservedVCPU = &v
 	}
-	if rr != nil {
+	if rr != nil && (o.ReservedRAMMB == nil || *rr > *o.ReservedRAMMB) {
 		v := *rr
 		o.ReservedRAMMB = &v
 	}
-	if rd != nil {
+	if rd != nil && (o.ReservedDiskGB == nil || *rd > *o.ReservedDiskGB) {
 		v := *rd
 		o.ReservedDiskGB = &v
 	}
 	o.UpdatedAt = f.Now()
-	return nil
 }
 
 // ReserveOwnership mirrors the real store's reservation semantics in memory (the

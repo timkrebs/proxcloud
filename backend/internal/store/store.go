@@ -130,11 +130,16 @@ type OwnershipStore interface {
 	// TombstoneOwnership marks a row tombstoned (the Phase-4 reconciler's verdict
 	// for a guest that vanished from Proxmox). ErrNotFound if the row is missing.
 	TombstoneOwnership(ctx context.Context, id string) error
+	// GetLiveOwnershipForTenant returns the tenant's live (active|pending)
+	// ownership row for vmid, tenant- and status-filtered in SQL — a foreign or
+	// dead row is indistinguishable from an absent one (ErrNotFound).
+	GetLiveOwnershipForTenant(ctx context.Context, tenantID string, vmid int) (*ResourceOwnership, error)
 	// SetOwnershipReservation writes the growth-reservation columns on a VMID's
-	// live (active|pending) ownership row, tenant-scoped in SQL. A nil dimension
-	// leaves the stored value untouched. It is the persistence half of
-	// ReserveGuestGrowth and MUST only be called inside its advisory-locked
-	// transaction. ErrNotFound if the tenant has no live row for vmid.
+	// live (active|pending) ownership row, tenant-scoped in SQL. MONOTONIC: each
+	// column becomes max(stored, new); a nil dimension leaves the stored value
+	// untouched, and no call can ever lower a reservation. It is the persistence
+	// half of ReserveGuestGrowth and MUST only be called inside its
+	// advisory-locked transaction. ErrNotFound if the tenant has no live row.
 	SetOwnershipReservation(ctx context.Context, tenantID string, vmid int, reservedVCPU *int, reservedRAMMB, reservedDiskGB *int64) error
 	// SetAutoStopped flips the auto_stopped marker on a VMID's ownership row
 	// (ADR-0019): autoshutdown.stop sets it true, autoshutdown.start and any
@@ -192,17 +197,18 @@ type QuotaStore interface {
 	// ReserveGuestGrowth verifies that growing an EXISTING guest (a disk resize,
 	// a cores/memory config change, or a snapshot rollback to a bigger config)
 	// stays within the project AND tenant caps AND — when the checks pass —
-	// persists the post-grow footprint on the guest's ownership row
-	// (reserved_* = max(current live, target) per requested dimension) IN THE
-	// SAME per-tenant advisory-locked transaction. That turns the old
-	// check-then-act into a real reservation: a concurrent grow or create
-	// re-reading usage under the lock sees the footprint immediately, before
-	// Proxmox has applied anything — N guests can no longer grow into the same
-	// headroom. It adds no count and inserts no row (the guest already exists);
-	// usage already includes the guest at its current size, so the check is
-	// usage+delta ≤ limit. The reservation never shrinks below the live size; a
-	// later grow of the same dimension refreshes it. Over-cap → ErrQuotaExceeded
-	// and NOTHING is persisted.
+	// persists the post-grow footprint on the guest's ownership row IN THE SAME
+	// per-tenant advisory-locked transaction. That turns check-then-act into a
+	// real reservation: a concurrent grow or create re-reading usage under the
+	// lock sees the footprint immediately, before Proxmox has applied anything.
+	//
+	// Every delta is measured against the guest's EFFECTIVE footprint
+	// (max(live, stored reservation) per dimension): vCPU/RAM targets are
+	// absolute, so the charge is target − effective; a disk grow is additive, so
+	// the charge is exactly GrowDiskGB on top of the effective disk footprint.
+	// The persisted reservation is effective + charge, written monotonically —
+	// it can never go down. It adds no count and inserts no row (the guest
+	// already exists). Over-cap → ErrQuotaExceeded and NOTHING is persisted.
 	ReserveGuestGrowth(ctx context.Context, p ReserveGrowthParams) error
 	// InsertAuditIntent writes a fail-closed intent row (outcome "pending") at the
 	// audit choke-point and returns its id (ADR-0012 §3). It is one of the only
@@ -790,17 +796,29 @@ type ReserveOwnershipParams struct {
 
 // ReserveGrowthParams are the inputs to ReserveGuestGrowth. Snapshot is the
 // active-guest allocation map fetched BEFORE the lock and includes the guest
-// being grown (VMID) at its CURRENT size. Target is the absolute post-grow
-// size per dimension; 0 = that dimension is not being set by this request. The
-// store derives the positive delta vs the live snapshot itself (target ≤ live
-// is not a grow on that dimension) and persists max(live, target) per
-// requested dimension as the reservation.
+// being grown (VMID) at its CURRENT size.
+//
+// vCPU and RAM are ABSOLUTE targets because the requests that change them
+// (config update, snapshot rollback) name the whole guest's new value. Disk is
+// deliberately NOT a target: a resize names ONE disk, while the counted disk
+// footprint is the boot disk plus every prior growth reservation — no single
+// disk's size. Deriving an absolute disk target from one disk's size is what
+// let repeated data-disk grows go uncharged, so the disk dimension only ever
+// carries an additive delta.
 type ReserveGrowthParams struct {
 	TenantID  string
 	ProjectID string
 	VMID      int
 	Snapshot  map[int]Alloc
-	Target    Alloc
+	// TargetVCPU is the guest's absolute post-change vCPU count (sockets ×
+	// cores, the unit PVE's maxcpu reports); 0 = not requested.
+	TargetVCPU int
+	// TargetRAMMB is the guest's absolute post-change memory in MiB; 0 = not
+	// requested.
+	TargetRAMMB int64
+	// GrowDiskGB is how much ONE disk grows by (a resize), charged in full on
+	// top of the guest's effective disk footprint; 0 = not requested.
+	GrowDiskGB int64
 }
 
 // AuditIntent is the fail-closed intent row written before a mutation runs

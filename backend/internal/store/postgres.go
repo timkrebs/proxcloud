@@ -820,16 +820,35 @@ func (s *PgStore) TombstoneOwnership(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetLiveOwnershipForTenant implements OwnershipStore: the tenant-filtered
+// lookup of a VMID's live (active or pending) ownership row. The tenant and
+// status filters live in the query itself (tenancy iron rule #1), so a row
+// owned by another tenant is indistinguishable from an absent one: ErrNotFound.
+func (s *PgStore) GetLiveOwnershipForTenant(ctx context.Context, tenantID string, vmid int) (*ResourceOwnership, error) {
+	const q = `SELECT ` + ownershipColumns + ` FROM resource_ownership
+	           WHERE vmid = $1 AND tenant_id = $2::uuid AND status IN ('active', 'pending')`
+	o, err := scanOwnership(s.q.QueryRow(ctx, q, vmid, tenantID))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get live ownership for tenant: %w", err)
+	}
+	return o, nil
+}
+
 // SetOwnershipReservation implements OwnershipStore: the growth-reservation
 // write of ReserveGuestGrowth. Tenant-scoped in SQL and restricted to live
-// rows; a NULL parameter (nil pointer) leaves that column untouched via
-// COALESCE, so a single-dimension grow never clobbers another dimension's
-// in-flight reservation.
+// rows. MONOTONIC: GREATEST ignores NULLs, so a nil parameter (dimension not
+// requested) leaves the column untouched, an absent reservation takes the new
+// value, and an existing reservation can only ever grow. A later or racing
+// request can therefore never lower a reservation another grow depends on;
+// clearing a stale one is the reconciler's job, not a request's.
 func (s *PgStore) SetOwnershipReservation(ctx context.Context, tenantID string, vmid int, reservedVCPU *int, reservedRAMMB, reservedDiskGB *int64) error {
 	const q = `UPDATE resource_ownership
-	           SET reserved_vcpu    = COALESCE($3, reserved_vcpu),
-	               reserved_ram_mb  = COALESCE($4, reserved_ram_mb),
-	               reserved_disk_gb = COALESCE($5, reserved_disk_gb),
+	           SET reserved_vcpu    = GREATEST(reserved_vcpu, $3::integer),
+	               reserved_ram_mb  = GREATEST(reserved_ram_mb, $4::bigint),
+	               reserved_disk_gb = GREATEST(reserved_disk_gb, $5::bigint),
 	               updated_at = now()
 	           WHERE vmid = $1 AND tenant_id = $2::uuid AND status IN ('active', 'pending')`
 	tag, err := s.q.Exec(ctx, q, vmid, tenantID, reservedVCPU, reservedRAMMB, reservedDiskGB)

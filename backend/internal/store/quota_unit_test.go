@@ -107,3 +107,70 @@ func TestAdvisoryKeyTenant(t *testing.T) {
 		t.Fatalf("AdvisoryKeyTenant collided for distinct tenants: %d", a1)
 	}
 }
+
+// TestGrowthMath pins the growth-reservation arithmetic: every charge is
+// measured against the effective footprint max(live, reservation); vCPU/RAM
+// targets charge only their excess, a disk grow is charged in full, and the
+// persisted reservation is effective+charge on charged dimensions only.
+func TestGrowthMath(t *testing.T) {
+	live := Alloc{VCPU: 2, RAMMB: 2048, DiskGB: 32}
+	tests := []struct {
+		name         string
+		own          ResourceOwnership
+		p            ReserveGrowthParams
+		wantEff      Alloc
+		wantCharge   Alloc
+		wantV        *int
+		wantR, wantD *int64
+	}{
+		{"no reservation: target over live", ResourceOwnership{},
+			ReserveGrowthParams{TargetVCPU: 6},
+			live, Alloc{VCPU: 4}, iptr(6), nil, nil},
+		{"target below an existing reservation charges nothing", ResourceOwnership{ReservedVCPU: iptr(6)},
+			ReserveGrowthParams{TargetVCPU: 4},
+			Alloc{VCPU: 6, RAMMB: 2048, DiskGB: 32}, Alloc{}, nil, nil, nil},
+		{"retry of an in-flight grow is free", ResourceOwnership{ReservedRAMMB: i64ptr(4096)},
+			ReserveGrowthParams{TargetRAMMB: 4096},
+			Alloc{VCPU: 2, RAMMB: 4096, DiskGB: 32}, Alloc{}, nil, nil, nil},
+		{"disk grow stacks on the reservation, never absorbed", ResourceOwnership{ReservedDiskGB: i64ptr(42)},
+			ReserveGrowthParams{GrowDiskGB: 10},
+			Alloc{VCPU: 2, RAMMB: 2048, DiskGB: 42}, Alloc{DiskGB: 10}, nil, nil, i64ptr(52)},
+		{"reservation below live is ignored", ResourceOwnership{ReservedDiskGB: i64ptr(20)},
+			ReserveGrowthParams{GrowDiskGB: 1},
+			live, Alloc{DiskGB: 1}, nil, nil, i64ptr(33)},
+		{"only charged dimensions are written", ResourceOwnership{},
+			ReserveGrowthParams{TargetVCPU: 1, TargetRAMMB: 8192, GrowDiskGB: 0},
+			live, Alloc{RAMMB: 6144}, nil, i64ptr(8192), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eff := EffectiveFootprint(live, &tt.own)
+			if eff != tt.wantEff {
+				t.Fatalf("effective = %+v, want %+v", eff, tt.wantEff)
+			}
+			charge := GrowthCharge(eff, tt.p)
+			if charge != tt.wantCharge {
+				t.Fatalf("charge = %+v, want %+v", charge, tt.wantCharge)
+			}
+			v, r, d := ReservationValues(eff, charge)
+			if !eqIntPtr(v, tt.wantV) || !eqInt64Ptr(r, tt.wantR) || !eqInt64Ptr(d, tt.wantD) {
+				t.Fatalf("reservation = %v/%v/%v, want %v/%v/%v", deref(v), deref64(r), deref64(d), deref(tt.wantV), deref64(tt.wantR), deref64(tt.wantD))
+			}
+		})
+	}
+}
+
+func eqIntPtr(a, b *int) bool     { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+func eqInt64Ptr(a, b *int64) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+func deref(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+func deref64(p *int64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
