@@ -6,7 +6,12 @@ import "testing"
 // capped, the cap is per-user (not shared), and releasing frees a slot.
 func TestConnLimiter(t *testing.T) {
 	c := newConnLimiter(2)
-	if !c.acquire("u1") || !c.acquire("u1") {
+	// Two sequential, stateful acquires — named so staticcheck's SA4000
+	// (identical-expression) check doesn't misread the second slot-take as a
+	// duplicated condition.
+	first := c.acquire("u1")
+	second := c.acquire("u1")
+	if !first || !second {
 		t.Fatal("acquire within the cap failed")
 	}
 	if c.acquire("u1") {
