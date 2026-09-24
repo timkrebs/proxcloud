@@ -130,6 +130,12 @@ type OwnershipStore interface {
 	// TombstoneOwnership marks a row tombstoned (the Phase-4 reconciler's verdict
 	// for a guest that vanished from Proxmox). ErrNotFound if the row is missing.
 	TombstoneOwnership(ctx context.Context, id string) error
+	// SetOwnershipReservation writes the growth-reservation columns on a VMID's
+	// live (active|pending) ownership row, tenant-scoped in SQL. A nil dimension
+	// leaves the stored value untouched. It is the persistence half of
+	// ReserveGuestGrowth and MUST only be called inside its advisory-locked
+	// transaction. ErrNotFound if the tenant has no live row for vmid.
+	SetOwnershipReservation(ctx context.Context, tenantID string, vmid int, reservedVCPU *int, reservedRAMMB, reservedDiskGB *int64) error
 	// SetAutoStopped flips the auto_stopped marker on a VMID's ownership row
 	// (ADR-0019): autoshutdown.stop sets it true, autoshutdown.start and any
 	// user-initiated start clear it — so a user-stopped guest is never auto-started.
@@ -169,9 +175,12 @@ type QuotaStore interface {
 	UpsertQuota(ctx context.Context, p UpsertQuotaParams) (*Quota, error)
 	// ComputeUsage aggregates a tenant's live usage from one tenant-filtered
 	// SELECT of active+pending ownership rows joined to snapshot: an active row
-	// reads snapshot[vmid] (absent ⇒ 0, no count); a pending row reads its
-	// reserved_* columns (always counted). Returns the tenant total plus a
-	// per-project breakdown (ADR-0012 §1.3).
+	// counts max(snapshot[vmid], reserved_*) per dimension — the reserved_*
+	// columns carry an in-flight growth reservation (ReserveGuestGrowth) that
+	// must be charged before Proxmox reflects it — and is skipped entirely when
+	// absent from the snapshot; a pending row reads its reserved_* columns
+	// (always counted). Returns the tenant total plus a per-project breakdown
+	// (ADR-0012 §1.3).
 	ComputeUsage(ctx context.Context, tenantID string, snapshot map[int]Alloc) (tenant QuotaUsage, byProject map[string]QuotaUsage, err error)
 	// ReserveOwnership is the concurrency-safe create reservation (ADR-0012 §2).
 	// It runs its own WithTx + AdvisoryLock(AdvisoryKeyTenant(tenantID)), re-reads
@@ -180,13 +189,21 @@ type QuotaStore interface {
 	// ErrQuotaExceeded — then inserts the pending row with reserved_* set
 	// (duplicate VMID → ErrConflict). Commit releases the lock.
 	ReserveOwnership(ctx context.Context, p ReserveOwnershipParams) (*ResourceOwnership, error)
-	// CheckGuestGrowth verifies that growing an EXISTING guest (a disk resize or a
-	// cores/memory config change) by Delta stays within the project AND tenant
-	// caps. It runs the SAME per-tenant advisory-locked usage read as
-	// ReserveOwnership but adds no count and inserts no row (the guest already
-	// exists). usage already includes the guest at its current size (from the
-	// snapshot), so the check is usage+Delta ≤ limit. Over-cap → ErrQuotaExceeded.
-	CheckGuestGrowth(ctx context.Context, p GrowthCheckParams) error
+	// ReserveGuestGrowth verifies that growing an EXISTING guest (a disk resize,
+	// a cores/memory config change, or a snapshot rollback to a bigger config)
+	// stays within the project AND tenant caps AND — when the checks pass —
+	// persists the post-grow footprint on the guest's ownership row
+	// (reserved_* = max(current live, target) per requested dimension) IN THE
+	// SAME per-tenant advisory-locked transaction. That turns the old
+	// check-then-act into a real reservation: a concurrent grow or create
+	// re-reading usage under the lock sees the footprint immediately, before
+	// Proxmox has applied anything — N guests can no longer grow into the same
+	// headroom. It adds no count and inserts no row (the guest already exists);
+	// usage already includes the guest at its current size, so the check is
+	// usage+delta ≤ limit. The reservation never shrinks below the live size; a
+	// later grow of the same dimension refreshes it. Over-cap → ErrQuotaExceeded
+	// and NOTHING is persisted.
+	ReserveGuestGrowth(ctx context.Context, p ReserveGrowthParams) error
 	// InsertAuditIntent writes a fail-closed intent row (outcome "pending") at the
 	// audit choke-point and returns its id (ADR-0012 §3). It is one of the only
 	// two permitted audit mutations.
@@ -771,15 +788,19 @@ type ReserveOwnershipParams struct {
 	Snapshot  map[int]Alloc
 }
 
-// GrowthCheckParams are the inputs to CheckGuestGrowth. Delta is the positive
-// growth per dimension (a resize/config change; shrinks pass Delta 0); Snapshot
-// is the active-guest allocation map fetched BEFORE the lock and includes the
-// guest being grown at its CURRENT size, so the check is usage+Delta ≤ limit.
-type GrowthCheckParams struct {
+// ReserveGrowthParams are the inputs to ReserveGuestGrowth. Snapshot is the
+// active-guest allocation map fetched BEFORE the lock and includes the guest
+// being grown (VMID) at its CURRENT size. Target is the absolute post-grow
+// size per dimension; 0 = that dimension is not being set by this request. The
+// store derives the positive delta vs the live snapshot itself (target ≤ live
+// is not a grow on that dimension) and persists max(live, target) per
+// requested dimension as the reservation.
+type ReserveGrowthParams struct {
 	TenantID  string
 	ProjectID string
+	VMID      int
 	Snapshot  map[int]Alloc
-	Delta     Alloc
+	Target    Alloc
 }
 
 // AuditIntent is the fail-closed intent row written before a mutation runs

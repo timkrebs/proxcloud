@@ -432,6 +432,11 @@ func (s *TTL) expireDelete(ctx context.Context, job store.Job, own store.Resourc
 	if _, err := s.Store.CancelJobsForVMID(ctx, ref.VMID); err != nil {
 		log.Warn("ttl: cancel jobs after destroy", "err", err)
 	}
+	// Drop the freed VMID's notification entries so nothing carries forward to
+	// the VMID's next owner (belt and suspenders on the ring's tenant filter).
+	if s.Registry != nil {
+		s.Registry.DropVMID(ref.VMID)
+	}
 	s.finishAudit(ctx, auditID, "success", ttl.ID, job.ID, map[string]any{
 		"action": "delete", "config_snapshot": snapshot,
 	})
@@ -515,7 +520,7 @@ func (s *TTL) cancelGone(ctx context.Context, vmid int, reason string) {
 func (s *TTL) track(upid proxmox.UPID, action, transitional string, own store.ResourceOwnership) {
 	res := types.TaskResource{Type: own.GuestType, VMID: own.VMID, Node: own.Node}
 	if s.Registry != nil {
-		s.Registry.Track(upid, action, transitional, res)
+		s.Registry.Track(upid, action, transitional, res, own.TenantID)
 	}
 	if s.Broker != nil {
 		s.Broker.Publish(events.Event{Name: "task", Data: types.TaskEvent{

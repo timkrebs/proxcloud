@@ -614,3 +614,87 @@ func assertAudited(t *testing.T, fs *fakeStore, action, outcome string) {
 		t.Fatalf("audit %q outcome = %q, want %q", action, found.Outcome, outcome)
 	}
 }
+
+// --- ADR-0034: the per-account 2FA lockout survives correct passwords ---
+
+// TestSecondFactorLockoutAcrossChallenges drives the full handler flow of the
+// known-password TOTP brute force: the attacker re-runs Login (correct
+// password → fresh challenge, per-IP window and account lockout reset) and
+// burns 5 codes per challenge. After secondFactorFailThreshold total failures
+// the 2FA STEP must answer 429 — even on a brand-new challenge minted by yet
+// another successful password entry.
+func TestSecondFactorLockoutAcrossChallenges(t *testing.T) {
+	h, fs := newTOTPHandler(t)
+	u := seedUser(t, h, fs, "user@b.com", "correct-horse-battery", false)
+	enableTOTP(t, h, issueCookie(t, h, u.ID))
+
+	// Deterministic clock: advance 2 minutes before each login so the per-IP
+	// window (5/min) never interferes; total elapsed stays far below the 2FA
+	// decay window (15 min per failure gap is never reached).
+	clock := time.Unix(1_700_000_000, 0)
+	h.Limiter.now = func() time.Time { return clock }
+
+	failures := 0
+	for round := 0; round < 2; round++ {
+		clock = clock.Add(2 * time.Minute)
+		login := postWithCookie(h, "/api/auth/login", nil, `{"email":"user@b.com","password":"correct-horse-battery"}`)
+		if login.Code != http.StatusOK {
+			t.Fatalf("round %d login = %d, want 200 (%s)", round, login.Code, login.Body)
+		}
+		cc := challengeCookie(login)
+		for i := 0; i < maxTOTPAttempts; i++ { // 5 wrong codes consume the challenge
+			rec := postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"000000"}`)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("round %d attempt %d = %d, want 401 (%s)", round, i, rec.Code, rec.Body)
+			}
+			failures++
+		}
+	}
+	if failures != secondFactorFailThreshold {
+		t.Fatalf("test drove %d failures, want exactly the threshold %d", failures, secondFactorFailThreshold)
+	}
+
+	// A further CORRECT password still mints a challenge (the password lockout
+	// was legitimately reset)…
+	clock = clock.Add(2 * time.Minute)
+	login := postWithCookie(h, "/api/auth/login", nil, `{"email":"user@b.com","password":"correct-horse-battery"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("post-lock login = %d, want 200 (%s)", login.Code, login.Body)
+	}
+	cc := challengeCookie(login)
+	// …but the 2FA step itself is locked: 429 before any code is verified.
+	rec := postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"000000"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("2FA after %d failures = %d, want 429 (correct passwords must not unlock the second factor) (%s)",
+			failures, rec.Code, rec.Body)
+	}
+	assertErrCode(t, rec, "rate_limited")
+
+	// The lock is bounded: after the window a VALID code signs in and clears it.
+	clock = clock.Add(secondFactorLock + time.Minute)
+	login = postWithCookie(h, "/api/auth/login", nil, `{"email":"user@b.com","password":"correct-horse-battery"}`)
+	cc = challengeCookie(login)
+	sec, _ := fs.GetTOTPSecret(context.Background(), u.ID)
+	plain, _ := h.Secrets.Open(sec.SecretEncrypted)
+	code, err := totp.GenerateCode(string(plain), time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	rec = postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"`+code+`"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("valid code after lock window = %d, want 204 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// TestLoginRejectsOversizeEmailBeforeLimiter: an email past RFC 5321's 254
+// bytes is rejected 400 up front — the account-keyed limiter maps never see
+// attacker-sized identifiers.
+func TestLoginRejectsOversizeEmail(t *testing.T) {
+	h, _ := newTOTPHandler(t)
+	huge := strings.Repeat("a", maxEmailBytes+1) + "@example.io"
+	rec := postWithCookie(h, "/api/auth/login", nil, `{"email":"`+huge+`","password":"whatever-password"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversize email login = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+	assertErrCode(t, rec, "invalid_request")
+}

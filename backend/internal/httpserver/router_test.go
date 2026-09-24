@@ -270,3 +270,202 @@ func TestAccessLogRedactsInviteToken(t *testing.T) {
 		})
 	}
 }
+
+// TestForwardedIPValidation is the ADR-0034 topology regression (H-1.1/2):
+// a forwarded value from a TRUSTED peer is honored only when it parses as an
+// IP; garbage/non-IP values fall back to the peer's own address, so RemoteAddr
+// never carries an attacker-chosen arbitrary string into rate-limit keys,
+// audit rows, or session IP columns.
+//
+// Contract note (the spoofed-but-valid case): two requests from the SAME
+// trusted peer carrying DIFFERENT valid X-Real-IP values yield different keys
+// — the backend cannot distinguish a proxy-set header from a client-set one.
+// That is safe ONLY because the deployment contract (ADR-0034) makes the edge
+// OVERWRITE X-Real-IP unconditionally (`header_up X-Real-IP {client_ip}` in
+// deploy/host/*/caddy), so by the time a trusted peer forwards the header its
+// value is the connection's real client IP, not client input. This test pins
+// the backend half of the contract: validation + trusted-peer-only reads.
+func TestForwardedIPValidation(t *testing.T) {
+	_, cidr, _ := net.ParseCIDR("10.0.0.0/8")
+	cfg := &config.Config{TrustProxyHeaders: true, TrustedProxies: []*net.IPNet{cidr}}
+
+	var remote string
+	h := trustedProxyHeaders(cfg)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		remote = r.RemoteAddr
+	}))
+	send := func(xRealIP, xff string) string {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.1.2.3:5555"
+		if xRealIP != "" {
+			req.Header.Set("X-Real-IP", xRealIP)
+		}
+		if xff != "" {
+			req.Header.Set("X-Forwarded-For", xff)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		return remote
+	}
+
+	tests := []struct {
+		name, xRealIP, xff, want string
+	}{
+		{"valid X-Real-IP honored (edge-overwrite contract)", "203.0.113.9", "", "203.0.113.9"},
+		{"garbage X-Real-IP falls back to peer", "not-an-ip", "", "10.1.2.3:5555"},
+		{"injection payload falls back to peer", "1.2.3.4; DROP TABLE", "", "10.1.2.3:5555"},
+		{"garbage X-Real-IP, valid XFF → XFF first hop", "zzz", "198.51.100.7, 10.1.2.3", "198.51.100.7"},
+		{"garbage in both falls back to peer", "zzz", "also-garbage, 10.1.2.3", "10.1.2.3:5555"},
+		{"IPv6 X-Real-IP parses", "2001:db8::7", "", "2001:db8::7"},
+		{"no headers → peer unchanged", "", "", "10.1.2.3:5555"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := send(tt.xRealIP, tt.xff); got != tt.want {
+				t.Fatalf("RemoteAddr = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRateLimitSessionAndIPBuckets is the ADR-0034 keying regression (H-1.3):
+// in the tunneled topology every user shares the proxy's peer IP, so an
+// unauthenticated flood must land in the IP bucket while cookie-bearing
+// requests ride their own per-session bucket — the flood cannot 429 signed-in
+// users. The exempt probe path never counts.
+func TestRateLimitSessionAndIPBuckets(t *testing.T) {
+	limiter := newAPIRateLimiter(3, time.Minute)
+	h := rateLimit(limiter, "/api/health")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	send := func(path, cookie string) int {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "192.0.2.50:1234" // ONE shared peer IP for everyone
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: cookie})
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Unauthenticated flood from the shared IP exhausts the IP bucket…
+	for i := 0; i < 3; i++ {
+		if code := send("/api/x", ""); code != http.StatusOK {
+			t.Fatalf("unauth request %d = %d, want 200", i, code)
+		}
+	}
+	if code := send("/api/x", ""); code != http.StatusTooManyRequests {
+		t.Fatalf("unauth flood overflow = %d, want 429", code)
+	}
+	// …but a cookie-bearing request from the SAME IP has its own bucket.
+	if code := send("/api/x", "session-token-alice"); code != http.StatusOK {
+		t.Fatalf("cookie-bearing request during unauth flood = %d, want 200 (own bucket)", code)
+	}
+	// A different session is a different bucket too.
+	if code := send("/api/x", "session-token-bob"); code != http.StatusOK {
+		t.Fatalf("second session during flood = %d, want 200", code)
+	}
+	// One session exhausting ITS bucket does not spill onto another.
+	for i := 0; i < 2; i++ {
+		send("/api/x", "session-token-alice")
+	}
+	if code := send("/api/x", "session-token-alice"); code != http.StatusTooManyRequests {
+		t.Fatalf("alice past her budget = %d, want 429", code)
+	}
+	if code := send("/api/x", "session-token-bob"); code != http.StatusOK {
+		t.Fatalf("bob throttled by alice's flood = %d, want 200", code)
+	}
+	// The probe path is exempt no matter what.
+	if code := send("/api/health", ""); code != http.StatusOK {
+		t.Fatalf("/api/health during flood = %d, want 200 (probe exempt)", code)
+	}
+}
+
+// TestRouterHealthNeverRateLimited drives the REAL router: the global limiter
+// throttles ordinary routes but /api/health and /api/v1/version stay exempt,
+// so the Docker HEALTHCHECK and deploy gates can never be starved by a flood.
+func TestRouterHealthNeverRateLimited(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	fake := storetest.New()
+	authHandler := &auth.Handler{
+		Sessions: auth.NewSessions(fake, false, false, time.Hour, 24*time.Hour),
+		Store:    fake, Hasher: auth.NewHasher(), Log: log, Limiter: auth.NewLoginLimiter(),
+	}
+	router := New(Deps{Cfg: &config.Config{}, Log: log, Auth: authHandler})
+
+	send := func(path string) int {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "192.0.2.60:1234"
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// Exhaust the shared-IP budget on an ordinary route.
+	throttled := false
+	for i := 0; i < apiRateLimitPerMin+1; i++ {
+		if send("/api/auth/bootstrap-status") == http.StatusTooManyRequests {
+			throttled = true
+			break
+		}
+	}
+	if !throttled {
+		t.Fatal("ordinary route was never rate-limited — global limiter not wired")
+	}
+	if code := send("/api/health"); code != http.StatusOK {
+		t.Fatalf("/api/health during flood = %d, want 200", code)
+	}
+	if code := send("/api/v1/version"); code != http.StatusOK {
+		t.Fatalf("/api/v1/version during flood = %d, want 200", code)
+	}
+}
+
+// TestHostAllowlistLoopbackAlwaysAllowed is the L-a regression: with an
+// allowlist configured, loopback Hosts (the Docker HEALTHCHECK's 127.0.0.1,
+// ::1, localhost — with or without port) always pass; only foreign hosts 421.
+func TestHostAllowlistLoopbackAlwaysAllowed(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	router := New(Deps{
+		Cfg: &config.Config{AllowedHosts: []string{"portal.test"}},
+		Log: log,
+	})
+	for _, host := range []string{"127.0.0.1", "127.0.0.1:8080", "localhost", "localhost:8090", "[::1]", "[::1]:8080"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code == http.StatusMisdirectedRequest {
+			t.Fatalf("loopback Host %q rejected 421 — on-box probes must always pass", host)
+		}
+	}
+	// The allowlist still bites for anything else.
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Host = "attacker.example"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("foreign Host = %d, want 421", rec.Code)
+	}
+}
+
+// TestRejectionsCarrySecurityHeadersAndLog pins the middleware ORDER fix: a
+// 421 (host allowlist) and a 429 (rate limit) both carry the hardening headers
+// and appear in the access log — the rejection producers run inside
+// securityHeaders, accessLog, and Recoverer.
+func TestRejectionsCarrySecurityHeadersAndLog(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	router := New(Deps{Cfg: &config.Config{AllowedHosts: []string{"portal.test"}}, Log: log})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req.Host = "attacker.example"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("code = %d, want 421", rec.Code)
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("421 rejection lacks security headers — securityHeaders must wrap hostAllowlist")
+	}
+	if !strings.Contains(buf.String(), "421") {
+		t.Fatalf("421 rejection missing from the access log:\n%s", buf.String())
+	}
+}

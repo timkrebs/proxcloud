@@ -124,16 +124,28 @@ func (s *PgStore) ComputeUsage(ctx context.Context, tenantID string, snapshot ma
 	return tenant, byProject, nil
 }
 
-// usageOfRow computes one ownership row's contribution: an active row reads the
-// live snapshot (absent ⇒ not counted at all — a deleted/not-yet-visible guest);
-// a pending row reads its reserved_* columns and always counts. The bool reports
-// whether the row contributes to the count (and alloc).
+// usageOfRow computes one ownership row's contribution: an active row counts
+// max(live snapshot, reserved_*) per dimension — reserved_* on an active row is
+// an in-flight growth reservation (ReserveGuestGrowth) that must be charged
+// before PVE reflects it, and it never counts below the live size — and is not
+// counted at all when absent from the snapshot (a deleted/not-yet-visible
+// guest); a pending row reads its reserved_* columns and always counts. The
+// bool reports whether the row contributes to the count (and alloc).
 func usageOfRow(status string, vmid int, snapshot map[int]Alloc, rv *int, rr, rd *int64) (Alloc, bool) {
 	switch status {
 	case "active":
 		a, ok := snapshot[vmid]
 		if !ok {
 			return Alloc{}, false
+		}
+		if rv != nil && *rv > a.VCPU {
+			a.VCPU = *rv
+		}
+		if rr != nil && *rr > a.RAMMB {
+			a.RAMMB = *rr
+		}
+		if rd != nil && *rd > a.DiskGB {
+			a.DiskGB = *rd
 		}
 		return a, true
 	case "pending":
@@ -316,15 +328,50 @@ func (s *PgStore) ReserveOwnershipBatch(ctx context.Context, p ReserveOwnershipB
 	return out, nil
 }
 
-// CheckGuestGrowth implements QuotaStore: the resize/config-grow quota gate. It
-// mirrors ReserveOwnership's per-tenant advisory-locked usage read but records
-// nothing and adds no count — the guest already exists and is already counted in
-// usage at its current size, so the check is usage+Delta ≤ cap on each dimension.
-func (s *PgStore) CheckGuestGrowth(ctx context.Context, p GrowthCheckParams) error {
+// ReserveGuestGrowth implements QuotaStore: the resize/config-grow/rollback
+// quota gate AND reservation. It mirrors ReserveOwnership's per-tenant
+// advisory-locked usage read, checks usage+delta ≤ cap on each dimension
+// (adding no count — the guest already exists), and — only when every check
+// passes — persists max(live, target) per requested dimension on the guest's
+// ownership row IN THE SAME TRANSACTION. A concurrent grow/create serialized
+// behind the same lock therefore sees the footprint before Proxmox has applied
+// anything (closes the check-then-act race; also audit L4's snapshot-lag
+// under-count for grown dimensions). The commit releases the lock; any failure
+// (including ErrQuotaExceeded) rolls back and persists nothing.
+func (s *PgStore) ReserveGuestGrowth(ctx context.Context, p ReserveGrowthParams) error {
 	return s.WithTx(ctx, func(txs Store) error {
 		if err := txs.AdvisoryLock(ctx, AdvisoryKeyTenant(p.TenantID)); err != nil {
 			return err
 		}
+		live, ok := p.Snapshot[p.VMID]
+		if !ok {
+			// The caller resolves the guest from the same snapshot first; a miss
+			// here is a logic error / transient PVE gap. Fail closed.
+			return fmt.Errorf("store: reserve guest growth: vmid %d missing from snapshot", p.VMID)
+		}
+		// The guest's usage charge is max(live, existing reservation) — so the
+		// delta this grow needs is measured against that EFFECTIVE footprint,
+		// not raw live. That makes an idempotent retry of an in-flight grow
+		// free (delta 0) instead of double-charged. Tenant-checked: a foreign
+		// row must not leak its reservation into the math (404 semantics).
+		own, err := txs.GetOwnershipByVMID(ctx, p.VMID)
+		if err != nil {
+			return err
+		}
+		if own.TenantID != p.TenantID || (own.Status != "active" && own.Status != "pending") {
+			return ErrNotFound
+		}
+		eff := live
+		if own.ReservedVCPU != nil && *own.ReservedVCPU > eff.VCPU {
+			eff.VCPU = *own.ReservedVCPU
+		}
+		if own.ReservedRAMMB != nil && *own.ReservedRAMMB > eff.RAMMB {
+			eff.RAMMB = *own.ReservedRAMMB
+		}
+		if own.ReservedDiskGB != nil && *own.ReservedDiskGB > eff.DiskGB {
+			eff.DiskGB = *own.ReservedDiskGB
+		}
+		delta := growthDelta(eff, p.Target)
 		tenantUsage, byProject, err := txs.ComputeUsage(ctx, p.TenantID, p.Snapshot)
 		if err != nil {
 			return err
@@ -337,11 +384,56 @@ func (s *PgStore) CheckGuestGrowth(ctx context.Context, p GrowthCheckParams) err
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		if err := checkGrowth("project", projectQuota, byProject[p.ProjectID], p.Delta); err != nil {
+		if err := checkGrowth("project", projectQuota, byProject[p.ProjectID], delta); err != nil {
 			return err
 		}
-		return checkGrowth("tenant", tenantQuota, tenantUsage, p.Delta)
+		if err := checkGrowth("tenant", tenantQuota, tenantUsage, delta); err != nil {
+			return err
+		}
+		rv, rr, rd := reservationValues(live, p.Target)
+		if rv == nil && rr == nil && rd == nil {
+			return nil // no dimension requested — nothing to persist
+		}
+		return txs.SetOwnershipReservation(ctx, p.TenantID, p.VMID, rv, rr, rd)
 	})
+}
+
+// growthDelta is the positive per-dimension growth of target over live; a
+// dimension with Target 0 (not requested) or target ≤ live contributes 0.
+func growthDelta(live, target Alloc) Alloc {
+	var d Alloc
+	if target.VCPU > 0 && target.VCPU > live.VCPU {
+		d.VCPU = target.VCPU - live.VCPU
+	}
+	if target.RAMMB > 0 && target.RAMMB > live.RAMMB {
+		d.RAMMB = target.RAMMB - live.RAMMB
+	}
+	if target.DiskGB > 0 && target.DiskGB > live.DiskGB {
+		d.DiskGB = target.DiskGB - live.DiskGB
+	}
+	return d
+}
+
+// reservationValues builds the per-dimension reservation to persist:
+// max(live, target) for each REQUESTED dimension (Target > 0), nil (leave the
+// stored value untouched) for dimensions this request does not set — so a
+// RAM-only grow never clobbers a still-materializing vCPU reservation. A
+// requested dimension at or below live refreshes the reservation down to live
+// (it never shrinks below live).
+func reservationValues(live, target Alloc) (rv *int, rr, rd *int64) {
+	if target.VCPU > 0 {
+		v := max(live.VCPU, target.VCPU)
+		rv = &v
+	}
+	if target.RAMMB > 0 {
+		v := max(live.RAMMB, target.RAMMB)
+		rr = &v
+	}
+	if target.DiskGB > 0 {
+		v := max(live.DiskGB, target.DiskGB)
+		rd = &v
+	}
+	return rv, rr, rd
 }
 
 // checkGrowth is checkQuota without the count dimension: growing an existing

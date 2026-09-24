@@ -293,7 +293,7 @@ func (e *Engine) run(id string, req *types.CreateGuestRequest, cctx CreateContex
 		e.failStep(id, "create", err)
 		return
 	}
-	e.Registry.Track(upid, label, "provisioning", res)
+	e.Registry.Track(upid, label, "provisioning", res, cctx.TenantID)
 	e.updateStep(id, "create", "running", string(upid), "")
 	if !e.awaitTask(id, "create", upid) {
 		e.releaseOwnership(cctx)
@@ -311,7 +311,7 @@ func (e *Engine) run(id string, req *types.CreateGuestRequest, cctx CreateContex
 			e.failStep(id, "start", err)
 			return
 		}
-		e.Registry.Track(startUPID, e.stepLabel(id, "start"), "starting", res)
+		e.Registry.Track(startUPID, e.stepLabel(id, "start"), "starting", res, cctx.TenantID)
 		e.updateStep(id, "start", "running", string(startUPID), "")
 		if !e.awaitTask(id, "start", startUPID) {
 			e.removeSnippet(cctx)

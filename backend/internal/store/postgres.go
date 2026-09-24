@@ -820,6 +820,28 @@ func (s *PgStore) TombstoneOwnership(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetOwnershipReservation implements OwnershipStore: the growth-reservation
+// write of ReserveGuestGrowth. Tenant-scoped in SQL and restricted to live
+// rows; a NULL parameter (nil pointer) leaves that column untouched via
+// COALESCE, so a single-dimension grow never clobbers another dimension's
+// in-flight reservation.
+func (s *PgStore) SetOwnershipReservation(ctx context.Context, tenantID string, vmid int, reservedVCPU *int, reservedRAMMB, reservedDiskGB *int64) error {
+	const q = `UPDATE resource_ownership
+	           SET reserved_vcpu    = COALESCE($3, reserved_vcpu),
+	               reserved_ram_mb  = COALESCE($4, reserved_ram_mb),
+	               reserved_disk_gb = COALESCE($5, reserved_disk_gb),
+	               updated_at = now()
+	           WHERE vmid = $1 AND tenant_id = $2::uuid AND status IN ('active', 'pending')`
+	tag, err := s.q.Exec(ctx, q, vmid, tenantID, reservedVCPU, reservedRAMMB, reservedDiskGB)
+	if err != nil {
+		return fmt.Errorf("store: set ownership reservation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetAutoStopped implements OwnershipStore: flip the auto_stopped marker on a
 // VMID's ownership row (ADR-0019). ErrNotFound if the VMID has no row.
 func (s *PgStore) SetAutoStopped(ctx context.Context, vmid int, v bool) error {

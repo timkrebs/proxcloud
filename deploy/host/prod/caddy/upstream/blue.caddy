@@ -11,6 +11,13 @@ handle @api {
 		# (overwrites) the value, so a client cannot spoof it — the backend keys
 		# the session cookie's Secure attribute off this.
 		header_up X-Forwarded-Proto https
+		# ADR-0034: ALWAYS overwrite X-Real-IP with Caddy's resolved client IP
+		# ({client_ip} = CF-Connecting-IP when the peer is a trusted_proxies
+		# cloudflared, else the TCP peer). Caddy manages X-Forwarded-For itself
+		# but passes a CLIENT-SUPPLIED X-Real-IP through untouched unless set
+		# here — and the backend prefers X-Real-IP, so this overwrite is what
+		# makes that preference safe (rate-limit keys, audit/session IPs).
+		header_up X-Real-IP {client_ip}
 		transport http {
 			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
 		}

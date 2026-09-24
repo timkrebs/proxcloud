@@ -99,12 +99,15 @@ const (
 	maxDiskGiB  = 65536   // 64 TiB
 )
 
-// enforceGrowth rejects a resize/config change that would push the caller's
-// tenant/project past quota. `target` carries the ABSOLUTE requested size for
-// the changed dimensions (0 = unchanged); the delta is target-minus-current
-// floored at 0, so shrinks and no-ops pass. A snapshot miss on a real grow is a
-// transient condition, rejected retryably (mirrors create's clone-source path).
-// Quota is only enforced at create today, so this closes the grow-past-cap hole.
+// enforceGrowth rejects a resize/config change (or snapshot rollback) that
+// would push the caller's tenant/project past quota, and — when it fits —
+// RESERVES the post-grow footprint on the guest's ownership row in the same
+// advisory-locked transaction (store.ReserveGuestGrowth), so concurrent grows
+// and creates cannot land in the same headroom. `target` carries the ABSOLUTE
+// requested size for the changed dimensions (0 = unchanged); the delta is
+// target-minus-current floored at 0, so shrinks and no-ops pass without
+// touching the store. A snapshot miss on a real grow is a transient condition,
+// rejected retryably (mirrors create's clone-source path).
 func (d *Deps) enforceGrowth(r *http.Request, ref proxmox.GuestRef, target store.Alloc) error {
 	if target.VCPU <= 0 && target.RAMMB <= 0 && target.DiskGB <= 0 {
 		return nil // no quota dimension is being set
@@ -132,14 +135,48 @@ func (d *Deps) enforceGrowth(r *http.Request, ref proxmox.GuestRef, target store
 	if delta.VCPU == 0 && delta.RAMMB == 0 && delta.DiskGB == 0 {
 		return nil // requested size ≤ current: not a grow
 	}
-	if err := d.Store.CheckGuestGrowth(r.Context(), store.GrowthCheckParams{
-		TenantID: id.ActiveTenantID, ProjectID: id.ResolvedProjectID, Snapshot: snap, Delta: delta,
+	return d.reserveGrowth(r, ref, snap, target, id.ActiveTenantID, id.ResolvedProjectID)
+}
+
+// enforceDiskGrowthDelta is enforceGrowth for the disk-resize path, where the
+// honest delta is measured against the NAMED disk's own current size (already
+// computed by the caller from the guest config), not the boot-disk maxdisk the
+// cluster snapshot reports. The absolute target handed to the store is the
+// snapshot's disk footprint plus that per-disk delta.
+func (d *Deps) enforceDiskGrowthDelta(r *http.Request, ref proxmox.GuestRef, deltaGiB int64) error {
+	if deltaGiB <= 0 {
+		return nil // shrink/no-op: not a grow
+	}
+	if d.Store == nil {
+		return nil // degraded/bootstrap: no quota store wired
+	}
+	id, ok := auth.IdentityFrom(r.Context())
+	if !ok || id == nil || id.ActiveTenantID == "" || id.ResolvedProjectID == "" {
+		return notFound("Resource not found.")
+	}
+	snap, err := d.clusterSnapshot(r)
+	if err != nil {
+		return err
+	}
+	cur, ok := snap[ref.VMID]
+	if !ok {
+		return &types.APIError{Code: "invalid_request", Message: "guest allocation is currently unavailable; try again", Status: http.StatusBadRequest}
+	}
+	target := store.Alloc{DiskGB: cur.DiskGB + deltaGiB}
+	return d.reserveGrowth(r, ref, snap, target, id.ActiveTenantID, id.ResolvedProjectID)
+}
+
+// reserveGrowth funnels both growth paths into the store reservation and maps
+// its verdicts onto the API contract (409 quota_exceeded on a cap hit).
+func (d *Deps) reserveGrowth(r *http.Request, ref proxmox.GuestRef, snap map[int]store.Alloc, target store.Alloc, tenantID, projectID string) error {
+	if err := d.Store.ReserveGuestGrowth(r.Context(), store.ReserveGrowthParams{
+		TenantID: tenantID, ProjectID: projectID, VMID: ref.VMID, Snapshot: snap, Target: target,
 	}); err != nil {
 		var qe store.ErrQuotaExceeded
 		if errors.As(err, &qe) {
 			return &types.APIError{Code: "quota_exceeded", Message: quotaExceededMessage(qe), Status: http.StatusConflict}
 		}
-		d.logger().Error("growth quota check", "vmid", ref.VMID, "err", err)
+		d.logger().Error("growth quota reservation", "vmid", ref.VMID, "err", err)
 		return &types.APIError{Code: "internal", Message: "Failed to verify quota.", Status: http.StatusInternalServerError}
 	}
 	return nil
@@ -224,7 +261,7 @@ func (d *Deps) UpdateGuestConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label := "Update virtual machine configuration"
-	d.trackRes(upid, label, "resizing", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node})
+	d.trackRes(upid, label, "resizing", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node}, activeTenantOf(r))
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
 }
 
@@ -293,8 +330,22 @@ func (d *Deps) ResizeGuestDisk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce quota on the disk grow (target size vs the guest's current total).
-	if err := d.enforceGrowth(r, ref, store.Alloc{DiskGB: int64(req.SizeGiB)}); err != nil {
+	// Measure the grow against the NAMED disk's own current size from the guest
+	// config (`size=` attribute). Comparing against the boot-disk maxdisk (the
+	// cluster snapshot) under-counts a non-boot-disk grow — e.g. growing a 10 GiB
+	// data disk to 30 GiB on a guest with a 32 GiB boot disk would look like a
+	// no-op. The per-disk delta is the honest quota charge.
+	cfg, err := d.PVE.GuestConfig(r.Context(), ref)
+	if err != nil {
+		httpserver.WriteError(w, err)
+		return
+	}
+	curGiB, apiErr := namedDiskSizeGiB(cfg, req.Disk)
+	if apiErr != nil {
+		httpserver.WriteError(w, apiErr)
+		return
+	}
+	if err := d.enforceDiskGrowthDelta(r, ref, int64(req.SizeGiB)-curGiB); err != nil {
 		httpserver.WriteError(w, err)
 		return
 	}
@@ -306,12 +357,42 @@ func (d *Deps) ResizeGuestDisk(w http.ResponseWriter, r *http.Request) {
 	}
 	label := "Resize disk"
 	if upid != "" {
-		d.trackRes(upid, label, "resizing", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node})
+		d.trackRes(upid, label, "resizing", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node}, activeTenantOf(r))
 	}
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
 }
 
 // ── config-string parsing ────────────────────────────────────────────────────
+
+// cfgInt reads a config value as an int (PVE mixes JSON numbers and numeric
+// strings); anything unparseable is 0 (unknown, never invented).
+func cfgInt(cfg map[string]any, key string) int {
+	v, err := strconv.Atoi(strings.TrimSpace(cfgString(cfg, key)))
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// pveMemoryMB parses PVE's memory config value in MiB: a plain integer
+// ("2048") or the newer property form ("current=2048"). Unparseable → 0
+// (unknown, never invented).
+func pveMemoryMB(v string) int64 {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return n
+	}
+	_, opts := parsePVEValue(v)
+	if cur := opts["current"]; cur != "" {
+		if n, err := strconv.ParseInt(cur, 10, 64); err == nil {
+			return n
+		}
+	}
+	return 0
+}
 
 func cfgString(cfg map[string]any, key string) string {
 	switch v := cfg[key].(type) {
@@ -400,6 +481,27 @@ func parseDisks(cfg map[string]any) []types.DiskConfig {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
+}
+
+// namedDiskSizeGiB returns the current provisioned size of ONE disk config key
+// in whole GiB, floored — conservative for delta math: flooring the current
+// size can only over-state a growth delta, never under-state it. Explicit
+// errors (never invented values): a missing key, a CD-ROM drive, or a config
+// entry without a parseable `size=` all reject the resize.
+func namedDiskSizeGiB(cfg map[string]any, key string) (int64, *types.APIError) {
+	raw := cfgString(cfg, key)
+	if raw == "" || raw == "none" {
+		return 0, &types.APIError{Code: "invalid_request", Message: fmt.Sprintf("disk %q not found on this guest", key), Status: http.StatusBadRequest}
+	}
+	_, opts := parsePVEValue(raw)
+	if opts["media"] == "cdrom" {
+		return 0, &types.APIError{Code: "invalid_request", Message: fmt.Sprintf("%q is a CD-ROM drive and cannot be resized", key), Status: http.StatusBadRequest}
+	}
+	bytes := parsePVESize(opts["size"])
+	if bytes <= 0 {
+		return 0, &types.APIError{Code: "invalid_request", Message: fmt.Sprintf("current size of disk %q is unavailable from Proxmox; try again", key), Status: http.StatusBadRequest}
+	}
+	return bytes >> 30, nil
 }
 
 // parsePVESize converts PVE size syntax ("32G", "512M", "1T", plain bytes)

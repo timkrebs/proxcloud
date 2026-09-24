@@ -17,9 +17,36 @@
 {
 	admin localhost:2019
 	# email you@example.com          # required for Mode C (ACME) only
+
+	# ── Client-IP trust chain (ADR-0034) ────────────────────────────────────
+	# Behind the Cloudflare Tunnel every request reaches Caddy from cloudflared,
+	# so the TCP peer IP is useless as a client identity. Caddy must derive the
+	# real client IP from CF-Connecting-IP — but ONLY when the connection comes
+	# from cloudflared itself (trusted_proxies), or any direct client could
+	# spoof it. The derived {client_ip} is what upstream/*.caddy writes into
+	# X-Real-IP for the backend (which in turn trusts it only from
+	# TRUSTED_PROXY_CIDRS and only when it parses as an IP).
+	#
+	# OPERATOR: set trusted_proxies to YOUR cloudflared source address. Both
+	# common layouts, pick one:
+	#   - cloudflared on the host, connecting via loopback (default below):
+	#       trusted_proxies static 127.0.0.1/32 ::1/128
+	#   - cloudflared as a container on the same docker network:
+	#       trusted_proxies static 172.18.0.0/16   # its docker net/IP — find it:
+	#       # docker network inspect proxcloud-edge -f '{{(index .IPAM.Config 0).Subnet}}'
+	# If cloudflared's source is NOT listed here, {client_ip} falls back to the
+	# TCP peer (cloudflared) — fail-safe: every user shares one bucket, nothing
+	# becomes spoofable.
+	servers {
+		trusted_proxies static 127.0.0.1/32 ::1/128
+		client_ip_headers CF-Connecting-IP
+	}
 }
 
 # ── Mode A (DEFAULT): plain HTTP behind cloudflared; Cloudflare terminates TLS ─
+# NOTE (flagged separately, operator decision): `:80` binds 0.0.0.0 — the origin
+# is reachable from the LAN, not just via the tunnel. With cloudflared on the
+# same host, `127.0.0.1:80` narrows the listener to loopback-only.
 :80 {
 	import /etc/caddy/upstream/active.caddy
 }

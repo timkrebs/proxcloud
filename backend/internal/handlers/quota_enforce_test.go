@@ -172,6 +172,10 @@ func TestQuotaEnforcedOnGrowth(t *testing.T) {
 				{ID: "qemu/101", Type: "qemu", VMID: 101, Node: "pve01", MaxCPU: 2, MaxMem: 2048 << 20, MaxDisk: 10 << 30},
 			}, nil
 		},
+		// The resize path measures the NAMED disk's own current size.
+		OnGuestConfig: func(context.Context, proxmox.GuestRef) (map[string]any, error) {
+			return map[string]any{"scsi0": "local-lvm:vm-101-disk-0,size=10G"}, nil
+		},
 		OnSetGuestConfig: func(context.Context, proxmox.GuestRef, map[string]any) (proxmox.UPID, error) {
 			atomic.AddInt32(&pveWrites, 1)
 			return "UPID:pve01:0:0:0:qmconfig:101:u@pam:", nil

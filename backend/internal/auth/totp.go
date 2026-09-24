@@ -353,6 +353,14 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, rateLimited())
 		return
 	}
+	// Per-account second-factor lockout (ADR-0034): counted across challenges
+	// and NOT cleared by a correct password, so a known-password attacker cannot
+	// grind TOTP by re-running Login for a fresh challenge every 5 attempts.
+	if h.Limiter != nil && !h.Limiter.AllowSecondFactor(ch.UserID) {
+		h.logger().Warn("login/totp blocked: second factor locked", "user_id", ch.UserID)
+		writeErr(w, rateLimited())
+		return
+	}
 	var req types.LoginTOTPRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, &types.APIError{Code: "invalid_request", Message: "Request body must be JSON with a code.", Status: http.StatusBadRequest})
@@ -391,6 +399,11 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		// Count the failure on the per-account 2FA lockout FIRST (survives the
+		// challenge self-consuming below and any later successful password).
+		if h.Limiter != nil {
+			h.Limiter.RecordSecondFactorFailure(ch.UserID)
+		}
 		locked, rerr := h.Store.RecordChallengeFailure(ctx, ch.ID, maxTOTPAttempts)
 		if rerr != nil {
 			h.logger().Error("login/totp: record failure", "err", rerr)
@@ -451,6 +464,7 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.Limiter != nil {
 		h.Limiter.Reset(ip)
+		h.Limiter.ResetSecondFactor(ch.UserID) // success clears the 2FA counter
 	}
 	http.SetCookie(w, cookie)
 	http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))

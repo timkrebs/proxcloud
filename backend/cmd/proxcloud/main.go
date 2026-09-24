@@ -380,8 +380,10 @@ func runServe(log *slog.Logger) {
 		ReadHeaderTimeout: 10 * time.Second,
 		// Bound slow-read request bodies and idle keep-alive connections
 		// (slow-loris / socket exhaustion). Deliberately NO global WriteTimeout:
-		// SSE (/api/events) and the console WebSocket stream for minutes and set
-		// their own write deadlines; ReadTimeout only bounds reading the request
+		// SSE (/api/events) arms a 30s per-write deadline via ResponseController
+		// (events.Handler) and the console WebSocket manages its own deadlines,
+		// so both stream for minutes without a stalled reader pinning a
+		// connection; ReadTimeout only bounds reading the request
 		// (headers+body), which is short even for those routes.
 		ReadTimeout:    20 * time.Second,
 		IdleTimeout:    120 * time.Second,

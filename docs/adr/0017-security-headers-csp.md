@@ -62,9 +62,16 @@ form-action 'self'
 
 The backend adds a `hostAllowlist` middleware: when `ALLOWED_HOSTS` is set, a
 request whose `Host` is not in the list is rejected `421 Misdirected Request`
-(DNS-rebinding / host-injection defense). Empty disables it (dev). Production
-sets `ALLOWED_HOSTS=portal.proxcloud.io,portal.staging.proxcloud.io` plus the
-internal compose service names.
+(DNS-rebinding / host-injection defense). Empty disables it (dev). Each
+environment lists the SAME host as its `FRONTEND_ORIGIN` plus its internal
+compose backend service name(s) — e.g. prod
+`ALLOWED_HOSTS=portal.proxcloud.io,proxcloud-blue-backend,proxcloud-green-backend`
+(each env lists only its own host; staging lists `staging.proxcloud.lab`, etc.).
+Loopback Hosts (`127.0.0.1`, `::1`, `localhost` — with or without a port) are
+ALWAYS accepted implicitly, even with a list configured: they can only be sent
+by on-box probes (the Docker `HEALTHCHECK` binary, deploy gates), and a
+DNS-rebinding page cannot make a browser send a loopback Host to this origin,
+so the exemption keeps probes working without weakening the defense.
 
 ## Residual / follow-ups
 

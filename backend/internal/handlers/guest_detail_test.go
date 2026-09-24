@@ -138,6 +138,11 @@ func TestGuestInterfacesAgentUnavailable(t *testing.T) {
 
 func TestResizeValidation(t *testing.T) {
 	mock := &proxmoxtest.MockClient{
+		// The resize path reads the guest config to measure the NAMED disk's
+		// current size (per-disk quota delta).
+		OnGuestConfig: func(context.Context, proxmox.GuestRef) (map[string]any, error) {
+			return map[string]any{"scsi0": "local-lvm:vm-101-disk-0,size=32G"}, nil
+		},
 		OnResizeDisk: func(_ context.Context, _ proxmox.GuestRef, disk, size string) (proxmox.UPID, error) {
 			if disk != "scsi0" || size != "64G" {
 				t.Errorf("resize args = %q %q", disk, size)

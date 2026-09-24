@@ -199,6 +199,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject oversize emails BEFORE the account-keyed limiter (or any hashing)
+	// sees them: no real address exceeds RFC 5321's 254 bytes, and the limiter
+	// maps must never be fed attacker-sized identifiers.
+	if len(req.Email) > maxEmailBytes {
+		writeErr(w, &types.APIError{Code: "invalid_request", Message: "A valid email is required.", Status: http.StatusBadRequest})
+		return
+	}
+
 	// Per-account lockout (IP-independent): an account under active brute force
 	// is locked regardless of the source IP each attempt arrives from, so a
 	// distributed attack rotating IPs cannot grind a single account.

@@ -8,6 +8,10 @@ handle @api {
 		# header_up SETS (overwrites) X-Forwarded-Proto so a client cannot spoof
 		# it; the backend keys the session cookie's Secure attribute off this.
 		header_up X-Forwarded-Proto https
+		# ADR-0034: ALWAYS overwrite X-Real-IP with Caddy's resolved client IP
+		# (see blue.caddy for the full rationale) — the backend's preference for
+		# X-Real-IP is safe only because this hop overwrites it.
+		header_up X-Real-IP {client_ip}
 		transport http {
 			versions 1.1                  # WS: keep the hop on HTTP/1.1 for Upgrade
 		}

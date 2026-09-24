@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
+	"github.com/timkrebs9/proxcloud/backend/internal/auth"
 	"github.com/timkrebs9/proxcloud/backend/internal/events"
 	"github.com/timkrebs9/proxcloud/backend/internal/httpserver"
 	"github.com/timkrebs9/proxcloud/backend/internal/proxmox"
@@ -149,7 +150,7 @@ func (d *Deps) DeleteGuest(w http.ResponseWriter, r *http.Request) {
 		label = "Delete container"
 	}
 	res := types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: st.Name}
-	d.trackRes(upid, label, "deleting", res)
+	d.trackRes(upid, label, "deleting", res, activeTenantOf(r))
 	// Release the ownership reservation once the destroy actually completes: a
 	// successful vzdestroy/qmdestroy frees the VMID for reuse (a tombstoned row
 	// reads as un-owned and is revived by the next reservation). A failed destroy
@@ -193,6 +194,11 @@ func (d *Deps) tombstoneOwnershipAfterDestroy(vmid int, upid proxmox.UPID) {
 	if _, err := d.Store.CancelJobsForVMID(ctx, vmid); err != nil {
 		d.logger().Warn("cancel jobs after destroy", "vmid", vmid, "err", err)
 	}
+	// Drop the freed VMID's notification entries so nothing carries forward to
+	// the VMID's next owner — belt and suspenders on top of the ring's stored-
+	// tenant filtering. (This also drops the just-completed delete notification;
+	// the durable activity log still shows the delete.)
+	d.Registry.DropVMID(vmid)
 }
 
 // track registers the task and announces it on the event stream. Guest name
@@ -207,16 +213,30 @@ func (d *Deps) track(upid proxmox.UPID, label, transitional string, ref proxmox.
 			}
 		}
 	}
-	d.trackRes(upid, label, transitional, res)
+	d.trackRes(upid, label, transitional, res, activeTenantOf(r))
 }
 
-func (d *Deps) trackRes(upid proxmox.UPID, label, transitional string, res types.TaskResource) {
+// trackRes registers the task under the OWNING tenant (the resolved scope of
+// the mutating request) so the notification ring can be tenant-filtered across
+// VMID reuse. tenantID "" (degraded/no scope) makes the entry admin-only.
+func (d *Deps) trackRes(upid proxmox.UPID, label, transitional string, res types.TaskResource, tenantID string) {
 	if d.Registry != nil {
-		d.Registry.Track(upid, label, transitional, res)
+		d.Registry.Track(upid, label, transitional, res, tenantID)
 	}
 	if d.Broker != nil {
 		d.Broker.Publish(events.Event{Name: "task", Data: types.TaskEvent{
 			UPID: string(upid), Action: label, Status: "running", Resource: &res,
 		}})
 	}
+}
+
+// activeTenantOf returns the caller's active tenant for notification ownership
+// tagging. On the tenant-scoped surface the authz chain has already verified
+// the session's active tenant matches the path tenant, so this is the resolved
+// owning scope; "" (unauthenticated/degraded) fails closed to admin-only.
+func activeTenantOf(r *http.Request) string {
+	if id, ok := auth.IdentityFrom(r.Context()); ok && id != nil {
+		return id.ActiveTenantID
+	}
+	return ""
 }

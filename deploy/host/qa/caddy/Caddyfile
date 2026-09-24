@@ -16,6 +16,12 @@ qa.proxcloud.lab {
 	handle @api {
 		reverse_proxy proxcloud-qa-backend:8080 {
 			flush_interval -1
+			# ADR-0034: ALWAYS overwrite X-Real-IP with the resolved client IP.
+			# QA fronts clients DIRECTLY (no tunnel), so {client_ip} is the TCP
+			# peer — still the correct value, and the overwrite guarantees a
+			# client-supplied X-Real-IP can never reach the backend (which
+			# prefers this header from its trusted proxy).
+			header_up X-Real-IP {client_ip}
 			transport http {
 				versions 1.1
 			}

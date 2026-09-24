@@ -213,7 +213,7 @@ func TestNotificationsScopedToTenant(t *testing.T) {
 	// Tenant A owns VMID 100; a tracked task produced a notification for it.
 	hh.fake.AddOwnership(tenantA, projA, 100, "lxc", "pve01", "active", nil)
 	hh.registry.Track("UPID:pve01:1:vzcreate:100:", "Create container", "provisioning",
-		types.TaskResource{Type: "lxc", VMID: 100, Name: "a-cache"})
+		types.TaskResource{Type: "lxc", VMID: 100, Name: "a-cache"}, tenantA)
 
 	cA := hh.cookieForTenant(t, userA, tenantA)
 	cB := hh.cookieForTenant(t, userB, tenantB)

@@ -25,23 +25,29 @@ type Outcome struct {
 	ExitStatus string
 }
 
-// Tracked is one Proxcloud-initiated task in flight.
+// Tracked is one Proxcloud-initiated task in flight. TenantID is the OWNING
+// tenant of the target guest at Track time ("" = no tenant — such a task's
+// notification is visible to platform admins only).
 type Tracked struct {
 	UPID         proxmox.UPID
 	Action       string // friendly label, e.g. "Start virtual machine"
 	Transitional string // guest status override while running
 	Resource     types.TaskResource
+	TenantID     string
 	notifID      string
 }
 
-// notifEntry pairs a client notification with the VMID it concerns, so the ring
-// can be filtered to the caller's owned resources. The notification ring is
-// process-global (one Registry), so returning it unfiltered would leak every
-// tenant's task activity — callers pass their owned-VMID set (tenancy iron
-// rule #1).
+// notifEntry pairs a client notification with the VMID it concerns and the
+// tenant that OWNED the guest when the entry was created. The ring is
+// process-global (one Registry) and VMIDs are caller-chosen AND REUSED after a
+// tombstone, so filtering by a live owned-VMID set would hand a freed VMID's
+// history (guest names, verbatim PVE errors) to its next owner. The stored
+// tenantID is the durable ownership fact the filter stands on (tenancy iron
+// rule #1); an empty tenantID fails closed to admin-only visibility.
 type notifEntry struct {
-	n    types.Notification
-	vmid int
+	n        types.Notification
+	vmid     int
+	tenantID string
 }
 
 // Registry is safe for concurrent use.
@@ -65,9 +71,12 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Track registers a just-submitted task and creates its running
-// notification. Detail should name the resource, e.g. "web-01 (VMID 101)".
-func (r *Registry) Track(upid proxmox.UPID, action, transitional string, res types.TaskResource) {
+// Track registers a just-submitted task and creates its running notification.
+// Detail should name the resource, e.g. "web-01 (VMID 101)". tenantID is the
+// tenant that OWNS the target guest (deploy CreateContext, the handler's
+// resolved scope, or the lifecycle ownership row); "" makes the notification
+// platform-admin-only — the fail-closed default for untenanted work.
+func (r *Registry) Track(upid proxmox.UPID, action, transitional string, res types.TaskResource, tenantID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -78,9 +87,10 @@ func (r *Registry) Track(upid proxmox.UPID, action, transitional string, res typ
 		name = fmt.Sprintf("%s/%d", res.Type, res.VMID)
 	}
 	r.running[upid] = &Tracked{
-		UPID: upid, Action: action, Transitional: transitional, Resource: res, notifID: id,
+		UPID: upid, Action: action, Transitional: transitional, Resource: res,
+		TenantID: tenantID, notifID: id,
 	}
-	r.prependNotif(notifEntry{vmid: res.VMID, n: types.Notification{
+	r.prependNotif(notifEntry{vmid: res.VMID, tenantID: tenantID, n: types.Notification{
 		ID:        id,
 		Kind:      "prog",
 		Title:     action,
@@ -177,12 +187,11 @@ func (r *Registry) Lookup(upid proxmox.UPID) (*Tracked, bool) {
 // UPID. Missing ID/CreatedAt are filled so callers can pass a partial
 // notification. It reuses the same bounded ring as tracked-task notifications.
 //
-// The ring is tenant-scoped by VMID (see Notifications), so callers pass the
-// guest's VMID to reach exactly the owning tenant. vmid 0 has no owner, making
-// a vmid-0 entry visible ONLY to platform admins — the fail-closed default for
-// notifications that concern no particular guest. Currently unused; the
-// scheduler warnings use the VMID-scoped SSE frames instead.
-func (r *Registry) Notify(vmid int, n types.Notification) {
+// tenantID is the owning tenant, same contract as Track; an empty tenantID is
+// visible ONLY to platform admins — the fail-closed default for notifications
+// that concern no particular tenant. Currently unused; the scheduler warnings
+// use the VMID-scoped SSE frames instead.
+func (r *Registry) Notify(vmid int, tenantID string, n types.Notification) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if n.ID == "" {
@@ -192,29 +201,31 @@ func (r *Registry) Notify(vmid int, n types.Notification) {
 	if n.CreatedAt.IsZero() {
 		n.CreatedAt = r.now().UTC()
 	}
-	r.prependNotif(notifEntry{vmid: vmid, n: n})
+	r.prependNotif(notifEntry{vmid: vmid, tenantID: tenantID, n: n})
 }
 
-// Notifications returns the ring newest-first, filtered to the caller's owned
-// VMIDs. all=true (platform admin) returns every entry. A non-admin caller sees
-// only notifications for guests its tenant owns — the ring is process-global, so
-// this filter is what prevents a cross-tenant activity leak (iron rule #1).
-func (r *Registry) Notifications(owned map[int]bool, all bool) []types.Notification {
+// Notifications returns the ring newest-first, filtered to the caller's
+// tenant. admin=true (platform admin) returns every entry. The filter compares
+// the tenant STORED on each entry at Track time — not a live owned-VMID set —
+// so a VMID freed by one tenant and reissued to another never carries the old
+// tenant's history forward (iron rule #1). A caller with no active tenant sees
+// nothing.
+func (r *Registry) Notifications(tenantID string, admin bool) []types.Notification {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]types.Notification, 0, len(r.notifs))
 	for _, e := range r.notifs {
-		if all || owned[e.vmid] {
+		if admin || (tenantID != "" && e.tenantID == tenantID) {
 			out = append(out, e.n)
 		}
 	}
 	return out
 }
 
-// MarkRead flags the given notification ids as read, but only for entries the
-// caller owns (all=true for platform admin) — so one tenant cannot flip another
-// tenant's notifications.
-func (r *Registry) MarkRead(ids []string, owned map[int]bool, all bool) {
+// MarkRead flags the given notification ids as read, but only for entries
+// belonging to the caller's tenant (admin=true for platform admin) — so one
+// tenant cannot flip another tenant's notifications, across VMID reuse too.
+func (r *Registry) MarkRead(ids []string, tenantID string, admin bool) {
 	set := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
 		set[id] = struct{}{}
@@ -222,10 +233,31 @@ func (r *Registry) MarkRead(ids []string, owned map[int]bool, all bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for i := range r.notifs {
-		if _, ok := set[r.notifs[i].n.ID]; ok && (all || owned[r.notifs[i].vmid]) {
+		if _, ok := set[r.notifs[i].n.ID]; ok && (admin || (tenantID != "" && r.notifs[i].tenantID == tenantID)) {
 			r.notifs[i].n.Read = true
 		}
 	}
+}
+
+// DropVMID removes every notification entry for vmid from the ring — the
+// belt-and-suspenders cleanup on top of tenant filtering, called at the guest
+// tombstone choke-points (user delete completion, TTL delete, deployment-set
+// member destroy) so a freed VMID carries NOTHING forward to its next owner.
+// The durable activity log (the /cluster/tasks proxy) is unaffected.
+func (r *Registry) DropVMID(vmid int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := r.notifs[:0]
+	for _, e := range r.notifs {
+		if e.vmid != vmid {
+			kept = append(kept, e)
+		}
+	}
+	// Zero the tail so dropped entries don't linger in the backing array.
+	for i := len(kept); i < len(r.notifs); i++ {
+		r.notifs[i] = notifEntry{}
+	}
+	r.notifs = kept
 }
 
 // AwaitCompletion blocks until the tracked task finishes (delivered by

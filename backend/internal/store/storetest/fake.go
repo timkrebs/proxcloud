@@ -917,6 +917,17 @@ func (f *Fake) computeUsageLocked(tenantID string, snapshot map[int]store.Alloc)
 				continue
 			}
 			a = al
+			// Growth reservations on an active row count at max(live, reserved)
+			// per dimension (mirrors PgStore.usageOfRow).
+			if o.ReservedVCPU != nil && *o.ReservedVCPU > a.VCPU {
+				a.VCPU = *o.ReservedVCPU
+			}
+			if o.ReservedRAMMB != nil && *o.ReservedRAMMB > a.RAMMB {
+				a.RAMMB = *o.ReservedRAMMB
+			}
+			if o.ReservedDiskGB != nil && *o.ReservedDiskGB > a.DiskGB {
+				a.DiskGB = *o.ReservedDiskGB
+			}
 		case "pending":
 			if o.ReservedVCPU != nil {
 				a.VCPU = *o.ReservedVCPU
@@ -993,18 +1004,103 @@ func checkGrowthFake(scope string, q *store.Quota, usage store.QuotaUsage, delta
 	return nil
 }
 
-// CheckGuestGrowth mirrors the real store's growth check in memory.
-func (f *Fake) CheckGuestGrowth(_ context.Context, p store.GrowthCheckParams) error {
+// ReserveGuestGrowth mirrors the real store's growth check + reservation in
+// memory: check under f.mu (the fake's serialization stand-in for the advisory
+// lock), then persist max(live, target) per requested dimension on the row.
+func (f *Fake) ReserveGuestGrowth(_ context.Context, p store.ReserveGrowthParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.failed("CheckGuestGrowth"); err != nil {
+	if err := f.failed("ReserveGuestGrowth"); err != nil {
 		return err
+	}
+	live, ok := p.Snapshot[p.VMID]
+	if !ok {
+		return fmt.Errorf("storetest: reserve guest growth: vmid %d missing from snapshot", p.VMID)
+	}
+	o, ok := f.ownership[p.VMID]
+	if !ok || o.TenantID != p.TenantID || (o.Status != "active" && o.Status != "pending") {
+		return store.ErrNotFound
+	}
+	// Delta vs the EFFECTIVE footprint max(live, existing reservation), mirroring
+	// PgStore.ReserveGuestGrowth (idempotent retries are free).
+	eff := live
+	if o.ReservedVCPU != nil && *o.ReservedVCPU > eff.VCPU {
+		eff.VCPU = *o.ReservedVCPU
+	}
+	if o.ReservedRAMMB != nil && *o.ReservedRAMMB > eff.RAMMB {
+		eff.RAMMB = *o.ReservedRAMMB
+	}
+	if o.ReservedDiskGB != nil && *o.ReservedDiskGB > eff.DiskGB {
+		eff.DiskGB = *o.ReservedDiskGB
+	}
+	var delta store.Alloc
+	if p.Target.VCPU > 0 && p.Target.VCPU > eff.VCPU {
+		delta.VCPU = p.Target.VCPU - eff.VCPU
+	}
+	if p.Target.RAMMB > 0 && p.Target.RAMMB > eff.RAMMB {
+		delta.RAMMB = p.Target.RAMMB - eff.RAMMB
+	}
+	if p.Target.DiskGB > 0 && p.Target.DiskGB > eff.DiskGB {
+		delta.DiskGB = p.Target.DiskGB - eff.DiskGB
 	}
 	tenantUsage, byProject := f.computeUsageLocked(p.TenantID, p.Snapshot)
-	if err := checkGrowthFake("project", f.quotas["project|"+p.ProjectID], byProject[p.ProjectID], p.Delta); err != nil {
+	if err := checkGrowthFake("project", f.quotas["project|"+p.ProjectID], byProject[p.ProjectID], delta); err != nil {
 		return err
 	}
-	return checkGrowthFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, p.Delta)
+	if err := checkGrowthFake("tenant", f.quotas["tenant|"+p.TenantID], tenantUsage, delta); err != nil {
+		return err
+	}
+	if p.Target.VCPU > 0 {
+		v := live.VCPU
+		if p.Target.VCPU > v {
+			v = p.Target.VCPU
+		}
+		o.ReservedVCPU = &v
+	}
+	if p.Target.RAMMB > 0 {
+		v := live.RAMMB
+		if p.Target.RAMMB > v {
+			v = p.Target.RAMMB
+		}
+		o.ReservedRAMMB = &v
+	}
+	if p.Target.DiskGB > 0 {
+		v := live.DiskGB
+		if p.Target.DiskGB > v {
+			v = p.Target.DiskGB
+		}
+		o.ReservedDiskGB = &v
+	}
+	o.UpdatedAt = f.Now()
+	return nil
+}
+
+// SetOwnershipReservation mirrors PgStore: write the reservation columns on a
+// live, tenant-owned row; nil leaves a column untouched.
+func (f *Fake) SetOwnershipReservation(_ context.Context, tenantID string, vmid int, rv *int, rr, rd *int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.failed("SetOwnershipReservation"); err != nil {
+		return err
+	}
+	o, ok := f.ownership[vmid]
+	if !ok || o.TenantID != tenantID || (o.Status != "active" && o.Status != "pending") {
+		return store.ErrNotFound
+	}
+	if rv != nil {
+		v := *rv
+		o.ReservedVCPU = &v
+	}
+	if rr != nil {
+		v := *rr
+		o.ReservedRAMMB = &v
+	}
+	if rd != nil {
+		v := *rd
+		o.ReservedDiskGB = &v
+	}
+	o.UpdatedAt = f.Now()
+	return nil
 }
 
 // ReserveOwnership mirrors the real store's reservation semantics in memory (the

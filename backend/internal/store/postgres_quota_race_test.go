@@ -145,3 +145,80 @@ func TestReserveOwnershipTenantLockAcrossProjects(t *testing.T) {
 		t.Fatalf("total pending across both projects = %d, want %d (tenant lock held)", tenantUsage.Count, cap)
 	}
 }
+
+// TestReserveGuestGrowthRaceRespectsCap is the M-a concurrency gate the fake's
+// mutex cannot prove against real Postgres: N parallel ReserveGuestGrowth calls
+// racing the SAME headroom must let exactly the headroom's worth succeed. Ten
+// active guests at 2 vCPU (usage 20) under a 24-vCPU cap leave room for ONE
+// +4 grow; each goroutine grows its own guest by 4, so exactly one wins — the
+// per-tenant advisory lock serializes the check AND the same-transaction
+// reservation write, closing the old check-then-act window.
+func TestReserveGuestGrowthRaceRespectsCap(t *testing.T) {
+	s := requireStore(t)
+	if _, err := s.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	resetQuotaTables(t, s)
+	t.Cleanup(func() { resetQuotaTables(t, s) })
+	ctx := context.Background()
+	tenantID, p1, _ := seedTenantProject(t, s)
+
+	const guests = 10
+	snap := map[int]Alloc{}
+	for i := 0; i < guests; i++ {
+		vmid := 3000 + i
+		if _, err := s.CreateOwnership(ctx, CreateOwnershipParams{
+			TenantID: tenantID, ProjectID: p1, VMID: vmid, GuestType: "qemu", Node: "pve01", Status: "active",
+		}); err != nil {
+			t.Fatalf("CreateOwnership vmid %d: %v", vmid, err)
+		}
+		snap[vmid] = Alloc{VCPU: 2, RAMMB: 512, DiskGB: 8}
+	}
+	// usage 20 vCPU; cap 24 → headroom 4 = exactly one +4 grow.
+	if _, err := s.UpsertQuota(ctx, UpsertQuotaParams{ScopeType: "tenant", ScopeID: tenantID, MaxVCPU: iptr(24)}); err != nil {
+		t.Fatalf("UpsertQuota: %v", err)
+	}
+
+	var (
+		wg        sync.WaitGroup
+		successes int64
+		quotaHits int64
+	)
+	for i := 0; i < guests; i++ {
+		wg.Add(1)
+		go func(vmid int) {
+			defer wg.Done()
+			cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			err := s.ReserveGuestGrowth(cctx, ReserveGrowthParams{
+				TenantID: tenantID, ProjectID: p1, VMID: vmid, Snapshot: snap,
+				Target: Alloc{VCPU: 6}, // +4 each; the cap admits one
+			})
+			var qe ErrQuotaExceeded
+			switch {
+			case err == nil:
+				atomic.AddInt64(&successes, 1)
+			case errors.As(err, &qe):
+				atomic.AddInt64(&quotaHits, 1)
+			default:
+				t.Errorf("vmid %d: unexpected error: %v", vmid, err)
+			}
+		}(3000 + i)
+	}
+	wg.Wait()
+
+	if successes != 1 {
+		t.Fatalf("grows succeeded %d times, want exactly 1 (headroom is 4 vCPU)", successes)
+	}
+	if quotaHits != guests-1 {
+		t.Fatalf("quota refusals = %d, want %d", quotaHits, guests-1)
+	}
+	// The DB agrees: usage counts the single reservation, never past the cap.
+	tenantUsage, _, err := s.ComputeUsage(ctx, tenantID, snap)
+	if err != nil {
+		t.Fatalf("ComputeUsage: %v", err)
+	}
+	if tenantUsage.VCPU != 24 {
+		t.Fatalf("usage after race = %d vCPU, want 24 (9 guests at live 2 + the winner's reserved footprint 6)", tenantUsage.VCPU)
+	}
+}

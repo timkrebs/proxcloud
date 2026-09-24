@@ -62,23 +62,37 @@ type Deps struct {
 }
 
 // New builds the chi router with the standard middleware stack.
+//
+// Ordering is deliberate (ADR-0034):
+//   - Recoverer and accessLog wrap EVERY rejection producer (421/429/403/413),
+//     so floods are visible in the access log and panic-safe;
+//   - securityHeaders runs before any middleware that can write a response, so
+//     421/429 rejections carry the hardening headers too;
+//   - trustedProxyHeaders resolves the real client IP before anything keys on it
+//     (rate limit, audit provenance, session IP column).
 func New(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(hostAllowlist(d.Cfg))
+	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
 	// Trusted-proxy boundary (replaces chi's unconditional RealIP, which the
 	// public-exposure audit flagged as spoofable): recover the real client IP
-	// from X-Forwarded-For/X-Real-IP ONLY when the immediate peer is a configured
-	// trusted proxy (Caddy on the docker edge net); from any other peer, STRIP
-	// the forwarded headers so a client reaching the origin directly cannot spoof
-	// the rate-limit key, audit provenance, or downgrade the Secure cookie.
+	// from X-Real-IP/X-Forwarded-For ONLY when the immediate peer is a configured
+	// trusted proxy (Caddy on the docker edge net) AND the value parses as an IP;
+	// from any other peer, STRIP the forwarded headers so a client reaching the
+	// origin directly cannot spoof the rate-limit key, audit provenance, or
+	// downgrade the Secure cookie.
 	r.Use(trustedProxyHeaders(d.Cfg))
-	// Global per-client request throttle (keyed on the now-trusted client IP);
-	// streaming routes are exempt (one long-lived request, own connection caps).
-	r.Use(rateLimit(newAPIRateLimiter(apiRateLimitPerMin, time.Minute), "/api/events", "/api/console/ws/"))
 	r.Use(accessLog(d.Log))
-	r.Use(middleware.Recoverer)
+	r.Use(hostAllowlist(d.Cfg))
+	// Global per-client request throttle. Authenticated requests key on a fast
+	// hash of the session cookie value; cookie-less requests key on the resolved
+	// client IP — so an unauthenticated flood sharing the tunnel/proxy IP cannot
+	// 429 signed-in users (ADR-0034). Only the on-box probes (/api/health, the CD
+	// gate's /api/v1/version) are exempt; the streaming routes are NOT — a stream
+	// counts once at open, which stops a random-cookie flood from exhausting the
+	// DB pool via per-open session lookups.
+	r.Use(rateLimit(newAPIRateLimiter(apiRateLimitPerMin, time.Minute), "/api/health", "/api/v1/version"))
 	r.Use(originCheck(d.Cfg))
 	r.Use(limitBody(maxRequestBodyBytes, "/api/events", "/api/console/ws/"))
 	r.Use(timeoutExcept(15*time.Second, "/api/events", "/api/console/ws/"))
@@ -270,6 +284,12 @@ func securityHeaders(next http.Handler) http.Handler {
 // hostAllowlist rejects (421 Misdirected Request) any request whose Host is not
 // in the configured allowlist — a DNS-rebinding / host-injection defense for the
 // directly-reachable origin. An empty allowlist disables the check.
+//
+// Loopback Hosts (127.0.0.1, ::1, localhost — with or without a port) are ALWAYS
+// accepted, even with an allowlist configured: a loopback Host can only be sent
+// by an on-box client (the Docker HEALTHCHECK binary, deploy-gate curl), and a
+// DNS-rebinding page cannot make a victim browser send a loopback Host to this
+// origin — so exempting it keeps the probes working without weakening the check.
 func hostAllowlist(cfg *config.Config) func(http.Handler) http.Handler {
 	set := map[string]bool{}
 	if cfg != nil {
@@ -284,7 +304,8 @@ func hostAllowlist(cfg *config.Config) func(http.Handler) http.Handler {
 				if h, _, err := net.SplitHostPort(host); err == nil {
 					host = h
 				}
-				if !set[strings.ToLower(host)] {
+				host = strings.Trim(host, "[]") // bare IPv6 literal ("[::1]")
+				if !set[strings.ToLower(host)] && !isLoopbackHost(host) {
 					WriteError(w, &types.APIError{
 						Code:    "misdirected_request",
 						Message: "Unknown host.",
@@ -298,6 +319,17 @@ func hostAllowlist(cfg *config.Config) func(http.Handler) http.Handler {
 	}
 }
 
+// isLoopbackHost reports whether host (no port, no brackets) is a loopback
+// address or the literal "localhost" — the on-box probe identities the
+// allowlist implicitly accepts.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // trustedProxyHeaders enforces the trusted-proxy boundary for forwarded headers.
 // When TrustProxyHeaders is on AND the immediate peer (RemoteAddr) is inside a
 // configured trusted CIDR, it recovers the real client IP into RemoteAddr
@@ -306,6 +338,11 @@ func hostAllowlist(cfg *config.Config) func(http.Handler) http.Handler {
 // X-Forwarded-Proto, so a client reaching the origin directly cannot spoof the
 // rate-limit key / audit IP or downgrade the Secure cookie. Mis-set trust makes
 // the per-IP limiter over-count (all traffic as the proxy), never under-count.
+//
+// The forwarded value is honored only when it PARSES as an IP (ADR-0034): a
+// garbage/non-IP header from a trusted peer falls back to the peer's own
+// address, so RemoteAddr never carries an attacker-chosen arbitrary string into
+// the rate-limit key, audit rows, or session IP columns.
 func trustedProxyHeaders(cfg *config.Config) func(http.Handler) http.Handler {
 	var trusted []*net.IPNet
 	trust := false
@@ -316,8 +353,8 @@ func trustedProxyHeaders(cfg *config.Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if trust && peerInCIDRs(r.RemoteAddr, trusted) {
-				if ip := firstForwardedIP(r); ip != "" {
-					r.RemoteAddr = ip
+				if ip := firstForwardedIP(r); ip != nil {
+					r.RemoteAddr = ip.String()
 				}
 			} else {
 				r.Header.Del("X-Forwarded-For")
@@ -347,19 +384,34 @@ func peerInCIDRs(remoteAddr string, cidrs []*net.IPNet) bool {
 	return false
 }
 
-// firstForwardedIP returns the real client IP the trusted proxy reported:
-// X-Real-IP if present, else the first (client-facing) entry of X-Forwarded-For.
-func firstForwardedIP(r *http.Request) string {
+// firstForwardedIP returns the real client IP the trusted proxy reported, or
+// nil when neither header carries a parseable IP.
+//
+// X-Real-IP is preferred over X-Forwarded-For — but that is safe ONLY under the
+// deployment contract (ADR-0034) that the edge proxy ALWAYS OVERWRITES
+// X-Real-IP with the connection's real client IP (Caddy: `header_up X-Real-IP
+// {client_ip}` in deploy/host/*/caddy). Caddy manages X-Forwarded-For itself
+// but passes a client-supplied X-Real-IP through untouched unless told to set
+// it, so the backend must never trust the header from a proxy that does not
+// overwrite it. Both candidates are net.ParseIP-validated here: a non-IP value
+// is ignored (fall through / fall back to the direct peer), never copied into
+// RemoteAddr.
+func firstForwardedIP(r *http.Request) net.IP {
 	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
-		return xr
+		if ip := net.ParseIP(strings.Trim(xr, "[]")); ip != nil {
+			return ip
+		}
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		first := xff
 		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+			first = xff[:i]
 		}
-		return strings.TrimSpace(xff)
+		if ip := net.ParseIP(strings.Trim(strings.TrimSpace(first), "[]")); ip != nil {
+			return ip
+		}
 	}
-	return ""
+	return nil
 }
 
 // maxRequestBodyBytes caps the request body the API reads on non-streaming
