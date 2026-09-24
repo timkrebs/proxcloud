@@ -41,6 +41,7 @@ var (
 // also have a flag override (flag wins when non-empty).
 type Config struct {
 	BaseURL   string
+	Origin    string // Origin header override (SMOKE_ORIGIN); empty = derived from BaseURL
 	Email     string
 	Password  string
 	ExpectRef string // deployed ref: 40-hex SHA or vX.Y.Z (empty => version must be non-empty only)
@@ -94,6 +95,7 @@ func loadConfig() (Config, error) {
 	}
 	var vmid string
 	flag.StringVar(&c.BaseURL, "base-url", envOr("SMOKE_BASE_URL", ""), "base URL of the deployed origin, e.g. https://staging.proxcloud.lab")
+	flag.StringVar(&c.Origin, "origin", envOr("SMOKE_ORIGIN", ""), "Origin header for API mutations; must equal the deployment's FRONTEND_ORIGIN (default: derived from base-url)")
 	flag.StringVar(&c.Email, "email", envOr("SMOKE_EMAIL", ""), "seeded smoke user email (SMOKE_EMAIL)")
 	flag.StringVar(&c.Password, "password", envOr("SMOKE_PASSWORD", ""), "seeded smoke user password (SMOKE_PASSWORD)")
 	flag.StringVar(&c.ExpectRef, "expect-ref", envOr("SMOKE_EXPECT_REF", ""), "deployed ref to assert: 40-hex SHA or vX.Y.Z")
