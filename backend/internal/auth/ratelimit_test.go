@@ -20,20 +20,20 @@ func TestAccountLockout(t *testing.T) {
 	for i := 0; i < accountFailThreshold-1; i++ {
 		l.RecordFailure(email)
 	}
-	if !l.AllowAccount(email) {
+	if !allowed(l, email) {
 		t.Fatal("account locked before the threshold")
 	}
 	l.RecordFailure(email) // crosses the threshold
-	if l.AllowAccount(" victim@example.io ") {
+	if allowed(l, " victim@example.io ") {
 		t.Fatal("account not locked after threshold failures (or key not normalized)")
 	}
-	if !l.AllowAccount("someone-else@example.io") {
+	if !allowed(l, "someone-else@example.io") {
 		t.Fatal("an unrelated account was locked — lockout must be per-account")
 	}
 
 	// Lock expires after the max backoff.
 	l.now = func() time.Time { return base.Add(accountLockMax + time.Second) }
-	if !l.AllowAccount(email) {
+	if !allowed(l, email) {
 		t.Fatal("lock did not expire after the backoff")
 	}
 
@@ -42,11 +42,11 @@ func TestAccountLockout(t *testing.T) {
 	for i := 0; i < accountFailThreshold; i++ {
 		l.RecordFailure(email)
 	}
-	if l.AllowAccount(email) {
+	if allowed(l, email) {
 		t.Fatal("account not locked")
 	}
 	l.ResetAccount(email)
-	if !l.AllowAccount(email) {
+	if !allowed(l, email) {
 		t.Fatal("ResetAccount did not clear the lock")
 	}
 }
@@ -69,7 +69,7 @@ func TestAccountLockoutDecays(t *testing.T) {
 	now = base.Add(failureDecay + time.Second)
 	// …so the next failure counts as 1, not accountFailThreshold: no lock.
 	l.RecordFailure(email)
-	if !l.AllowAccount(email) {
+	if !allowed(l, email) {
 		t.Fatal("account locked although the failure streak had decayed")
 	}
 	// And the lock duration is always bounded: even a long streak caps at
@@ -77,18 +77,24 @@ func TestAccountLockoutDecays(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		l.RecordFailure(email)
 	}
-	if l.AllowAccount(email) {
+	if allowed(l, email) {
 		t.Fatal("account not locked after a heavy streak")
 	}
 	now = now.Add(accountLockMax + time.Second)
-	if !l.AllowAccount(email) {
+	if !allowed(l, email) {
 		t.Fatal("lock outlasted accountLockMax — must be bounded")
 	}
 }
 
-// TestAccountMapBounded: the account map is keyed on fixed-size SHA-256 digests
-// and hard-capped — distinct emails past the cap cannot grow it beyond
-// maxLimiterEntries.
+// allowed is AllowAccount's verdict alone.
+func allowed(l *LoginLimiter, email string) bool {
+	ok, _ := l.AllowAccount(email)
+	return ok
+}
+
+// TestAccountMapBounded: the account maps are keyed on fixed-size SHA-256
+// digests and hard-capped — distinct emails past the cap cannot grow the
+// streak map beyond maxLimiterEntries.
 func TestAccountMapBounded(t *testing.T) {
 	l := NewLoginLimiter()
 	base := time.Unix(1_700_000_000, 0)
@@ -97,14 +103,14 @@ func TestAccountMapBounded(t *testing.T) {
 		l.RecordFailure(fmt.Sprintf("bot-%d@example.io", i))
 	}
 	l.mu.Lock()
-	n := len(l.accounts.entries)
+	n := len(l.accounts.streaks)
 	l.mu.Unlock()
 	if n > maxLimiterEntries {
-		t.Fatalf("accounts map = %d entries under a distinct-email flood, cap is %d", n, maxLimiterEntries)
+		t.Fatalf("streak map = %d entries under a distinct-email flood, cap is %d", n, maxLimiterEntries)
 	}
 	// Keys are digests, not raw emails.
 	l.mu.Lock()
-	for k := range l.accounts.entries {
+	for k := range l.accounts.streaks {
 		if len(k) != 64 { // hex SHA-256
 			t.Fatalf("account key %q is not a fixed-size digest", k)
 		}
@@ -173,51 +179,111 @@ func TestSecondFactorCounterSurvivesPasswordSuccess(t *testing.T) {
 	}
 }
 
-// TestLockEvictionNeverUnlocks replays the security review's proof of concept:
-// a victim locked at the maximum, then a flood of failures on junk emails. The
-// old hard-cap eviction preferred the victim's lock (it expired soonest), so
-// the flood unlocked the account and erased its streak. A locked or
-// at-threshold entry must never be evicted; when the map is full of them, a
-// new key simply goes uncounted.
+// TestLockEvictionNeverUnlocks replays the second review's proof of concept: a
+// victim locked at the maximum, then a flood of failures on other emails, past
+// the streak cap so it forces evictions. The old hard-cap eviction preferred
+// the victim's lock (it expired soonest), so the flood unlocked the account and
+// erased its streak. A locked or at-threshold entry must never be evicted —
+// whether it sits in the lock map or, with that map full, stayed behind in the
+// streak map.
 func TestLockEvictionNeverUnlocks(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		maxLocks int
+	}{
+		{"lock map has room", maxLockedEntries},
+		{"lock map full", 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			l := NewLoginLimiter()
+			l.accounts.maxStreaks, l.accounts.maxLocks = 64, tt.maxLocks
+			base := time.Unix(1_700_000_000, 0)
+			l.now = func() time.Time { return base }
+			const victim = "victim@example.io"
+
+			for i := 0; i < accountFailThreshold+4; i++ { // escalated to the max lock
+				l.RecordFailure(victim)
+			}
+			for i := 0; i < 4*64; i++ {
+				l.RecordFailure(fmt.Sprintf("account-%d@example.io", i))
+			}
+			if allowed(l, victim) {
+				t.Fatal("a failure flood evicted the victim's active lock")
+			}
+			l.mu.Lock()
+			s := l.accounts.get(accountKey(victim), base)
+			l.mu.Unlock()
+			if s == nil || s.failures != accountFailThreshold+4 {
+				t.Fatalf("victim's failure streak was not preserved: %+v", s)
+			}
+		})
+	}
+}
+
+// TestJunkFloodCannotUntrackAccounts replays the third review's proof of
+// concept with the production caps: drive 12k junk emails to lockout, then
+// guess a fresh account's password. Before, locks shared the 10k-entry map:
+// full of them, it could not take the fresh account, which then went
+// untracked — 1,000 wrong guesses left it unlocked. Locked keys now have their
+// own map, far larger than the hash rate can fill, so every junk lock stays
+// and the fresh account still locks at the threshold.
+func TestJunkFloodCannotUntrackAccounts(t *testing.T) {
 	l := NewLoginLimiter()
 	base := time.Unix(1_700_000_000, 0)
 	l.now = func() time.Time { return base }
-	const victim = "victim@example.io"
+	const junk = maxLimiterEntries + 2_000
 
-	for i := 0; i < accountFailThreshold+4; i++ { // escalated to the max lock
+	for i := 0; i < junk; i++ {
+		for j := 0; j < accountFailThreshold; j++ {
+			l.RecordFailure(fmt.Sprintf("junk-%d@example.io", i))
+		}
+	}
+	if n := len(l.accounts.locks); n != junk {
+		t.Fatalf("lock map holds %d junk locks, want all %d", n, junk)
+	}
+	const victim = "fresh-victim@example.io"
+	for i := 0; i < accountFailThreshold; i++ {
+		if !allowed(l, victim) {
+			t.Fatalf("victim refused at attempt %d, before reaching the threshold", i)
+		}
 		l.RecordFailure(victim)
 	}
-	for i := 0; i < maxLimiterEntries; i++ {
-		l.RecordFailure(fmt.Sprintf("junk-%d@example.io", i))
+	if allowed(l, victim) {
+		t.Fatal("the fresh account was not locked after the threshold, despite the junk flood")
 	}
-	if l.AllowAccount(victim) {
-		t.Fatal("a junk-email flood evicted the victim's active lock")
-	}
-	l.mu.Lock()
-	s := l.accounts.entries[accountKey(victim)]
-	l.mu.Unlock()
-	if s == nil || s.failures != accountFailThreshold+4 {
-		t.Fatalf("victim's failure streak was not preserved: %+v", s)
-	}
+}
 
-	// Fill the map entirely with locked accounts: a brand-new key is refused a
-	// slot rather than evicting any of them.
-	l2 := NewLoginLimiter()
-	l2.now = func() time.Time { return base }
-	for i := 0; i < maxLimiterEntries; i++ {
+// TestFullAccountTrackerFailsClosed: were both maps ever saturated — every
+// lock slot taken and nothing evictable left in the streak map — an email not
+// already tracked is refused, and reported as saturation, rather than allowed
+// with its failures uncounted; and no lock is evicted to make room. The caps
+// are shrunk here; in production they sit far beyond the hash rate's reach.
+func TestFullAccountTrackerFailsClosed(t *testing.T) {
+	l := NewLoginLimiter()
+	l.accounts.maxStreaks, l.accounts.maxLocks = 8, 16
+	base := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return base }
+	const locked = 8 + 16
+
+	for i := 0; i < locked; i++ {
 		for j := 0; j < accountFailThreshold; j++ {
-			l2.RecordFailure(fmt.Sprintf("locked-%d@example.io", i))
+			l.RecordFailure(fmt.Sprintf("locked-%d@example.io", i))
 		}
 	}
-	l2.RecordFailure("newcomer@example.io")
-	for i := 0; i < maxLimiterEntries; i++ {
-		if l2.AllowAccount(fmt.Sprintf("locked-%d@example.io", i)) {
-			t.Fatalf("locked account %d was evicted to admit a new key", i)
+	if ok, saturated := l.AllowAccount("newcomer@example.io"); ok || !saturated {
+		t.Fatalf("untracked email while saturated = (allowed %v, saturated %v), want (false, true)", ok, saturated)
+	}
+	l.RecordFailure("newcomer@example.io")
+	for i := 0; i < locked; i++ {
+		if ok, saturated := l.AllowAccount(fmt.Sprintf("locked-%d@example.io", i)); ok || saturated {
+			t.Fatalf("locked email %d = (allowed %v, saturated %v), want a plain lock", i, ok, saturated)
 		}
 	}
-	if n := len(l2.accounts.entries); n != maxLimiterEntries {
-		t.Fatalf("map holds %d entries, want exactly the cap %d", n, maxLimiterEntries)
+	// Once the locks have expired and the streaks decayed, the slots are
+	// reclaimable again.
+	l.now = func() time.Time { return base.Add(failureDecay + time.Minute) }
+	if !allowed(l, "newcomer@example.io") {
+		t.Fatal("the tracker did not recover after its entries expired")
 	}
 }
 
@@ -237,11 +303,11 @@ func TestLockoutRelocksAfterExpiry(t *testing.T) {
 		l.RecordFailure(email)
 	}
 	now = now.Add(accountLockMax + time.Second)
-	if !l.AllowAccount(email) {
+	if !allowed(l, email) {
 		t.Fatal("the lock did not expire")
 	}
 	l.RecordFailure(email)
-	if l.AllowAccount(email) {
+	if allowed(l, email) {
 		t.Fatal("one failure after the lock expired did not re-lock the account")
 	}
 }

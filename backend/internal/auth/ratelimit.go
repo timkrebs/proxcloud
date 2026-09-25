@@ -57,6 +57,15 @@ const (
 	// maxLimiterEntries hard-caps each limiter map so a distinct-key flood
 	// cannot grow memory without bound.
 	maxLimiterEntries = 10_000
+	// maxLockedEntries caps a failure tracker's keys AT the threshold (locked,
+	// or re-locked by their next failure), which are never evicted. Each one
+	// costs an attacker threshold failed password hashes, and the hash
+	// semaphore bounds those globally: at the ~70 verifications/s the third
+	// security review measured (Argon2id, bcryptConcurrent slots, Apple M4
+	// Pro), at most ~100k keys can reach the threshold within one
+	// failureDecay. The cap sits well above that (~50 MB were it ever full);
+	// past it the tracker fails closed rather than stop counting.
+	maxLockedEntries = 1 << 18
 	// limiterPruneEvery is the minimum gap between sweeps of expired entries,
 	// so a key flood cannot force a full-map scan on every request.
 	limiterPruneEvery = 10 * time.Second
@@ -85,19 +94,35 @@ func (s *limiterState) expiresAt() time.Time {
 
 // failureTracker is one bounded, decaying failure map and its lock policy.
 // Callers hold LoginLimiter.mu.
+//
+// Keys below the threshold live in streaks, capped at maxStreaks: when it is
+// full, the unprotected entry whose relevance ends soonest makes room, so junk
+// keys can only push out a streak of fewer than threshold failures, and only
+// after cycling out every older streak first. A key reaching the threshold
+// moves to locks, which nothing is ever evicted from and which is capped far
+// above what the hash rate can fill (maxLockedEntries). Were locks full, the
+// key would stay in streaks, protected there; once streaks too held nothing
+// evictable, a new key could not be counted and callers refuse it (canTrack):
+// fail closed, never uncounted guesses.
 type failureTracker struct {
-	entries   map[string]*limiterState
-	lastPrune time.Time
-	threshold int
-	lockBase  time.Duration
-	lockMax   time.Duration
-	escalate  bool // double the lock per failure past the threshold (capped)
+	streaks    map[string]*limiterState
+	locks      map[string]*limiterState
+	maxStreaks int
+	maxLocks   int
+	lastPrune  time.Time
+	threshold  int
+	lockBase   time.Duration
+	lockMax    time.Duration
+	escalate   bool // double the lock per failure past the threshold (capped)
 }
 
 func newFailureTracker(threshold int, lockBase, lockMax time.Duration, escalate bool) *failureTracker {
 	return &failureTracker{
-		entries:   map[string]*limiterState{},
-		threshold: threshold, lockBase: lockBase, lockMax: lockMax, escalate: escalate,
+		streaks:    map[string]*limiterState{},
+		locks:      map[string]*limiterState{},
+		maxStreaks: maxLimiterEntries,
+		maxLocks:   maxLockedEntries,
+		threshold:  threshold, lockBase: lockBase, lockMax: lockMax, escalate: escalate,
 	}
 }
 
@@ -106,35 +131,57 @@ func newFailureTracker(threshold int, lockBase, lockMax time.Duration, escalate 
 // re-locks). Evicting such an entry would unlock an account under attack — a
 // flood of junk keys must never buy an attacker a victim's lock.
 func (t *failureTracker) protected(s *limiterState, now time.Time) bool {
+	if !now.Before(s.expiresAt()) {
+		return false // lock over and streak decayed: garbage awaiting the next sweep
+	}
 	return now.Before(s.lockedUntil) || s.failures >= t.threshold
+}
+
+// get returns key's live entry, or nil — dropping it if it has expired.
+func (t *failureTracker) get(key string, now time.Time) *limiterState {
+	for _, m := range [...]map[string]*limiterState{t.locks, t.streaks} {
+		if s := m[key]; s != nil {
+			if now.Before(s.expiresAt()) {
+				return s
+			}
+			delete(m, key)
+			return nil
+		}
+	}
+	return nil
 }
 
 // locked reports whether key is locked at now.
 func (t *failureTracker) locked(key string, now time.Time) bool {
-	s := t.entries[key]
+	s := t.get(key, now)
 	return s != nil && now.Before(s.lockedUntil)
 }
 
+// canTrack reports whether a failure for key would be counted: key is
+// tracked already, or streaks has, or can make, room for it.
+func (t *failureTracker) canTrack(key string, now time.Time) bool {
+	return t.get(key, now) != nil || t.makeRoom(now)
+}
+
+// reset forgets key's failures and any lock.
+func (t *failureTracker) reset(key string) {
+	delete(t.streaks, key)
+	delete(t.locks, key)
+}
+
 // recordFailure applies one failure to key. engaged reports that this failure
-// set a lock. tracked is false only when key is new and the map is full of
-// protected entries: the failure then goes uncounted rather than evicting an
-// active lock (the per-IP limiter still applies to it).
+// set a lock. tracked is false only when key is new and the tracker is
+// saturated (see failureTracker): the failure then goes uncounted rather than
+// evicting an active lock, which is why callers refuse such keys up front.
 func (t *failureTracker) recordFailure(key string, now time.Time) (engaged, tracked bool) {
-	if now.Sub(t.lastPrune) >= limiterPruneEvery {
-		t.lastPrune = now
-		for k, s := range t.entries {
-			if !now.Before(s.expiresAt()) {
-				delete(t.entries, k)
-			}
-		}
-	}
-	s := t.entries[key]
+	t.pruneExpired(now)
+	s := t.get(key, now)
 	if s == nil {
-		if len(t.entries) >= maxLimiterEntries && !t.evictOne(now) {
+		if !t.makeRoom(now) {
 			return false, false
 		}
 		s = &limiterState{}
-		t.entries[key] = s
+		t.streaks[key] = s
 	}
 	if now.Sub(s.lastFailure) > failureDecay {
 		s.failures = 0 // the streak decayed — never a permanent count
@@ -152,18 +199,42 @@ func (t *failureTracker) recordFailure(key string, now time.Time) (engaged, trac
 		s.lockedUntil = now.Add(backoff)
 		s.blockSeen = false
 		engaged = true
+		if _, inStreaks := t.streaks[key]; inStreaks && len(t.locks) < t.maxLocks {
+			delete(t.streaks, key)
+			t.locks[key] = s
+		}
 	}
 	return engaged, true
 }
 
-// evictOne removes the UNPROTECTED entry whose relevance ends soonest and
-// reports whether it found one. O(n), but it only runs when a new key meets a
-// full map, and only on failed-credential paths already bounded by the per-IP
-// limiter and the password-hash semaphore.
-func (t *failureTracker) evictOne(now time.Time) bool {
+// pruneExpired sweeps expired entries from both maps, at most once per
+// limiterPruneEvery so a key flood cannot force a scan per request.
+func (t *failureTracker) pruneExpired(now time.Time) {
+	if now.Sub(t.lastPrune) < limiterPruneEvery {
+		return
+	}
+	t.lastPrune = now
+	for _, m := range [...]map[string]*limiterState{t.streaks, t.locks} {
+		for k, s := range m {
+			if !now.Before(s.expiresAt()) {
+				delete(m, k)
+			}
+		}
+	}
+}
+
+// makeRoom reports whether streaks can take one more key, evicting the
+// UNPROTECTED entry whose relevance ends soonest when it is full. O(n) over at
+// most maxStreaks, but it only runs when a new key meets a full map, on
+// failed-credential paths already bounded by the per-IP limiter and the
+// password-hash semaphore.
+func (t *failureTracker) makeRoom(now time.Time) bool {
+	if len(t.streaks) < t.maxStreaks {
+		return true
+	}
 	var victim string
 	var soonest time.Time
-	for k, s := range t.entries {
+	for k, s := range t.streaks {
 		if t.protected(s, now) {
 			continue
 		}
@@ -174,11 +245,15 @@ func (t *failureTracker) evictOne(now time.Time) bool {
 	if victim == "" {
 		return false
 	}
-	delete(t.entries, victim)
+	delete(t.streaks, victim)
 	return true
 }
 
 // LoginLimiter is safe for concurrent use.
+//
+// The password lockout keys on the email alone, whether or not an account
+// exists: every email locks, escalates and survives floods alike, so a lockout
+// reveals nothing about which emails are registered.
 type LoginLimiter struct {
 	mu           sync.Mutex
 	attempts     map[string][]time.Time // per-IP fixed window, keyed by LimiterIPKey
@@ -208,15 +283,25 @@ func accountKey(email string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// AllowAccount reports whether the account is NOT currently locked out. Check it
-// before spending a credential verification so a locked account short-circuits.
-func (l *LoginLimiter) AllowAccount(email string) bool {
+// AllowAccount reports whether a login for email may proceed to credential
+// verification; check it before spending a password hash so a locked account
+// short-circuits. It refuses a locked account and, failing closed, one whose
+// failures the tracker could not count; saturated reports that second case,
+// which takes a flood of locked keys far beyond the hash rate's reach.
+func (l *LoginLimiter) AllowAccount(email string) (allowed, saturated bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return !l.accounts.locked(accountKey(email), l.now())
+	key, now := accountKey(email), l.now()
+	if l.accounts.locked(key, now) {
+		return false, false
+	}
+	if !l.accounts.canTrack(key, now) {
+		return false, true
+	}
+	return true, false
 }
 
-// RecordFailure counts a failed login for the account and, past the threshold,
+// RecordFailure counts a failed login for email and, past the threshold,
 // applies exponential backoff capped at accountLockMax. Keyed by account, so
 // rotating source IPs does not evade it; the streak decays, so it is never
 // permanent.
@@ -232,7 +317,7 @@ func (l *LoginLimiter) RecordFailure(email string) {
 func (l *LoginLimiter) ResetAccount(email string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.accounts.entries, accountKey(email))
+	l.accounts.reset(accountKey(email))
 }
 
 // SecondFactorVerdict is the outcome of reserving one second-factor attempt.
@@ -260,7 +345,7 @@ func (l *LoginLimiter) ReserveSecondFactorAttempt(userID string) SecondFactorVer
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
-	if s := l.secondFactor.entries[userID]; s != nil && now.Before(s.lockedUntil) {
+	if s := l.secondFactor.get(userID, now); s != nil && now.Before(s.lockedUntil) {
 		first := !s.blockSeen
 		s.blockSeen = true
 		return SecondFactorVerdict{FirstBlock: first}
@@ -283,7 +368,7 @@ func (l *LoginLimiter) secondFactorLocked(userID string) bool {
 func (l *LoginLimiter) ResetSecondFactor(userID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.secondFactor.entries, userID)
+	l.secondFactor.reset(userID)
 }
 
 // Allow records an attempt from ip and reports whether it is within the

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -267,6 +268,54 @@ func TestLoginRateLimited(t *testing.T) {
 	h.Login(rec, jsonReq(http.MethodPost, "/api/auth/login", body))
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("rate-limited attempt status = %d, want 429", rec.Code)
+	}
+}
+
+// TestLoginLockoutSurvivesJunkFlood is the third review's M-1R regression
+// through the real handler: saturate the lockout bookkeeping with junk emails
+// driven to lockout, then guess a real account's password from a fresh IP per
+// attempt (so the per-IP window never fires). The account must still lock at
+// the threshold — and an email with no account must lock exactly the same way,
+// so the lockout cannot be used to find out which emails exist.
+func TestLoginLockoutSurvivesJunkFlood(t *testing.T) {
+	h, fs := newTestHandler(t)
+	seedUser(t, h, fs, "victim@b.com", "correct-horse-battery", false)
+	for i := 0; i < maxLimiterEntries+100; i++ {
+		for j := 0; j < accountFailThreshold; j++ {
+			h.Limiter.RecordFailure(fmt.Sprintf("junk-%d@b.com", i))
+		}
+	}
+	ip := 0
+	login := func(email string) int {
+		ip++
+		req := jsonReq(http.MethodPost, "/api/auth/login", `{"email":"`+email+`","password":"wrong-guess"}`)
+		req.RemoteAddr = fmt.Sprintf("203.0.113.%d:1234", ip)
+		rec := httptest.NewRecorder()
+		h.Login(rec, req)
+		return rec.Code
+	}
+	for _, email := range []string{"victim@b.com", "nobody@b.com"} {
+		for i := 0; i < accountFailThreshold; i++ {
+			if code := login(email); code != http.StatusUnauthorized {
+				t.Fatalf("%s attempt %d = %d, want 401", email, i, code)
+			}
+		}
+		if code := login(email); code != http.StatusTooManyRequests {
+			t.Fatalf("%s after %d failures = %d, want 429 (locked)", email, accountFailThreshold, code)
+		}
+	}
+	// Both locks must also outlast a flood of junk streaks that forces
+	// evictions (streak cap shrunk to keep the test fast): a tracker that
+	// dropped unknown emails' locks first would tell a flooder which emails
+	// exist.
+	h.Limiter.accounts.maxStreaks = 64
+	for i := 0; i < 4*64; i++ {
+		h.Limiter.RecordFailure(fmt.Sprintf("streak-%d@b.com", i))
+	}
+	for _, email := range []string{"victim@b.com", "nobody@b.com"} {
+		if code := login(email); code != http.StatusTooManyRequests {
+			t.Fatalf("%s after a streak flood = %d, want 429 (lock kept)", email, code)
+		}
 	}
 }
 

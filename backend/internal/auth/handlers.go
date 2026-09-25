@@ -209,11 +209,18 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	// Per-account lockout (IP-independent): an account under active brute force
 	// is locked regardless of the source IP each attempt arrives from, so a
-	// distributed attack rotating IPs cannot grind a single account.
-	if h.Limiter != nil && !h.Limiter.AllowAccount(req.Email) {
-		h.logger().Warn("login blocked: account locked out", "ip", ip)
-		writeErr(w, rateLimited())
-		return
+	// distributed attack rotating IPs cannot grind a single account. It keys on
+	// the email alone, so it treats unknown emails exactly like real ones.
+	if h.Limiter != nil {
+		if allowed, saturated := h.Limiter.AllowAccount(req.Email); !allowed {
+			if saturated {
+				h.logger().Error("login refused: account lockout tracker saturated", "ip", ip)
+			} else {
+				h.logger().Warn("login blocked: account locked out", "ip", ip)
+			}
+			writeErr(w, rateLimited())
+			return
+		}
 	}
 
 	ctx := r.Context()
