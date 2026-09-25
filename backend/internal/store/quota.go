@@ -354,6 +354,9 @@ func (s *PgStore) ReserveGuestGrowth(ctx context.Context, p ReserveGrowthParams)
 		if err != nil {
 			return err
 		}
+		if own.Status == "pending" {
+			return ErrGuestPending
+		}
 		eff := EffectiveFootprint(live, own)
 		charge := GrowthCharge(eff, p)
 		if charge == (Alloc{}) {

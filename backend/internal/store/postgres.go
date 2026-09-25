@@ -27,6 +27,12 @@ var ErrNotFound = errors.New("store: not found")
 // raw Postgres error. It is the write-path counterpart to ErrNotFound.
 var ErrConflict = errors.New("store: conflict")
 
+// ErrGuestPending is returned by ReserveGuestGrowth for a guest whose create
+// has not finished (its ownership row is still pending). Quota counts a
+// pending guest at its create-time reservation only, so it may not grow until
+// it is active.
+var ErrGuestPending = errors.New("store: guest is still being created")
+
 // isUniqueViolation reports whether err (or anything it wraps) is a Postgres
 // unique-violation, SQLSTATE 23505 — the signal that a slug/pool/VMID collided
 // with an existing UNIQUE constraint. Used to translate the raw pgx error into

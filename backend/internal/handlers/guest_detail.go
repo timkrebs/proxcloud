@@ -162,6 +162,9 @@ func (d *Deps) reserveGrowth(r *http.Request, ref proxmox.GuestRef, build func(c
 		if errors.As(err, &qe) {
 			return &types.APIError{Code: "quota_exceeded", Message: quotaExceededMessage(qe), Status: http.StatusConflict}
 		}
+		if errors.Is(err, store.ErrGuestPending) {
+			return &types.APIError{Code: "conflict", Message: "The guest is still being created — try again once it is ready.", Status: http.StatusConflict}
+		}
 		d.logger().Error("growth quota reservation", "vmid", ref.VMID, "err", err)
 		return &types.APIError{Code: "internal", Message: "Failed to verify quota.", Status: http.StatusInternalServerError}
 	}

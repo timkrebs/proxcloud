@@ -1023,6 +1023,9 @@ func (f *Fake) ReserveGuestGrowth(_ context.Context, p store.ReserveGrowthParams
 	if !ok {
 		return store.ErrNotFound
 	}
+	if o.Status == "pending" {
+		return store.ErrGuestPending
+	}
 	eff := store.EffectiveFootprint(live, o)
 	charge := store.GrowthCharge(eff, p)
 	if charge == (store.Alloc{}) {

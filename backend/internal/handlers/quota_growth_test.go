@@ -477,6 +477,38 @@ func TestConfigGrowChargesSockets(t *testing.T) {
 	}
 }
 
+// TestGrowRefusedWhilePending: a guest whose create has not finished cannot
+// grow — the refusal is a 409 and nothing reaches Proxmox.
+func TestGrowRefusedWhilePending(t *testing.T) {
+	var writes int32
+	mock := &proxmoxtest.MockClient{
+		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
+			return []proxmox.RawResource{
+				{ID: "lxc/102", Type: "lxc", VMID: 102, Node: "pve01", MaxCPU: 1, MaxMem: 512 << 20, MaxDisk: 8 << 30},
+			}, nil
+		},
+		OnSetGuestConfig: func(context.Context, proxmox.GuestRef, map[string]any) (proxmox.UPID, error) {
+			atomic.AddInt32(&writes, 1)
+			return "", nil
+		},
+	}
+	hh := newHarness(t, mock)
+	tenantA := hh.fake.AddTenant("A", "a")
+	projA := hh.fake.AddProject(tenantA, "Web", "web", "pc-a-web")
+	userA := hh.fake.AddUser("a@x.io", "Ada", false)
+	hh.fake.AddMembership(userA, "tenant", tenantA, "contributor")
+	hh.fake.AddOwnership(tenantA, projA, 102, "lxc", "pve01", "pending", nil)
+	c := hh.cookie(t, userA)
+
+	rec := hh.req(t, c, http.MethodPatch, "/api/tenants/"+tenantA+"/guests/pve01/lxc/102/config", `{"cores":2}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("grow of a pending guest = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	if n := atomic.LoadInt32(&writes); n != 0 {
+		t.Fatalf("SetGuestConfig reached Proxmox %d times for a pending guest", n)
+	}
+}
+
 // TestRollbackFailsClosed: snapshot sizing that cannot be read refuses the
 // rollback instead of letting it through ungated, and a VM snapshot's sockets
 // count toward its vCPU.

@@ -296,3 +296,37 @@ func TestGrowthReservationMonotonicSQL(t *testing.T) {
 		}
 	}
 }
+
+// TestGrowthRefusedWhilePendingSQL: a guest whose create has not finished is
+// counted at its create-time reservation only, so it cannot grow — the
+// reservation is left exactly as the create wrote it.
+func TestGrowthRefusedWhilePendingSQL(t *testing.T) {
+	s := requireStore(t)
+	if _, err := s.RunMigrations(); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	resetQuotaTables(t, s)
+	t.Cleanup(func() { resetQuotaTables(t, s) })
+	ctx := context.Background()
+	tenantID, p1, _ := seedTenantProject(t, s)
+	const vmid = 3200
+	if _, err := s.CreateOwnership(ctx, CreateOwnershipParams{
+		TenantID: tenantID, ProjectID: p1, VMID: vmid, GuestType: "qemu", Node: "pve01", Status: "pending",
+	}); err != nil {
+		t.Fatalf("CreateOwnership: %v", err)
+	}
+	snap := map[int]Alloc{vmid: {VCPU: 2, RAMMB: 2048, DiskGB: 32}}
+	err := s.ReserveGuestGrowth(ctx, ReserveGrowthParams{
+		TenantID: tenantID, ProjectID: p1, VMID: vmid, Snapshot: snap, TargetVCPU: 4, GrowDiskGB: 10,
+	})
+	if !errors.Is(err, ErrGuestPending) {
+		t.Fatalf("grow of a pending guest: err = %v, want ErrGuestPending", err)
+	}
+	o, err := s.GetLiveOwnershipForTenant(ctx, tenantID, vmid)
+	if err != nil {
+		t.Fatalf("GetLiveOwnershipForTenant: %v", err)
+	}
+	if o.ReservedVCPU != nil || o.ReservedDiskGB != nil {
+		t.Fatalf("refused grow wrote a reservation: vcpu=%v disk=%v", o.ReservedVCPU, o.ReservedDiskGB)
+	}
+}
