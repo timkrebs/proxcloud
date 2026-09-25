@@ -70,9 +70,13 @@ Notes:
    key-only `deploy` user (docker group), `jq`, `openssl`, unattended-upgrades.
 3. Provisioner copies `common/` + `<env>/` to `/opt/proxcloud/` and the CI deploy
    **public** key to `/opt/proxcloud/ci-deploy-key.pub`.
-4. `bootstrap.sh` creates the external docker networks + dirs + Postgres TLS cert
-   + the `active.caddy` symlink + the **forced-command authorized_keys** for the
-   deploy user, and hardens ownership.
+4. `bootstrap.sh` creates the external docker networks, the dirs, the Postgres
+   TLS cert, the `active.caddy` symlink and the **forced-command
+   authorized_keys** for the deploy user, and hardens ownership. The symlink is
+   guest state, never
+   provisioned (it is gitignored): bootstrap points it at `state/live-color`,
+   and only a fresh guest gets `blue.caddy`, so re-provisioning never changes
+   the live color.
 
 ---
 
@@ -100,16 +104,43 @@ self-signed server cert (owned `70:70`, mode `600`); the app uses
 `sslmode=require` (encrypt, no CA verify). To opt out on an isolated network,
 unset `PROXCLOUD_ENV` (Dev DB rule) — but staging then no longer mirrors prod.
 
+### Trusted proxy and Host allowlist (ADR-0034)
+
+`TRUSTED_PROXY_CIDRS` names the proxy whose `X-Real-IP` the backend believes;
+`ALLOWED_HOSTS` lists the Host headers it serves (empty disables the check).
+Set `TRUSTED_PROXY_CIDRS` only once the guest runs a Caddy config that
+overwrites `X-Real-IP` — every `caddy/` file in this tree does, but older ones
+pass a client's value through. Until then leave it unset: the backend fails
+safe, with every client sharing the proxy's rate-limit bucket, instead of
+trusting a header clients can set. Prod pins Caddy at `10.254.254.10/32` through
+the one-time edge migration (`docs/runbooks/prod-edge-network-migration.md`);
+QA and staging trust their whole edge subnet (see their `env.example`, and
+register R13 before publishing either through a tunnel).
+
 ---
 
 ## 3. Networks & loopback port map
 
-Two **external** docker networks on prod (created by `bootstrap.sh`):
+Two **external** docker networks on prod, created only by
+`bin/ensure-networks.sh` (called from `bootstrap.sh`, `up-infra.sh`, and every
+`deploy.sh` run):
 
 | network              | members                                   |
 |----------------------|-------------------------------------------|
 | `proxcloud-edge`     | caddy + both colors' backend & frontend   |
 | `proxcloud-data-net` | both colors' backend + `proxcloud-data-postgres` |
+
+`proxcloud-edge` has **pinned addressing** (ADR-0034): subnet `10.254.254.0/24`,
+gateway `10.254.254.1`, Caddy fixed at `10.254.254.10`, and dynamic addresses
+only from `10.254.254.128/25` so no container can take Caddy's. The trust chain
+depends on those addresses: cloudflared runs on the host and reaches Caddy via
+`127.0.0.1:80` (the only published port — tunnel-only), arriving from the
+gateway, which is the one source Caddy takes `CF-Connecting-IP` from; the
+backend in turn reads `X-Real-IP` only from Caddy's address
+(`TRUSTED_PROXY_CIDRS=10.254.254.10/32`). If the existing network has other
+addressing, `ensure-networks.sh` refuses and every deploy stops before touching a
+container; `bin/migrate-edge-network.sh` performs the one-time move — see
+`docs/runbooks/prod-edge-network-migration.md`.
 
 Caddy resolves color containers by name (`proxcloud-blue-backend:8080`,
 `proxcloud-green-frontend:3000`). Each color also publishes **loopback-only**

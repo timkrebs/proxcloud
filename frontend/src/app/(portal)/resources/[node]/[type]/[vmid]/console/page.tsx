@@ -14,21 +14,16 @@ import { Spinner } from "@/components/ui/icons";
 import { ApiError, apiFetch } from "@/lib/api/client";
 import type { ConsoleSession } from "@/lib/api/generated/types";
 import { useGuest, type GuestParams } from "@/lib/api/guestQueries";
+import { consoleWsUrl } from "@/lib/consoleWs";
 import { useActiveTenantId } from "@/lib/stores/uiStore";
 
 function wsUrl(sessionId: string): string {
-  const secure = typeof window !== "undefined" && window.location.protocol === "https:";
-  let origin =
-    process.env.NEXT_PUBLIC_BACKEND_WS_ORIGIN ??
-    (typeof window !== "undefined"
-      ? `${secure ? "wss" : "ws"}://${window.location.hostname}:8080`
-      : "");
-  // Never downgrade: an HTTPS page must not carry the console (and its
-  // one-shot credential) over cleartext ws://.
-  if (secure && origin.startsWith("ws://")) {
-    origin = "wss://" + origin.slice("ws://".length);
-  }
-  return `${origin}/api/console/ws/${encodeURIComponent(sessionId)}`;
+  // NEXT_PUBLIC_* is inlined at build time, so the reference must stay literal.
+  return consoleWsUrl(
+    sessionId,
+    process.env.NEXT_PUBLIC_BACKEND_WS_ORIGIN,
+    typeof window !== "undefined" ? window.location : null,
+  );
 }
 
 async function openSession(

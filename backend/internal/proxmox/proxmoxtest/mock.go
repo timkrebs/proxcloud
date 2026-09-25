@@ -42,6 +42,7 @@ type MockClient struct {
 	OnCreateSnapshot     func(ctx context.Context, ref pmx.GuestRef, name, desc string, vmstate bool) (pmx.UPID, error)
 	OnRollbackSnapshot   func(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error)
 	OnDeleteSnapshot     func(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error)
+	OnSnapshotConfig     func(ctx context.Context, ref pmx.GuestRef, name string) (map[string]any, error)
 	OnFirewallRules      func(ctx context.Context, ref pmx.GuestRef) (*types.GuestFirewall, error)
 	OnSetFirewallEnabled func(ctx context.Context, ref pmx.GuestRef, on bool) error
 	OnACL                func(ctx context.Context) ([]types.ACLEntry, error)
@@ -234,6 +235,13 @@ func (m *MockClient) RollbackSnapshot(ctx context.Context, ref pmx.GuestRef, nam
 		panic(unstubbed("RollbackSnapshot"))
 	}
 	return m.OnRollbackSnapshot(ctx, ref, name)
+}
+
+func (m *MockClient) SnapshotConfig(ctx context.Context, ref pmx.GuestRef, name string) (map[string]any, error) {
+	if m.OnSnapshotConfig == nil {
+		panic(unstubbed("SnapshotConfig"))
+	}
+	return m.OnSnapshotConfig(ctx, ref, name)
 }
 
 func (m *MockClient) DeleteSnapshot(ctx context.Context, ref pmx.GuestRef, name string) (pmx.UPID, error) {

@@ -9,6 +9,9 @@ services:
     image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     container_name: proxcloud-blue-backend
     restart: unless-stopped
+    # No raw sockets: a compromised container cannot ARP-spoof Caddy or the
+    # gateway on proxcloud-edge (ADR-0034). Nothing here needs them.
+    cap_drop: [NET_RAW]
     env_file: ../.env
     environment:
       PROXCLOUD_ENV: production
@@ -24,6 +27,7 @@ services:
     image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-frontend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     container_name: proxcloud-blue-frontend
     restart: unless-stopped
+    cap_drop: [NET_RAW]
     # NOTE: BACKEND_ORIGIN and NEXT_PUBLIC_BACKEND_WS_ORIGIN are baked at IMAGE
     # BUILD time (publish.yml), not here — a Next standalone build inlines
     # NEXT_PUBLIC_* at build. Behind Caddy the /api rewrite is unused (Caddy
@@ -43,6 +47,7 @@ services:
   migrator:
     image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     restart: "no"
+    cap_drop: [NET_RAW]
     profiles: ["migrate"]
     env_file: ../.env
     environment:
@@ -59,6 +64,7 @@ services:
   seed:
     image: ${REGISTRY:-ghcr.io/timkrebs}/proxcloud-backend:${IMAGE_REF:?IMAGE_REF must be set by deploy.sh}
     restart: "no"
+    cap_drop: [NET_RAW]
     profiles: ["seed"]
     env_file: ../.env
     environment:

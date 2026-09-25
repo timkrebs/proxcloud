@@ -237,6 +237,7 @@ func (e *Engine) Submit(req *types.CreateGuestRequest, cctx CreateContext) (*typ
 
 	e.mu.Lock()
 	e.runs[dep.ID] = dep
+	e.pruneRunsLocked()
 	e.mu.Unlock()
 
 	go e.run(dep.ID, req, cctx)
@@ -292,7 +293,7 @@ func (e *Engine) run(id string, req *types.CreateGuestRequest, cctx CreateContex
 		e.failStep(id, "create", err)
 		return
 	}
-	e.Registry.Track(upid, label, "provisioning", res)
+	e.Registry.Track(upid, label, "provisioning", res, cctx.TenantID)
 	e.updateStep(id, "create", "running", string(upid), "")
 	if !e.awaitTask(id, "create", upid) {
 		e.releaseOwnership(cctx)
@@ -310,7 +311,7 @@ func (e *Engine) run(id string, req *types.CreateGuestRequest, cctx CreateContex
 			e.failStep(id, "start", err)
 			return
 		}
-		e.Registry.Track(startUPID, e.stepLabel(id, "start"), "starting", res)
+		e.Registry.Track(startUPID, e.stepLabel(id, "start"), "starting", res, cctx.TenantID)
 		e.updateStep(id, "start", "running", string(startUPID), "")
 		if !e.awaitTask(id, "start", startUPID) {
 			e.removeSnippet(cctx)
@@ -575,6 +576,27 @@ func (e *Engine) updateStep(id, key, status, upid, msg string) {
 	}
 	e.mu.Unlock()
 	e.publish(id)
+}
+
+// runRetention is how long a finished deployment stays queryable before it is
+// eligible for eviction. maxRuns bounds the in-memory map so a tenant spamming
+// creates cannot grow it without limit (the guest + PVE task log are the durable
+// truth; these are just live progress snapshots). Caller holds e.mu.
+const (
+	runRetention = time.Hour
+	maxRuns      = 256
+)
+
+func (e *Engine) pruneRunsLocked() {
+	if len(e.runs) <= maxRuns {
+		return
+	}
+	cutoff := time.Now().Add(-runRetention)
+	for id, d := range e.runs {
+		if d.Status != "running" && d.CreatedAt.Before(cutoff) {
+			delete(e.runs, id)
+		}
+	}
 }
 
 func (e *Engine) finish(id, status string) {

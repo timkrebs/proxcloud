@@ -440,7 +440,7 @@ func (s *AutoShutdown) cancelGone(ctx context.Context, vmid int, reason string) 
 func (s *AutoShutdown) track(upid proxmox.UPID, action, transitional string, own store.ResourceOwnership) {
 	res := types.TaskResource{Type: own.GuestType, VMID: own.VMID, Node: own.Node}
 	if s.Registry != nil {
-		s.Registry.Track(upid, action, transitional, res)
+		s.Registry.Track(upid, action, transitional, res, own.TenantID)
 	}
 	if s.Broker != nil {
 		s.Broker.Publish(events.Event{Name: "task", Data: types.TaskEvent{

@@ -81,3 +81,40 @@ engineers build the *correct* thing, and flags where each amends an accepted ADR
   immutable in every field that matters.
 - **Actual-bytes disk quota:** non-deterministic at create time, un-showable in
   the wizard, and lets a tenant over-provision then fill up past the cap.
+
+## Addendum (2026-09-24): growth reservations
+
+Quota was enforced only when a guest was created; growing an existing guest
+(disk resize, cores/memory change, snapshot rollback to a larger
+configuration) now goes through `ReserveGuestGrowth`, under the same
+per-tenant advisory lock as a create reservation (findings register H5 and
+second review round H-A, `docs/security/audit-2026-08-14.md`):
+
+- Every charge is measured against the guest's **effective footprint** —
+  max(live snapshot, stored `reserved_*`) per dimension, the same rule
+  `ComputeUsage` applies — so a request is charged for what exceeds what the
+  tenant already pays for.
+- **vCPU and RAM are absolute targets** (the charge is target − effective, or
+  nothing). vCPU is sockets × cores, the unit PVE's `maxcpu` reports.
+- **A disk resize is an additive delta**, measured against the named disk's
+  own configured size and charged in full. It is never turned into an absolute
+  target: the counted disk footprint is the boot disk plus every prior growth
+  reservation, not the size of any one disk — deriving a target from one disk
+  is what let repeated data-disk grows go uncharged.
+- When the checks pass, effective + charge is written to the ownership row's
+  `reserved_*` columns in the same transaction, **monotonically** (SQL
+  `GREATEST`, which ignores NULLs): a reservation can only rise, so no later
+  or racing request can reopen headroom another grow depends on.
+  `ComputeUsage` counts an active row at max(live, reserved), so the grown
+  footprint is charged before Proxmox reflects it.
+- A rollback reads the snapshot's stored sizing and **fails closed** when it
+  cannot be read; a container snapshot with no cores (no CPU limit at all) is
+  refused.
+
+Consequences: accounting can only over-count. Reservations are never cleared,
+so after a shrink a tenant stays charged at the larger size until a reconciler
+pass clears reservations the guest's real configuration no longer needs (open
+item R8 in the register); the base size of non-boot disks stays outside usage
+totals (R4). Rejected along the way: a check without a reservation (the
+check-then-act race), an absolute disk target (the repeated-grow bypass), and
+persisting max(live, target) (a later request could lower the reservation).

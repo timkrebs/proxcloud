@@ -242,6 +242,20 @@ func (g *GoPVE) RollbackSnapshot(ctx context.Context, ref GuestRef, name string)
 	return UPID(upid), nil
 }
 
+// SnapshotConfig implements Client: the config stored with one snapshot, from
+// /nodes/{n}/{t}/{vmid}/snapshot/{name}/config.
+func (g *GoPVE) SnapshotConfig(ctx context.Context, ref GuestRef, name string) (map[string]any, error) {
+	ctx, cancel := readCtx(ctx)
+	defer cancel()
+
+	var cfg map[string]any
+	p := fmt.Sprintf("%s/snapshot/%s/config", ref.path(), url.PathEscape(name))
+	if err := g.c.Get(ctx, p, &cfg); err != nil {
+		return nil, mapErr(fmt.Sprintf("query snapshot %s config of %s/%d", name, ref.Type, ref.VMID), err)
+	}
+	return cfg, nil
+}
+
 // DeleteSnapshot implements Client.
 func (g *GoPVE) DeleteSnapshot(ctx context.Context, ref GuestRef, name string) (UPID, error) {
 	ctx, cancel := mutationCtx(ctx)

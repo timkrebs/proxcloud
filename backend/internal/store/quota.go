@@ -124,16 +124,28 @@ func (s *PgStore) ComputeUsage(ctx context.Context, tenantID string, snapshot ma
 	return tenant, byProject, nil
 }
 
-// usageOfRow computes one ownership row's contribution: an active row reads the
-// live snapshot (absent ⇒ not counted at all — a deleted/not-yet-visible guest);
-// a pending row reads its reserved_* columns and always counts. The bool reports
-// whether the row contributes to the count (and alloc).
+// usageOfRow computes one ownership row's contribution: an active row counts
+// max(live snapshot, reserved_*) per dimension — reserved_* on an active row is
+// an in-flight growth reservation (ReserveGuestGrowth) that must be charged
+// before PVE reflects it, and it never counts below the live size — and is not
+// counted at all when absent from the snapshot (a deleted/not-yet-visible
+// guest); a pending row reads its reserved_* columns and always counts. The
+// bool reports whether the row contributes to the count (and alloc).
 func usageOfRow(status string, vmid int, snapshot map[int]Alloc, rv *int, rr, rd *int64) (Alloc, bool) {
 	switch status {
 	case "active":
 		a, ok := snapshot[vmid]
 		if !ok {
 			return Alloc{}, false
+		}
+		if rv != nil && *rv > a.VCPU {
+			a.VCPU = *rv
+		}
+		if rr != nil && *rr > a.RAMMB {
+			a.RAMMB = *rr
+		}
+		if rd != nil && *rd > a.DiskGB {
+			a.DiskGB = *rd
 		}
 		return a, true
 	case "pending":
@@ -314,6 +326,141 @@ func (s *PgStore) ReserveOwnershipBatch(ctx context.Context, p ReserveOwnershipB
 		return nil, err
 	}
 	return out, nil
+}
+
+// ReserveGuestGrowth implements QuotaStore: the resize/config-grow/rollback
+// quota gate AND reservation. Under the per-tenant advisory lock it measures
+// this request's charge against the guest's effective footprint, checks
+// usage+charge ≤ cap on each dimension (adding no count — the guest already
+// exists), and only when every check passes persists effective+charge on the
+// guest's ownership row IN THE SAME TRANSACTION, monotonically. A concurrent
+// grow/create serialized behind the same lock therefore sees the footprint
+// before Proxmox has applied anything (closes the check-then-act race; also
+// audit L4's snapshot-lag under-count for grown dimensions). The commit
+// releases the lock; any failure (including ErrQuotaExceeded) rolls back and
+// persists nothing.
+func (s *PgStore) ReserveGuestGrowth(ctx context.Context, p ReserveGrowthParams) error {
+	return s.WithTx(ctx, func(txs Store) error {
+		if err := txs.AdvisoryLock(ctx, AdvisoryKeyTenant(p.TenantID)); err != nil {
+			return err
+		}
+		live, ok := p.Snapshot[p.VMID]
+		if !ok {
+			// The caller resolves the guest from the same snapshot first; a miss
+			// here is a logic error / transient PVE gap. Fail closed.
+			return fmt.Errorf("store: reserve guest growth: vmid %d missing from snapshot", p.VMID)
+		}
+		own, err := txs.GetLiveOwnershipForTenant(ctx, p.TenantID, p.VMID)
+		if err != nil {
+			return err
+		}
+		if own.Status == "pending" {
+			return ErrGuestPending
+		}
+		eff := EffectiveFootprint(live, own)
+		charge := GrowthCharge(eff, p)
+		if charge == (Alloc{}) {
+			return nil // nothing grows past the effective footprint
+		}
+		tenantUsage, byProject, err := txs.ComputeUsage(ctx, p.TenantID, p.Snapshot)
+		if err != nil {
+			return err
+		}
+		projectQuota, err := txs.GetQuota(ctx, "project", p.ProjectID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		tenantQuota, err := txs.GetQuota(ctx, "tenant", p.TenantID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if err := checkGrowth("project", projectQuota, byProject[p.ProjectID], charge); err != nil {
+			return err
+		}
+		if err := checkGrowth("tenant", tenantQuota, tenantUsage, charge); err != nil {
+			return err
+		}
+		rv, rr, rd := ReservationValues(eff, charge)
+		return txs.SetOwnershipReservation(ctx, p.TenantID, p.VMID, rv, rr, rd)
+	})
+}
+
+// EffectiveFootprint is what quota accounting currently charges for one guest:
+// max(live snapshot, stored reservation) per dimension — the same rule
+// usageOfRow applies — so every growth charge is measured against what the
+// tenant is already paying for, not against raw live. Exported so the fake
+// store applies the identical rule.
+func EffectiveFootprint(live Alloc, own *ResourceOwnership) Alloc {
+	eff := live
+	if own.ReservedVCPU != nil && *own.ReservedVCPU > eff.VCPU {
+		eff.VCPU = *own.ReservedVCPU
+	}
+	if own.ReservedRAMMB != nil && *own.ReservedRAMMB > eff.RAMMB {
+		eff.RAMMB = *own.ReservedRAMMB
+	}
+	if own.ReservedDiskGB != nil && *own.ReservedDiskGB > eff.DiskGB {
+		eff.DiskGB = *own.ReservedDiskGB
+	}
+	return eff
+}
+
+// GrowthCharge is the per-dimension quota charge of one growth request. The
+// absolute vCPU/RAM targets charge only what exceeds the effective footprint —
+// so a retry of an in-flight grow is free rather than double-charged. A disk
+// grow is additive and charged in full: it can never be absorbed by the
+// footprint, which is what made repeated data-disk grows free before.
+func GrowthCharge(eff Alloc, p ReserveGrowthParams) Alloc {
+	var c Alloc
+	if p.TargetVCPU > eff.VCPU {
+		c.VCPU = p.TargetVCPU - eff.VCPU
+	}
+	if p.TargetRAMMB > eff.RAMMB {
+		c.RAMMB = p.TargetRAMMB - eff.RAMMB
+	}
+	if p.GrowDiskGB > 0 {
+		c.DiskGB = p.GrowDiskGB
+	}
+	return c
+}
+
+// ReservationValues builds the reservation to persist: effective+charge for
+// each charged dimension, nil (untouched) for the rest — so a RAM-only grow
+// never disturbs a still-materializing vCPU reservation. Because the base is
+// the effective footprint, a persisted value is always ≥ both live and the
+// prior reservation; the monotonic write enforces that a racing request cannot
+// lower it either.
+func ReservationValues(eff, charge Alloc) (rv *int, rr, rd *int64) {
+	if charge.VCPU > 0 {
+		v := eff.VCPU + charge.VCPU
+		rv = &v
+	}
+	if charge.RAMMB > 0 {
+		v := eff.RAMMB + charge.RAMMB
+		rr = &v
+	}
+	if charge.DiskGB > 0 {
+		v := eff.DiskGB + charge.DiskGB
+		rd = &v
+	}
+	return rv, rr, rd
+}
+
+// checkGrowth is checkQuota without the count dimension: growing an existing
+// guest never adds a guest.
+func checkGrowth(scope string, q *Quota, usage QuotaUsage, delta Alloc) error {
+	if q == nil {
+		return nil
+	}
+	if q.MaxVCPU != nil && usage.VCPU+delta.VCPU > *q.MaxVCPU {
+		return ErrQuotaExceeded{Scope: scope, Dimension: "vcpu", Limit: int64(*q.MaxVCPU), Used: int64(usage.VCPU), Requested: int64(delta.VCPU)}
+	}
+	if q.MaxRAMMB != nil && usage.RAMMB+delta.RAMMB > *q.MaxRAMMB {
+		return ErrQuotaExceeded{Scope: scope, Dimension: "ram_mb", Limit: *q.MaxRAMMB, Used: usage.RAMMB, Requested: delta.RAMMB}
+	}
+	if q.MaxDiskGB != nil && usage.DiskGB+delta.DiskGB > *q.MaxDiskGB {
+		return ErrQuotaExceeded{Scope: scope, Dimension: "disk_gb", Limit: *q.MaxDiskGB, Used: usage.DiskGB, Requested: delta.DiskGB}
+	}
+	return nil
 }
 
 // InsertAuditIntent implements QuotaStore: the fail-closed intent write.

@@ -353,6 +353,26 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, rateLimited())
 		return
 	}
+	// Per-account second-factor lockout (ADR-0034): counted across challenges
+	// and NOT cleared by a correct password, so a known-password attacker cannot
+	// grind TOTP by re-running Login for a fresh challenge every 5 attempts.
+	// The attempt is counted HERE, atomically with the lock check, so concurrent
+	// requests cannot all pass the check before any records its failure; a
+	// valid code below refunds it. An attempt that dies on a later error stays
+	// counted — the conservative direction.
+	var sfEngagesLock bool
+	if h.Limiter != nil {
+		v := h.Limiter.ReserveSecondFactorAttempt(ch.UserID)
+		if !v.Allowed {
+			h.logger().Warn("login/totp blocked: second factor locked", "user_id", ch.UserID)
+			if v.FirstBlock {
+				h.auditSecondFactorBlocked(ctx, r, ch.UserID)
+			}
+			writeErr(w, rateLimited())
+			return
+		}
+		sfEngagesLock = v.EngagesLock
+	}
 	var req types.LoginTOTPRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, &types.APIError{Code: "invalid_request", Message: "Request body must be JSON with a code.", Status: http.StatusBadRequest})
@@ -391,6 +411,13 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		// The per-account 2FA failure was already counted when the attempt was
+		// reserved above; if that reservation reached the threshold, this failure
+		// has just locked the account's second factor — record it.
+		detail := map[string]any{"status": http.StatusUnauthorized}
+		if sfEngagesLock {
+			detail["second_factor_locked"] = true
+		}
 		locked, rerr := h.Store.RecordChallengeFailure(ctx, ch.ID, maxTOTPAttempts)
 		if rerr != nil {
 			h.logger().Error("login/totp: record failure", "err", rerr)
@@ -400,11 +427,12 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if locked {
 			http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))
-			pending.Finalize(ctx, "denied", map[string]any{"status": http.StatusUnauthorized, "locked": true})
+			detail["locked"] = true
+			pending.Finalize(ctx, "denied", detail)
 			writeErr(w, challengeExpired())
 			return
 		}
-		pending.Finalize(ctx, "denied", map[string]any{"status": http.StatusUnauthorized})
+		pending.Finalize(ctx, "denied", detail)
 		writeErr(w, unauthenticated())
 		return
 	}
@@ -451,12 +479,32 @@ func (h *Handler) LoginTOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.Limiter != nil {
 		h.Limiter.Reset(ip)
+		h.Limiter.ResetSecondFactor(ch.UserID) // success clears the 2FA counter
 	}
 	http.SetCookie(w, cookie)
 	http.SetCookie(w, h.Sessions.ClearChallengeCookie(r))
 	pending.Finalize(ctx, "success", map[string]any{"status": http.StatusNoContent, "user_id": ch.UserID})
 	h.logger().Info("login/totp ok", "user_id", ch.UserID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// auditSecondFactorBlocked records the first refused attempt of a
+// second-factor lock. Reaching the 2FA step at all means someone holds the
+// password, so the account's audit trail must show the lock being hit — once
+// per lock, not per refused request.
+func (h *Handler) auditSecondFactorBlocked(ctx context.Context, r *http.Request, userID string) {
+	p, err := h.recorder().Begin(ctx, auditz.Intent{
+		Action:      "totp.login",
+		ActorUserID: userID,
+		TargetType:  "user",
+		TargetID:    userID,
+		IP:          ipPtr(r),
+	})
+	if err != nil {
+		h.logger().Error("audit of a blocked second-factor attempt failed", "user_id", userID, "err", err)
+		return
+	}
+	p.Finalize(ctx, "denied", map[string]any{"status": http.StatusTooManyRequests, "second_factor_locked": true})
 }
 
 // secondFactorValid reports whether code satisfies the user's second factor: a

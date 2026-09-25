@@ -303,7 +303,7 @@ func (d *Deps) SetAction(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		res := types.TaskResource{Type: m.GuestType, VMID: m.VMID, Node: m.Node}
-		d.trackRes(upid, label, transitional, res)
+		d.trackRes(upid, label, transitional, res, m.TenantID)
 		tasks = append(tasks, types.TaskRef{UPID: string(upid), Action: label})
 	}
 	// If nothing started and we hit an error, surface it (e.g. PVE unreachable).
@@ -375,7 +375,7 @@ func (d *Deps) DeleteSet(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		res := types.TaskResource{Type: m.GuestType, VMID: m.VMID, Node: m.Node}
-		d.trackRes(upid, "Delete cluster member", "deleting", res)
+		d.trackRes(upid, "Delete cluster member", "deleting", res, m.TenantID)
 		// Reuse the single-guest teardown: on destroy success the member's ownership
 		// row is tombstoned (freeing the VMID) and its scheduler jobs cancelled.
 		if d.Registry != nil {

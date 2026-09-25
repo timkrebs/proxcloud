@@ -614,3 +614,118 @@ func assertAudited(t *testing.T, fs *fakeStore, action, outcome string) {
 		t.Fatalf("audit %q outcome = %q, want %q", action, found.Outcome, outcome)
 	}
 }
+
+// --- ADR-0034: the per-account 2FA lockout survives correct passwords ---
+
+// TestSecondFactorLockoutAcrossChallenges drives the full handler flow of the
+// known-password TOTP brute force: the attacker re-runs Login (correct
+// password → fresh challenge, per-IP window and account lockout reset) and
+// burns 5 codes per challenge. After secondFactorFailThreshold total failures
+// the 2FA STEP must answer 429 — even on a brand-new challenge minted by yet
+// another successful password entry.
+func TestSecondFactorLockoutAcrossChallenges(t *testing.T) {
+	h, fs := newTOTPHandler(t)
+	u := seedUser(t, h, fs, "user@b.com", "correct-horse-battery", false)
+	enableTOTP(t, h, issueCookie(t, h, u.ID))
+
+	// Deterministic clock: advance 2 minutes before each login so the per-IP
+	// window (5/min) never interferes; total elapsed stays far below the 2FA
+	// decay window (15 min per failure gap is never reached).
+	clock := time.Unix(1_700_000_000, 0)
+	h.Limiter.now = func() time.Time { return clock }
+
+	failures := 0
+	for round := 0; round < 2; round++ {
+		clock = clock.Add(2 * time.Minute)
+		login := postWithCookie(h, "/api/auth/login", nil, `{"email":"user@b.com","password":"correct-horse-battery"}`)
+		if login.Code != http.StatusOK {
+			t.Fatalf("round %d login = %d, want 200 (%s)", round, login.Code, login.Body)
+		}
+		cc := challengeCookie(login)
+		for i := 0; i < maxTOTPAttempts; i++ { // 5 wrong codes consume the challenge
+			rec := postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"000000"}`)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("round %d attempt %d = %d, want 401 (%s)", round, i, rec.Code, rec.Body)
+			}
+			failures++
+		}
+	}
+	if failures != secondFactorFailThreshold {
+		t.Fatalf("test drove %d failures, want exactly the threshold %d", failures, secondFactorFailThreshold)
+	}
+	// The audit trail marks the lock: the failure that engaged it (401) and,
+	// once per lock, the first refused attempt (429).
+	lockRows := func() (engaged, blocked int) {
+		t.Helper()
+		for _, e := range fs.allAudit() {
+			var d map[string]any
+			if e.Action != "totp.login" || json.Unmarshal(e.Detail, &d) != nil || d["second_factor_locked"] != true {
+				continue
+			}
+			switch d["status"] {
+			case float64(http.StatusUnauthorized):
+				engaged++
+			case float64(http.StatusTooManyRequests):
+				blocked++
+			}
+		}
+		return engaged, blocked
+	}
+	if engaged, blocked := lockRows(); engaged != 1 || blocked != 0 {
+		t.Fatalf("after the locking failure: %d lock-engaged / %d blocked audit rows, want 1 / 0", engaged, blocked)
+	}
+
+	// A further CORRECT password still mints a challenge (the password lockout
+	// was legitimately reset)…
+	clock = clock.Add(2 * time.Minute)
+	login := postWithCookie(h, "/api/auth/login", nil, `{"email":"user@b.com","password":"correct-horse-battery"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("post-lock login = %d, want 200 (%s)", login.Code, login.Body)
+	}
+	cc := challengeCookie(login)
+	// …but the 2FA step itself is locked: 429 before any code is verified.
+	rec := postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"000000"}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("2FA after %d failures = %d, want 429 (correct passwords must not unlock the second factor) (%s)",
+			failures, rec.Code, rec.Body)
+	}
+	assertErrCode(t, rec, "rate_limited")
+	if _, blocked := lockRows(); blocked != 1 {
+		t.Fatalf("after the first refused attempt: %d blocked audit rows, want 1", blocked)
+	}
+	// Further refusals during the same lock are not audited again.
+	if rec := postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"000000"}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second refused attempt = %d, want 429", rec.Code)
+	}
+	if _, blocked := lockRows(); blocked != 1 {
+		t.Fatalf("after a second refused attempt: %d blocked audit rows, want still 1", blocked)
+	}
+
+	// The lock is bounded: after the window a VALID code signs in and clears it.
+	clock = clock.Add(secondFactorLock + time.Minute)
+	login = postWithCookie(h, "/api/auth/login", nil, `{"email":"user@b.com","password":"correct-horse-battery"}`)
+	cc = challengeCookie(login)
+	sec, _ := fs.GetTOTPSecret(context.Background(), u.ID)
+	plain, _ := h.Secrets.Open(sec.SecretEncrypted)
+	code, err := totp.GenerateCode(string(plain), time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	rec = postWithCookie(h, "/api/auth/login/totp", cc, `{"code":"`+code+`"}`)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("valid code after lock window = %d, want 204 (%s)", rec.Code, rec.Body)
+	}
+}
+
+// TestLoginRejectsOversizeEmailBeforeLimiter: an email past RFC 5321's 254
+// bytes is rejected 400 up front — the account-keyed limiter maps never see
+// attacker-sized identifiers.
+func TestLoginRejectsOversizeEmail(t *testing.T) {
+	h, _ := newTOTPHandler(t)
+	huge := strings.Repeat("a", maxEmailBytes+1) + "@example.io"
+	rec := postWithCookie(h, "/api/auth/login", nil, `{"email":"`+huge+`","password":"whatever-password"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversize email login = %d, want 400 (%s)", rec.Code, rec.Body)
+	}
+	assertErrCode(t, rec, "invalid_request")
+}

@@ -106,6 +106,11 @@ type Client interface {
 	CreateSnapshot(ctx context.Context, ref GuestRef, name, desc string, vmstate bool) (UPID, error)
 	RollbackSnapshot(ctx context.Context, ref GuestRef, name string) (UPID, error)
 	DeleteSnapshot(ctx context.Context, ref GuestRef, name string) (UPID, error)
+	// SnapshotConfig returns the raw config map STORED WITH one snapshot
+	// (/nodes/{n}/{t}/{vmid}/snapshot/{name}/config) — the guest's config as it
+	// will be after a rollback. Handlers gate a rollback through the growth
+	// quota with the snapshot's cores/memory.
+	SnapshotConfig(ctx context.Context, ref GuestRef, name string) (map[string]any, error)
 
 	// Guest firewall (read + enable toggle in v1).
 	FirewallRules(ctx context.Context, ref GuestRef) (*types.GuestFirewall, error)

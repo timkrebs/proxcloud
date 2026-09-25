@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -53,11 +54,16 @@ func (d *Deps) CreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label := "Create snapshot"
-	d.trackRes(upid, label, "", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: req.Name})
+	d.trackRes(upid, label, "", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: req.Name}, activeTenantOf(r))
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
 }
 
 // RollbackSnapshot serves POST .../snapshots/{name}/rollback → 202.
+//
+// Quota gate: a rollback restores the snapshot's STORED config — rolling back
+// to a snapshot with more cores/memory than the guest runs today is a grow, so
+// it goes through the same advisory-locked growth reservation as a config
+// change. Reservation failure → 409 quota_exceeded and NO rollback call.
 func (d *Deps) RollbackSnapshot(w http.ResponseWriter, r *http.Request) {
 	ref, apiErr := guestRef(r)
 	if apiErr != nil {
@@ -69,13 +75,38 @@ func (d *Deps) RollbackSnapshot(w http.ResponseWriter, r *http.Request) {
 		httpserver.WriteError(w, &types.APIError{Code: "invalid_request", Message: fmt.Sprintf("invalid snapshot name %q", name), Status: http.StatusBadRequest})
 		return
 	}
+	snapCfg, err := d.PVE.SnapshotConfig(r.Context(), ref, name)
+	if err != nil {
+		httpserver.WriteError(w, err)
+		return
+	}
+	// A rollback restores the snapshot's cores/sockets/memory, which may exceed
+	// today's — gate it exactly like a config grow. Fail closed: sizing that
+	// cannot be read refuses the rollback instead of letting it through ungated.
+	vcpu, ramMB, serr := rollbackGrowthTarget(ref.Type, snapCfg)
+	if errors.Is(serr, errUnlimitedCores) {
+		httpserver.WriteError(w, &types.APIError{
+			Code:    "conflict",
+			Message: "This container snapshot sets no CPU limit, so rolling back would let the container use every host core — a size quota cannot verify. The rollback was refused.",
+			Status:  http.StatusConflict,
+		})
+		return
+	}
+	if serr != nil {
+		httpserver.WriteError(w, sizingUnreadable("snapshot", serr))
+		return
+	}
+	if gerr := d.enforceGrowth(r, ref, vcpu, ramMB); gerr != nil {
+		httpserver.WriteError(w, gerr)
+		return
+	}
 	upid, err := d.PVE.RollbackSnapshot(r.Context(), ref, name)
 	if err != nil {
 		httpserver.WriteError(w, err)
 		return
 	}
 	label := "Roll back snapshot"
-	d.trackRes(upid, label, "restarting", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: name})
+	d.trackRes(upid, label, "restarting", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: name}, activeTenantOf(r))
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
 }
 
@@ -97,7 +128,7 @@ func (d *Deps) DeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	label := "Delete snapshot"
-	d.trackRes(upid, label, "", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: name})
+	d.trackRes(upid, label, "", types.TaskResource{Type: ref.Type, VMID: ref.VMID, Node: ref.Node, Name: name}, activeTenantOf(r))
 	httpserver.WriteJSON(w, http.StatusAccepted, types.TaskRef{UPID: string(upid), Action: label})
 }
 

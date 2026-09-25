@@ -23,16 +23,33 @@ const maxBody = 8 << 20 // 8 MiB
 // across every subsequent request, including the SSE stream.
 type apiClient struct {
 	base   string
+	origin string       // Origin header value for every request (see newAPIClient)
 	hc     *http.Client // bounded-timeout client for request/response JSON calls
 	stream *http.Client // no client-timeout; SSE liveness is bounded by context
 	cfID   string       // Cloudflare Access service-token client id (optional)
 	cfSec  string       // Cloudflare Access service-token client secret (optional)
 }
 
-func newAPIClient(base string, httpTimeout time.Duration, cfID, cfSec string) (*apiClient, error) {
+// newAPIClient builds the smoke's cookie-jar client. origin, when empty, is
+// derived from base (scheme://host): the backend's originCheck fails closed for
+// cookie-authenticated mutations without an Origin header (audit L1), and a real
+// browser always sends one — so the smoke, which simulates a browser session,
+// must too. The value has to byte-match the deployment's FRONTEND_ORIGIN; the
+// CI smokes hit the public base URL, which IS that origin. For a manual on-box
+// run against a loopback port, set SMOKE_ORIGIN to the public origin instead.
+func newAPIClient(base string, origin string, httpTimeout time.Duration, cfID, cfSec string) (*apiClient, error) {
+	base = strings.TrimRight(base, "/")
+	if origin == "" {
+		u, err := url.Parse(base)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("cannot derive Origin from base URL %q: %v", base, err)
+		}
+		origin = u.Scheme + "://" + u.Host
+	}
 	jar := newPermissiveJar()
 	return &apiClient{
-		base:   strings.TrimRight(base, "/"),
+		base:   base,
+		origin: origin,
 		hc:     &http.Client{Jar: jar, Timeout: httpTimeout},
 		stream: &http.Client{Jar: jar}, // Timeout 0: long-lived stream, ctx-bounded
 		cfID:   cfID,
@@ -117,6 +134,9 @@ func (c *apiClient) do(ctx context.Context, method, path string, body any) (int,
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	// Sent on every request (browsers do the same): mutations need it to pass
+	// the backend's fail-closed origin check; on GETs it is simply ignored.
+	req.Header.Set("Origin", c.origin)
 	c.applyAccessHeaders(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {

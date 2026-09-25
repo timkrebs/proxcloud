@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	types "github.com/timkrebs9/proxcloud/backend/api/types"
@@ -18,6 +20,13 @@ const (
 	// recomputed from the session's active tenant (ADR-0011). Cheap, indexed.
 	ownedRefreshInterval = 5 * time.Second
 	ownedFetchTimeout    = 5 * time.Second
+	// sseWriteTimeout bounds each individual SSE write: the server runs with no
+	// global WriteTimeout (a stream must outlive it), so without a per-write
+	// deadline a client that stops reading pins the goroutine + buffers forever.
+	// Renewed before every write (heartbeats arrive every 25s < 30s, so an
+	// armed deadline never fires between healthy writes); a failed write drops
+	// the connection.
+	sseWriteTimeout = 30 * time.Second
 )
 
 // OwnedVMIDsFunc resolves the set of VMIDs a tenant owns (active or pending) for
@@ -36,7 +45,46 @@ type OwnedVMIDsFunc func(ctx context.Context, tenantID string) (map[int]bool, er
 //
 // The owned-VMID set is derived server-side from session.active_tenant_id and
 // refreshed on ownedRefreshInterval; a client cannot widen its own view.
+// maxSSEPerUser caps concurrent SSE streams per user (generous for multiple
+// browser tabs; blocks unbounded stream-open abuse).
+const maxSSEPerUser = 10
+
+// connLimiter counts concurrent connections per key and bounds them, so no
+// single user can hold unbounded SSE streams.
+type connLimiter struct {
+	mu    sync.Mutex
+	count map[string]int
+	max   int
+}
+
+func newConnLimiter(max int) *connLimiter { return &connLimiter{count: map[string]int{}, max: max} }
+
+func (c *connLimiter) acquire(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.count[key] >= c.max {
+		return false
+	}
+	c.count[key]++
+	return true
+}
+
+func (c *connLimiter) release(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.count[key] > 0 {
+		c.count[key]--
+		if c.count[key] == 0 {
+			delete(c.count, key)
+		}
+	}
+}
+
 func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc {
+	// Shared across all connections: cap concurrent SSE streams per user so one
+	// tenant cannot open unbounded streams (each holds broker state and, for
+	// non-admins, re-queries owned VMIDs every few seconds).
+	sseConns := newConnLimiter(maxSSEPerUser)
 	return func(w http.ResponseWriter, r *http.Request) {
 		fl, ok := w.(http.Flusher)
 		if !ok {
@@ -49,6 +97,13 @@ func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc
 		tenantID := ""
 		if id != nil {
 			tenantID = id.ActiveTenantID
+		}
+		if id != nil && id.UserID != "" {
+			if !sseConns.acquire(id.UserID) {
+				http.Error(w, "too many concurrent event streams", http.StatusTooManyRequests)
+				return
+			}
+			defer sseConns.release(id.UserID)
 		}
 
 		// Per-connection owned-VMID set (nil for admin — admin bypasses).
@@ -72,8 +127,24 @@ func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc
 		w.Header().Set("Cache-Control", "no-cache, no-transform")
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "retry: 5000\n\n")
-		fl.Flush()
+
+		// Per-write deadline via the ResponseController (the route is exempt
+		// from the global request timeout and the server sets no WriteTimeout).
+		// SetWriteDeadline errors (http.ErrNotSupported through a non-Unwrap
+		// wrapper, or a test recorder) are deliberately ignored — the deadline
+		// is a hardening layer; the write error below is the functional signal.
+		rc := http.NewResponseController(w)
+		write := func(frame string) bool {
+			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+			if _, err := io.WriteString(w, frame); err != nil {
+				return false // dead/stalled client — drop the connection
+			}
+			fl.Flush()
+			return true
+		}
+		if !write("retry: 5000\n\n") {
+			return
+		}
 
 		ch, cancel := b.Subscribe()
 		defer cancel()
@@ -90,8 +161,9 @@ func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc
 			case <-refreshTick.C:
 				refresh()
 			case <-hb.C:
-				fmt.Fprint(w, ": ping\n\n")
-				fl.Flush()
+				if !write(": ping\n\n") {
+					return
+				}
 			case e, open := <-ch:
 				if !open {
 					return
@@ -104,8 +176,9 @@ func Handler(b *Broker, log *slog.Logger, owned OwnedVMIDsFunc) http.HandlerFunc
 					log.Error("sse marshal", "event", e.Name, "err", err)
 					continue
 				}
-				fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.Name, payload)
-				fl.Flush()
+				if !write(fmt.Sprintf("event: %s\ndata: %s\n\n", e.Name, payload)) {
+					return
+				}
 			}
 		}
 	}

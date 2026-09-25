@@ -12,27 +12,45 @@
 staging.proxcloud.lab {
 	tls internal
 
-	@api path /api/*
+	# `/api` itself must match too, or it falls through to the frontend route.
+	@api path /api /api/*
 	handle @api {
 		reverse_proxy proxcloud-staging-backend:8080 {
 			flush_interval -1
+			# ADR-0034: ALWAYS overwrite X-Real-IP with the resolved client IP.
+			# This default site fronts clients directly, so {client_ip} is the
+			# TCP peer — still the correct value, and the overwrite guarantees a
+			# client-supplied X-Real-IP can never reach the backend (which reads
+			# client IPs only from this header, and only from its trusted proxy).
+			header_up X-Real-IP {client_ip}
 			transport http {
 				versions 1.1
 			}
 		}
 	}
 	handle {
-		reverse_proxy proxcloud-staging-frontend:3000
+		reverse_proxy proxcloud-staging-frontend:3000 {
+			# Overwrite X-Real-IP here too, so nothing the frontend might forward
+			# can carry a client-supplied value.
+			header_up X-Real-IP {client_ip}
+		}
 	}
 }
 
 # ── Alt: plain HTTP behind cloudflared (TLS at Cloudflare) ──
 # :80 {
-# 	@api path /api/*
+# 	@api path /api /api/*
 # 	handle @api { reverse_proxy proxcloud-staging-backend:8080 { flush_interval -1
+# 		header_up X-Real-IP {client_ip}
 # 		transport http { versions 1.1 } } }
-# 	handle { reverse_proxy proxcloud-staging-frontend:3000 }
+# 	handle { reverse_proxy proxcloud-staging-frontend:3000 { header_up X-Real-IP {client_ip} } }
 # }
+# Behind a tunnel, every client arrives from ONE peer, so first port prod's
+# whole trust chain (ADR-0034): pinned edge network, Caddy's pinned address in
+# TRUSTED_PROXY_CIDRS, loopback-only publish, and a global servers {
+# trusted_proxies ... client_ip_headers CF-Connecting-IP } block for the
+# tunnel's source — see prod/caddy/Caddyfile. Without it all clients share one
+# rate-limit bucket (5 logins/min for everyone).
 
 # ── Alt: public domain, Caddy ACME ──
 # staging.proxcloud.example.com { ... same handle blocks ... }

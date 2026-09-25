@@ -8,17 +8,25 @@ services:
     image: caddy:2-alpine
     container_name: proxcloud-caddy
     restart: unless-stopped
+    # No raw sockets: it could otherwise ARP-spoof on proxcloud-edge (ADR-0034).
+    cap_drop: [NET_RAW]
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"   # HTTP/3
+      # Tunnel-only (ADR-0034): cloudflared runs on this host and connects to
+      # 127.0.0.1:80, so nothing else — including the LAN — can reach the
+      # origin. TLS terminates at Cloudflare (Caddyfile Mode A). Modes B/C
+      # (LAN internal CA / public ACME) serve directly and must publish
+      # 443 + 443/udp again, and review the trust notes in the Caddyfile.
+      - "127.0.0.1:80:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./upstream:/etc/caddy/upstream:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
-      - edge
+      edge:
+        # Pinned (ensure-networks.sh): the backend trusts X-Real-IP from this
+        # address only — .env TRUSTED_PROXY_CIDRS=10.254.254.10/32.
+        ipv4_address: 10.254.254.10
 
 volumes:
   caddy-data:

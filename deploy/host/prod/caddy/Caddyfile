@@ -17,9 +17,30 @@
 {
 	admin localhost:2019
 	# email you@example.com          # required for Mode C (ACME) only
+
+	# ── Client-IP trust chain (ADR-0034) ────────────────────────────────────
+	# cloudflared runs as a service on this host and connects to the published
+	# 127.0.0.1:80. Docker relays that connection into this container from the
+	# proxcloud-edge GATEWAY, so every tunneled request arrives from
+	# 10.254.254.1 (pinned by bin/ensure-networks.sh) — never from loopback.
+	# Caddy derives the real client IP from Cloudflare's CF-Connecting-IP for
+	# that source only; since the port is bound to loopback, only processes on
+	# this host can connect from it. {client_ip} is what upstream/*.caddy
+	# writes into X-Real-IP, and the backend reads X-Real-IP only from Caddy's
+	# own pinned address (TRUSTED_PROXY_CIDRS=10.254.254.10/32).
+	# If trusted_proxies and the real source ever disagree, {client_ip} falls
+	# back to the TCP peer — every user then shares one bucket, but nothing
+	# becomes spoofable.
+	# (A containerized cloudflared would instead need its own pinned address on
+	# proxcloud-edge, trusted here as a /32.)
+	servers {
+		trusted_proxies static 10.254.254.1/32
+		client_ip_headers CF-Connecting-IP
+	}
 }
 
 # ── Mode A (DEFAULT): plain HTTP behind cloudflared; Cloudflare terminates TLS ─
+# The compose file publishes this listener on 127.0.0.1 only (tunnel-only).
 :80 {
 	import /etc/caddy/upstream/active.caddy
 }

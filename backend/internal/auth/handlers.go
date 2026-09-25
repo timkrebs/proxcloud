@@ -22,6 +22,10 @@ import (
 // change-password). Aligns with ADR-0006's move to real user credentials.
 const minPasswordLen = 12
 
+// maxPasswordBytes caps a user-chosen password so Argon2id never hashes an
+// attacker-sized input (CPU/RAM DoS). 1 KiB is far above any real passphrase.
+const maxPasswordBytes = 1024
+
 // defaultLoginChallengeTTL is the fallback interim-challenge lifetime when
 // Handler.LoginChallengeTTL is unset (tests and defensive; main.go always injects
 // cfg.LoginChallengeTTL, default 5m). Mirrors handlers' defaultInvitationTTL.
@@ -179,17 +183,44 @@ func (h *Handler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 // DB session. Unknown-email and bad-password return the same 401, and both run
 // a hash so timing does not reveal which emails exist.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit BEFORE decoding the body: the limiter must gate work (esp.
+	// Argon2id hashing) an attacker can drive, and the body is already capped by
+	// the server's limitBody middleware.
+	ip := clientIP(r)
+	if h.Limiter != nil && !h.Limiter.Allow(ip) {
+		h.logger().Warn("login rate limited", "ip", ip)
+		writeErr(w, rateLimited())
+		return
+	}
+
 	var req types.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, &types.APIError{Code: "invalid_request", Message: "Request body must be JSON with email and password.", Status: http.StatusBadRequest})
 		return
 	}
 
-	ip := clientIP(r)
-	if h.Limiter != nil && !h.Limiter.Allow(ip) {
-		h.logger().Warn("login rate limited", "ip", ip)
-		writeErr(w, rateLimited())
+	// Reject oversize emails BEFORE the account-keyed limiter (or any hashing)
+	// sees them: no real address exceeds RFC 5321's 254 bytes, and the limiter
+	// maps must never be fed attacker-sized identifiers.
+	if len(req.Email) > maxEmailBytes {
+		writeErr(w, &types.APIError{Code: "invalid_request", Message: "A valid email is required.", Status: http.StatusBadRequest})
 		return
+	}
+
+	// Per-account lockout (IP-independent): an account under active brute force
+	// is locked regardless of the source IP each attempt arrives from, so a
+	// distributed attack rotating IPs cannot grind a single account. It keys on
+	// the email alone, so it treats unknown emails exactly like real ones.
+	if h.Limiter != nil {
+		if allowed, saturated := h.Limiter.AllowAccount(req.Email); !allowed {
+			if saturated {
+				h.logger().Error("login refused: account lockout tracker saturated", "ip", ip)
+			} else {
+				h.logger().Warn("login blocked: account locked out", "ip", ip)
+			}
+			writeErr(w, rateLimited())
+			return
+		}
 	}
 
 	ctx := r.Context()
@@ -210,9 +241,17 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !ok || user == nil || user.Disabled {
+		if h.Limiter != nil {
+			h.Limiter.RecordFailure(req.Email)
+		}
 		h.logger().Warn("login failed", "ip", ip)
 		writeErr(w, unauthenticated())
 		return
+	}
+	// Password verified → clear any accumulated per-account failures (both the
+	// TOTP-required and session-issued paths below count as a correct password).
+	if h.Limiter != nil {
+		h.Limiter.ResetAccount(req.Email)
 	}
 
 	if needsRehash {
@@ -581,6 +620,14 @@ func validatePasswordStrength(pw string) *types.APIError {
 		return &types.APIError{
 			Code:    "invalid_request",
 			Message: "Password must be at least 12 characters.",
+			Status:  http.StatusBadRequest,
+		}
+	}
+	// Cap the length: Argon2id over a multi-megabyte password is a CPU/RAM DoS.
+	if len(pw) > maxPasswordBytes {
+		return &types.APIError{
+			Code:    "invalid_request",
+			Message: "Password must be at most 1024 bytes.",
 			Status:  http.StatusBadRequest,
 		}
 	}

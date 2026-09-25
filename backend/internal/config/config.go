@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -129,9 +130,26 @@ type Config struct {
 	// external TLS and overwrites X-Forwarded-Proto (a client value cannot leak
 	// through), so the backend sees a plain-HTTP hop yet must set Secure when the
 	// external connection is HTTPS (prod Mode A: Caddy :80 behind a Cloudflare
-	// Tunnel). Defaults on in production, off in dev/direct. Same trust the
-	// RealIP middleware already places in the proxy's X-Forwarded-For.
+	// Tunnel). Defaults on in production, off in dev/direct. Honored only from
+	// a TrustedProxies peer, like the client IP.
 	TrustProxyHeaders bool
+
+	// TrustedProxies are the CIDRs whose forwarded headers the backend trusts:
+	// X-Real-IP for the client IP (rate-limit/audit keys; X-Forwarded-For is
+	// never read) and X-Forwarded-Proto for the cookie Secure decision. A
+	// request from ANY other peer has them stripped at the edge, so a client
+	// reaching the origin directly cannot spoof them. Set TRUSTED_PROXY_CIDRS to
+	// Caddy's own address (prod: 10.254.254.10/32, ADR-0034); the default
+	// (loopback) fails safe — a mis-set list makes the per-IP limiter
+	// over-count (all traffic as the proxy), never under-count, and the
+	// per-account lockout is IP-independent regardless.
+	TrustedProxies []*net.IPNet
+
+	// AllowedHosts, when non-empty, is the allowlist of Host headers the backend
+	// serves (the public portal hosts + internal service names). A request with
+	// any other Host is rejected 421 (DNS-rebinding / host-injection defense).
+	// Empty disables the check (dev/back-compat); set ALLOWED_HOSTS in production.
+	AllowedHosts []string
 
 	ListenAddr string
 	Dev        bool
@@ -182,6 +200,8 @@ func Load() (*Config, error) {
 	}
 
 	var problems []string
+	cfg.TrustedProxies = parseCIDRList("TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128", &problems)
+	cfg.AllowedHosts = splitCSV(os.Getenv("ALLOWED_HOSTS"))
 	if cfg.ProxmoxURL == "" {
 		problems = append(problems, "PROXMOX_URL is required")
 	} else if u, err := url.Parse(cfg.ProxmoxURL); err != nil || u.Scheme == "" || u.Host == "" {
@@ -350,4 +370,39 @@ func parseDuration(key string, def time.Duration, problems *[]string) time.Durat
 		return def
 	}
 	return d
+}
+
+// splitCSV splits a comma-separated env value into trimmed, non-empty entries.
+func splitCSV(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// parseCIDRList parses a comma-separated list of CIDRs (e.g.
+// "127.0.0.0/8,172.18.0.0/16"), falling back to def, and appends a problem on a
+// malformed entry rather than aborting.
+func parseCIDRList(key, def string, problems *[]string) []*net.IPNet {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		v = def
+	}
+	var out []*net.IPNet
+	for _, part := range strings.Split(v, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			*problems = append(*problems, key+" has an invalid CIDR: "+part)
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
