@@ -35,3 +35,7 @@ frontend/coverage/
 .DS_Store
 *.log
 .claude/
+
+# Prod edge: the live-color symlink is state on the guest (bootstrap.sh
+# points it at state/live-color) and must never be provisioned over it.
+deploy/host/prod/caddy/upstream/active.caddy

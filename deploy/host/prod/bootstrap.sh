@@ -4,7 +4,7 @@
 #   - the two EXTERNAL docker networks (proxcloud-edge, proxcloud-data-net),
 #   - the /opt/proxcloud/{state,data/snapshots,data/tls,caddy/upstream} tree,
 #   - the Postgres TLS cert (self-signed; sslmode=require),
-#   - the active.caddy symlink -> blue.caddy,
+#   - the active.caddy symlink -> the live color's upstream file,
 #   - the deploy user's forced-command authorized_keys (from ci-deploy-key.pub),
 #   - hardened ownership (bin/ root-owned, state/data/caddy deploy-owned).
 # It does NOT bring any stack up — that needs the manually-placed .env
@@ -20,10 +20,10 @@ fi
 
 # 1. external docker networks (colors + caddy + postgres attach by name), with
 #    proxcloud-edge on its pinned addressing. An existing edge network with
-#    other addressing needs a one-time migration: finish every other step, then
-#    fail loudly at the end so the provisioning run shows it.
-network_migration_pending=0
-bash "$ROOT/bin/ensure-networks.sh" || network_migration_pending=1
+#    other addressing (exit 3) needs a one-time migration: finish every other
+#    step, then fail loudly at the end so the provisioning run shows it.
+networks_status=0
+bash "$ROOT/bin/ensure-networks.sh" || networks_status=$?
 
 # 2. directory tree
 mkdir -p "$ROOT/state" "$ROOT/data/snapshots" "$ROOT/data/tls" "$ROOT/caddy/upstream"
@@ -31,8 +31,22 @@ mkdir -p "$ROOT/state" "$ROOT/data/snapshots" "$ROOT/data/tls" "$ROOT/caddy/upst
 # 3. seed live-color if absent (EMPTY => the first deploy targets blue)
 [ -f "$ROOT/state/live-color" ] || : >"$ROOT/state/live-color"
 
-# 4. active.caddy symlink -> blue.caddy (relative, idempotent)
-ln -sfn blue.caddy "$ROOT/caddy/upstream/active.caddy"
+# 4. active.caddy -> the LIVE color's upstream file (relative symlink). The
+#    link is never provisioned (gitignored) and a re-run must never re-point a
+#    live edge: it follows state/live-color, and only a fresh guest (empty
+#    live-color, no link yet) gets blue.
+link="$ROOT/caddy/upstream/active.caddy"
+live="$(tr -d '[:space:]' <"$ROOT/state/live-color")"
+case "$live" in
+  blue | green)
+    if [ "$(readlink "$link" 2>/dev/null || true)" != "$live.caddy" ]; then
+      ln -sfn "$live.caddy" "$link"
+      echo "bootstrap: caddy/upstream/active.caddy -> $live.caddy (the live color)"
+    fi
+    ;;
+  "") [ -L "$link" ] || ln -s blue.caddy "$link" ;;
+  *) echo "bootstrap: WARNING state/live-color is '$live' — caddy/upstream/active.caddy left as is" >&2 ;;
+esac
 
 # 5. deploy user's forced-command authorized_keys (public keys => safe to handle)
 #    Two DISTINCT keys, two DISTINCT forced commands (ADR-0014 §5/§7):
@@ -80,8 +94,15 @@ fi
 # 7. Postgres TLS cert LAST so its 70:70 ownership is not clobbered by the chowns
 "$ROOT/bin/gen-postgres-cert.sh" "$ROOT/data/tls"
 
-if [ "$network_migration_pending" -ne 0 ]; then
-  echo "prod bootstrap: complete EXCEPT the edge network — migrate it (docs/runbooks/prod-edge-network-migration.md); deploys refuse until then" >&2
-  exit 3
-fi
+case "$networks_status" in
+  0) ;;
+  3)
+    echo "prod bootstrap: complete EXCEPT the edge network — migrate it (bin/migrate-edge-network.sh, docs/runbooks/prod-edge-network-migration.md); deploys refuse until then" >&2
+    exit 3
+    ;;
+  *)
+    echo "prod bootstrap: complete EXCEPT the docker networks — ensure-networks.sh failed (exit $networks_status, see above)" >&2
+    exit "$networks_status"
+    ;;
+esac
 echo "prod bootstrap: complete"

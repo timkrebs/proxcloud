@@ -41,7 +41,7 @@ if ! printf '%s\n' "$have" | grep -qxF "$want"; then
     printf 'ensure-networks: it must be subnet %s, ip-range %s, gateway %s.\n' \
       "$EDGE_SUBNET" "$EDGE_IP_RANGE" "$EDGE_GATEWAY"
     printf 'ensure-networks: one-time migration required — nothing was changed.\n'
-    printf 'ensure-networks: follow docs/runbooks/prod-edge-network-migration.md\n'
+    printf 'ensure-networks: run bin/migrate-edge-network.sh per docs/runbooks/prod-edge-network-migration.md\n'
   } >&2
   exit 3
 fi

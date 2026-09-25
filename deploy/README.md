@@ -70,9 +70,13 @@ Notes:
    key-only `deploy` user (docker group), `jq`, `openssl`, unattended-upgrades.
 3. Provisioner copies `common/` + `<env>/` to `/opt/proxcloud/` and the CI deploy
    **public** key to `/opt/proxcloud/ci-deploy-key.pub`.
-4. `bootstrap.sh` creates the external docker networks + dirs + Postgres TLS cert
-   + the `active.caddy` symlink + the **forced-command authorized_keys** for the
-   deploy user, and hardens ownership.
+4. `bootstrap.sh` creates the external docker networks, the dirs, the Postgres
+   TLS cert, the `active.caddy` symlink and the **forced-command
+   authorized_keys** for the deploy user, and hardens ownership. The symlink is
+   guest state, never
+   provisioned (it is gitignored): bootstrap points it at `state/live-color`,
+   and only a fresh guest gets `blue.caddy`, so re-provisioning never changes
+   the live color.
 
 ---
 
@@ -122,7 +126,8 @@ gateway, which is the one source Caddy takes `CF-Connecting-IP` from; the
 backend in turn reads `X-Real-IP` only from Caddy's address
 (`TRUSTED_PROXY_CIDRS=10.254.254.10/32`). If the existing network has other
 addressing, `ensure-networks.sh` refuses and every deploy stops before touching a
-container — see `docs/runbooks/prod-edge-network-migration.md`.
+container; `bin/migrate-edge-network.sh` performs the one-time move — see
+`docs/runbooks/prod-edge-network-migration.md`.
 
 Caddy resolves color containers by name (`proxcloud-blue-backend:8080`,
 `proxcloud-green-frontend:3000`). Each color also publishes **loopback-only**

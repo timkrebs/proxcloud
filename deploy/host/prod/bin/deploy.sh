@@ -62,8 +62,13 @@ ensure_infra() {
   # Refuse BEFORE any container is touched if the edge network still needs its
   # one-time migration: Caddy's compose pins an address on it, and bringing
   # Caddy up against the old network would take the edge down mid-deploy.
-  bash "$ROOT/bin/ensure-networks.sh" \
-    || die "edge network needs its one-time migration (docs/runbooks/prod-edge-network-migration.md) — nothing was changed"
+  local rc=0
+  bash "$ROOT/bin/ensure-networks.sh" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) die "edge network needs its one-time migration (bin/migrate-edge-network.sh, docs/runbooks/prod-edge-network-migration.md) — nothing was changed" ;;
+    *) die "ensure-networks.sh failed (exit $rc) — nothing was changed" ;;
+  esac
   compose_data  up -d
   compose_caddy up -d
 }
