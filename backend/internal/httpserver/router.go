@@ -86,7 +86,7 @@ func New(d Deps) http.Handler {
 	r.Use(accessLog(d.Log))
 	r.Use(hostAllowlist(d.Cfg))
 	// Global per-client request throttle. A session that Authenticate has
-	// accepted draws from its own bucket (see markValidSession below); every
+	// accepted draws from its user's bucket (see withSessionMarks below); every
 	// other request draws from its client IP's bucket — so neither an
 	// unauthenticated flood sharing the tunnel/proxy IP nor made-up cookie values
 	// can starve signed-in users (ADR-0034). Only the on-box probes (/api/health,
@@ -136,10 +136,9 @@ func New(d Deps) http.Handler {
 		// platform-admin surface (/admin), and the tenant-scoped surface
 		// (/tenants/{tenantId}) behind the authz chain.
 		r.Group(func(r chi.Router) {
-			r.Use(d.Auth.Authenticate)
-			// Only now is the session cookie proven live: from here on it earns
-			// its own rate-limit bucket. Must stay directly after Authenticate.
-			r.Use(apiLimiter.markValidSession)
+			// Authenticate's verdict also (un)marks the session cookie for the
+			// global limiter: accepted cookies draw from their user's bucket.
+			r.Use(apiLimiter.withSessionMarks(d.Auth.Authenticate))
 
 			// --- flat account + stream surface ---
 			r.Post("/auth/logout", d.Auth.Logout)

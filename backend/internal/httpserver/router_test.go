@@ -342,13 +342,13 @@ func TestForwardedIPValidation(t *testing.T) {
 // TestRateLimitSessionAndIPBuckets is the ADR-0034 keying regression: in the
 // tunneled topology every user can share the proxy's peer IP, so an
 // unauthenticated flood must land in the IP bucket while VALIDATED sessions
-// ride their own buckets — the flood cannot 429 signed-in users. A cookie the
-// server never validated is just an anonymous request and shares the IP
+// ride their users' buckets — the flood cannot 429 signed-in users. A cookie
+// the server never validated is just an anonymous request and shares the IP
 // bucket. The exempt probe path never counts.
 func TestRateLimitSessionAndIPBuckets(t *testing.T) {
 	limiter := newAPIRateLimiter(3, time.Minute)
-	for _, s := range []string{"session-token-alice", "session-token-bob"} {
-		limiter.rememberSession(maphash.String(limiter.seed, s)) // as markValidSession does after Authenticate
+	for _, s := range []struct{ cookie, user string }{{"session-token-alice", "alice"}, {"session-token-bob", "bob"}} {
+		limiter.rememberSession(maphash.String(limiter.seed, s.cookie), s.user) // as markValidSession does after Authenticate
 	}
 	h := rateLimit(limiter, "/api/health")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -377,15 +377,15 @@ func TestRateLimitSessionAndIPBuckets(t *testing.T) {
 	if code := send("/api/x", "never-validated"); code != http.StatusTooManyRequests {
 		t.Fatalf("unvalidated cookie during unauth flood = %d, want 429 (shares the IP bucket)", code)
 	}
-	// …but a validated session from the SAME IP has its own bucket.
+	// …but a validated session from the SAME IP draws from its user's bucket.
 	if code := send("/api/x", "session-token-alice"); code != http.StatusOK {
-		t.Fatalf("validated session during unauth flood = %d, want 200 (own bucket)", code)
+		t.Fatalf("validated session during unauth flood = %d, want 200 (user bucket)", code)
 	}
-	// A different session is a different bucket too.
+	// Another user's session is a different bucket too.
 	if code := send("/api/x", "session-token-bob"); code != http.StatusOK {
-		t.Fatalf("second session during flood = %d, want 200", code)
+		t.Fatalf("second user's session during flood = %d, want 200", code)
 	}
-	// One session exhausting ITS bucket does not spill onto another.
+	// One user exhausting THEIR bucket does not spill onto another.
 	for i := 0; i < 2; i++ {
 		send("/api/x", "session-token-alice")
 	}

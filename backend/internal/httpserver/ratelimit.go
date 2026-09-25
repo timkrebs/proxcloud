@@ -4,7 +4,6 @@ import (
 	"hash/maphash"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,23 +28,30 @@ const (
 	// limiterPruneEvery is the minimum gap between full-map prunes of expired
 	// buckets, so a key flood can never force a scan per request.
 	limiterPruneEvery = 10 * time.Second
+	// sessionMarkTTL bounds how long a cookie keeps drawing from its user's
+	// bucket after Authenticate last accepted it. The UI polls every few
+	// seconds, so open tabs never lapse; a cookie revoked where the limiter
+	// cannot see it stops spending its user's budget within this window even
+	// if it is only ever sent to public routes.
+	sessionMarkTTL = 15 * time.Minute
 )
 
 // apiRateLimiter is a per-key fixed-window request limiter, safe for concurrent
 // use. Every operation is O(1) except a prune of expired buckets, which runs
 // at most once per limiterPruneEvery and only when the map is full.
 //
-// Keying (ADR-0034): a request whose session cookie Authenticate has already
-// accepted draws from that session's own bucket; every other request —
-// cookie-less, or carrying a cookie the server has never validated — draws
-// from its client IP's bucket (IPv6 by /64). A made-up cookie value therefore
-// buys nothing: it shares its IP's budget like any anonymous request. The
-// session split still matters in the tunneled topology, where signed-in users
-// can share one upstream IP with unauthenticated traffic.
+// Keying (ADR-0034): a request whose session cookie Authenticate has recently
+// accepted draws from its USER's bucket — every session of one account shares
+// it, so minting more sessions buys no more budget; every other request —
+// cookie-less, or carrying a cookie the server has not validated — draws from
+// its client IP's bucket (IPv6 by /64). A made-up cookie value therefore buys
+// nothing: it shares its IP's budget like any anonymous request. The split
+// still matters where signed-in users share one client IP (a NAT) with
+// unauthenticated traffic.
 type apiRateLimiter struct {
 	mu        sync.Mutex
 	buckets   map[string]*rlBucket
-	sessions  map[uint64]struct{} // hashes of cookies Authenticate accepted
+	sessions  map[uint64]sessionMark // keyed by the hash of a cookie Authenticate accepted
 	limit     int
 	window    time.Duration
 	now       func() time.Time
@@ -60,10 +66,17 @@ type rlBucket struct {
 	count int
 }
 
+// sessionMark is what the limiter knows about a validated session cookie:
+// whose it is, and when Authenticate last accepted it.
+type sessionMark struct {
+	user string
+	seen int64 // unix nanoseconds
+}
+
 func newAPIRateLimiter(limit int, window time.Duration) *apiRateLimiter {
 	return &apiRateLimiter{
 		buckets:  map[string]*rlBucket{},
-		sessions: map[uint64]struct{}{},
+		sessions: map[uint64]sessionMark{},
 		limit:    limit,
 		window:   window,
 		now:      time.Now,
@@ -73,16 +86,22 @@ func newAPIRateLimiter(limit int, window time.Duration) *apiRateLimiter {
 	}
 }
 
-// keyFor derives the limiter key for one request: "s:<hash>" for a session
-// cookie Authenticate has accepted, else "ip:<client ip or /64>".
+// keyFor derives the limiter key for one request: "u:<user id>" for a session
+// cookie Authenticate accepted within sessionMarkTTL, else "ip:<client ip or
+// /64>".
 func (a *apiRateLimiter) keyFor(r *http.Request) string {
 	if c, err := r.Cookie(auth.CookieName); err == nil && c.Value != "" {
 		h := maphash.String(a.seed, c.Value)
+		now := a.now().UnixNano()
 		a.mu.Lock()
-		_, validated := a.sessions[h]
+		m, marked := a.sessions[h]
+		if marked && now-m.seen >= sessionMarkTTL.Nanoseconds() {
+			delete(a.sessions, h)
+			marked = false
+		}
 		a.mu.Unlock()
-		if validated {
-			return "s:" + strconv.FormatUint(h, 16)
+		if marked {
+			return "u:" + m.user
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -142,37 +161,62 @@ func (a *apiRateLimiter) makeRoomLocked(now int64) {
 	}
 }
 
-// rememberSession records a session-cookie hash that Authenticate accepted.
-// The set is bounded; when full, an arbitrary entry is dropped (O(1)) — that
-// session merely shares its IP's bucket until its next authenticated request.
-func (a *apiRateLimiter) rememberSession(h uint64) {
+// rememberSession records that the session-cookie hash h, just accepted by
+// Authenticate, belongs to userID. The set is bounded; when full, an arbitrary
+// entry is dropped (O(1)) — that session merely shares its IP's bucket until
+// its next authenticated request re-records it.
+func (a *apiRateLimiter) rememberSession(h uint64, userID string) {
+	now := a.now().UnixNano()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.sessions[h]; ok {
-		return
-	}
-	for k := range a.sessions {
-		if len(a.sessions) < maxValidatedSessions {
-			break
+	if _, ok := a.sessions[h]; !ok {
+		for k := range a.sessions {
+			if len(a.sessions) < maxValidatedSessions {
+				break
+			}
+			delete(a.sessions, k)
 		}
-		delete(a.sessions, k)
 	}
-	a.sessions[h] = struct{}{}
+	a.sessions[h] = sessionMark{user: userID, seen: now}
 }
 
-// markValidSession must be mounted directly AFTER auth.Authenticate, which
-// rejects any request without a valid session: reaching it proves the cookie
-// is a live session, so only then does the cookie earn its own bucket. Both
-// read the first proxcloud_session cookie, so a request carrying two cannot
-// validate one and mark the other. A session's first request after sign-in
-// still counts against its IP's bucket.
-func (a *apiRateLimiter) markValidSession(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c, err := r.Cookie(auth.CookieName); err == nil && c.Value != "" {
-			a.rememberSession(maphash.String(a.seed, c.Value))
-		}
-		next.ServeHTTP(w, r)
-	})
+func (a *apiRateLimiter) forgetSession(h uint64) {
+	a.mu.Lock()
+	delete(a.sessions, h)
+	a.mu.Unlock()
+}
+
+// withSessionMarks wraps auth.Authenticate so the limiter learns from its
+// verdict: a cookie it accepts is marked as the context identity's session and
+// draws from that user's bucket from then on; a cookie it turns away —
+// revoked, expired, never valid — loses any mark at once. Wrapping, rather
+// than a separate middleware mounted after Authenticate, means the two can
+// never be reordered. Both read the first proxcloud_session cookie, so a
+// request carrying two cannot validate one and mark the other. A session's
+// first request after sign-in still counts against its IP's bucket.
+func (a *apiRateLimiter) withSessionMarks(authenticate func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		plain := authenticate(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c, err := r.Cookie(auth.CookieName)
+			if err != nil || c.Value == "" {
+				plain.ServeHTTP(w, r)
+				return
+			}
+			h := maphash.String(a.seed, c.Value)
+			accepted := false
+			authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				accepted = true
+				if id, ok := auth.IdentityFrom(r.Context()); ok && id != nil && id.UserID != "" {
+					a.rememberSession(h, id.UserID)
+				}
+				next.ServeHTTP(w, r)
+			})).ServeHTTP(w, r)
+			if !accepted {
+				a.forgetSession(h)
+			}
+		})
+	}
 }
 
 // rateLimit is the global throttle middleware. Only the exempt paths (on-box
