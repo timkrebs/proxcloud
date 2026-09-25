@@ -17,8 +17,8 @@ loudly and **keeps serving** — catalog provisioning returns `503`, everything 
 
 | Thing | Value |
 |---|---|
-| QA guest (LXC) | `192.168.1.22`, deploy root `/opt/proxcloud` |
-| Proxmox node | `pve01`, SSH host `192.168.1.128` |
+| QA guest (LXC) | `192.168.2.22`, deploy root `/opt/proxcloud` |
+| Proxmox node | `pve01`, SSH host `192.168.2.128` |
 | QA API token | `proxcloud-qa@pve!cd`, role `Proxcloud`, granted at `/`, `--privsep 0` |
 | Backend container UID | **65532** (distroless `nonroot`, `backend/Dockerfile`) |
 | Snippet datastore | `local` → node path `/var/lib/vz/snippets` |
@@ -129,7 +129,7 @@ exactly one host.
 ```bash
 # [pve01] as root — replace <PUBKEY> with the line printed in Step 3
 install -d -m 700 -o proxcloud-snippets -g proxcloud-snippets /home/proxcloud-snippets/.ssh
-printf 'from="192.168.1.22",restrict %s\n' '<PUBKEY>' \
+printf 'from="192.168.2.22",restrict %s\n' '<PUBKEY>' \
   >> /home/proxcloud-snippets/.ssh/authorized_keys
 chown proxcloud-snippets:proxcloud-snippets /home/proxcloud-snippets/.ssh/authorized_keys
 chmod 600 /home/proxcloud-snippets/.ssh/authorized_keys
@@ -143,7 +143,7 @@ fallback — ADR-0025). Pin pve01's host key into `known_hosts`; do **not** skip
 ```bash
 # [qa-guest] as root — pin pve01's ed25519 host key (verify the fingerprint out of
 # band against `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on pve01):
-ssh-keyscan -t ed25519 192.168.1.128 > /opt/proxcloud/snippet-writer/known_hosts
+ssh-keyscan -t ed25519 192.168.2.128 > /opt/proxcloud/snippet-writer/known_hosts
 ```
 
 Now set ownership so the **distroless backend (UID 65532)** can read the key. This
@@ -197,7 +197,7 @@ to the mount, and set the flags **on**:
 ```ini
 CATALOG_ENABLED=true
 DEPLOYMENT_SETS_ENABLED=true          # only if you want the K3s cluster action
-PROXMOX_NODE_SSH_HOST=192.168.1.128
+PROXMOX_NODE_SSH_HOST=192.168.2.128
 PROXMOX_NODE_SSH_USER=proxcloud-snippets
 PROXMOX_NODE_SSH_KEY_PATH=/etc/proxcloud/snippet-writer/id_ed25519
 PROXMOX_NODE_KNOWN_HOSTS=/etc/proxcloud/snippet-writer/known_hosts
@@ -225,7 +225,7 @@ Verify, in order:
    ```bash
    docker logs proxcloud-qa-backend 2>&1 | grep -i 'service catalog'
    ```
-   Expect: `service catalog enabled  services=<N> snippet_datastore=local ssh_host=192.168.1.128`.
+   Expect: `service catalog enabled  services=<N> snippet_datastore=local ssh_host=192.168.2.128`.
    If instead you see `catalog provisioning disabled — the snippet writer could
    not be initialized`, the key is unreadable/missing or `known_hosts` is bad —
    re-check Step 5 (ownership 65532, mode 400) and Step 3 (key present). The
