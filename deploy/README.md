@@ -104,6 +104,19 @@ self-signed server cert (owned `70:70`, mode `600`); the app uses
 `sslmode=require` (encrypt, no CA verify). To opt out on an isolated network,
 unset `PROXCLOUD_ENV` (Dev DB rule) — but staging then no longer mirrors prod.
 
+### Trusted proxy and Host allowlist (ADR-0034)
+
+`TRUSTED_PROXY_CIDRS` names the proxy whose `X-Real-IP` the backend believes;
+`ALLOWED_HOSTS` lists the Host headers it serves (empty disables the check).
+Set `TRUSTED_PROXY_CIDRS` only once the guest runs a Caddy config that
+overwrites `X-Real-IP` — every `caddy/` file in this tree does, but older ones
+pass a client's value through. Until then leave it unset: the backend fails
+safe, with every client sharing the proxy's rate-limit bucket, instead of
+trusting a header clients can set. Prod pins Caddy at `10.254.254.10/32` through
+the one-time edge migration (`docs/runbooks/prod-edge-network-migration.md`);
+QA and staging trust their whole edge subnet (see their `env.example`, and
+register R13 before publishing either through a tunnel).
+
 ---
 
 ## 3. Networks & loopback port map
