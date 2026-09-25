@@ -18,7 +18,7 @@ staging.proxcloud.lab {
 		reverse_proxy proxcloud-staging-backend:8080 {
 			flush_interval -1
 			# ADR-0034: ALWAYS overwrite X-Real-IP with the resolved client IP.
-			# Staging fronts clients DIRECTLY (no tunnel), so {client_ip} is the
+			# This default site fronts clients directly, so {client_ip} is the
 			# TCP peer — still the correct value, and the overwrite guarantees a
 			# client-supplied X-Real-IP can never reach the backend (which reads
 			# client IPs only from this header, and only from its trusted proxy).
@@ -45,8 +45,12 @@ staging.proxcloud.lab {
 # 		transport http { versions 1.1 } } }
 # 	handle { reverse_proxy proxcloud-staging-frontend:3000 { header_up X-Real-IP {client_ip} } }
 # }
-# (Behind a tunnel, also add a global servers { trusted_proxies ... client_ip_headers
-# CF-Connecting-IP } block for the tunnel's source — see prod/caddy/Caddyfile.)
+# Behind a tunnel, every client arrives from ONE peer, so first port prod's
+# whole trust chain (ADR-0034): pinned edge network, Caddy's pinned address in
+# TRUSTED_PROXY_CIDRS, loopback-only publish, and a global servers {
+# trusted_proxies ... client_ip_headers CF-Connecting-IP } block for the
+# tunnel's source — see prod/caddy/Caddyfile. Without it all clients share one
+# rate-limit bucket (5 logins/min for everyone).
 
 # ── Alt: public domain, Caddy ACME ──
 # staging.proxcloud.example.com { ... same handle blocks ... }

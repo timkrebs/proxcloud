@@ -45,8 +45,12 @@ qa.proxcloud.lab {
 # 		transport http { versions 1.1 } } }
 # 	handle { reverse_proxy proxcloud-qa-frontend:3000 { header_up X-Real-IP {client_ip} } }
 # }
-# (Behind a tunnel, also add a global servers { trusted_proxies ... client_ip_headers
-# CF-Connecting-IP } block for the tunnel's source — see prod/caddy/Caddyfile.)
+# Behind a tunnel, every client arrives from ONE peer, so first port prod's
+# whole trust chain (ADR-0034): pinned edge network, Caddy's pinned address in
+# TRUSTED_PROXY_CIDRS, loopback-only publish, and a global servers {
+# trusted_proxies ... client_ip_headers CF-Connecting-IP } block for the
+# tunnel's source — see prod/caddy/Caddyfile. Without it all clients share one
+# rate-limit bucket (5 logins/min for everyone).
 
 # ── Alt: public domain, Caddy ACME ──
 # qa.proxcloud.example.com { ... same handle blocks ... }
