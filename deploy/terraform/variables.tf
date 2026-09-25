@@ -89,7 +89,7 @@ variable "domain" {
 
 # Static-IP inputs (only used when ip_mode = "static").
 variable "staging_static_ipv4_cidr" {
-  description = "Static IPv4 CIDR for staging when ip_mode='static' (e.g. 192.168.1.20/24)."
+  description = "Static IPv4 CIDR for staging when ip_mode='static' (e.g. 192.168.2.20/24)."
   type        = string
   default     = null
 }
@@ -99,7 +99,7 @@ variable "staging_gateway" {
   default     = null
 }
 variable "qa_static_ipv4_cidr" {
-  description = "Static IPv4 CIDR for qa when ip_mode='static' (e.g. 192.168.1.22/24)."
+  description = "Static IPv4 CIDR for qa when ip_mode='static' (e.g. 192.168.2.22/24)."
   type        = string
   default     = null
 }
