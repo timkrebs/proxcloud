@@ -423,9 +423,12 @@ func TestReservationNeverLowered(t *testing.T) {
 // TestConfigGrowChargesSockets: quota counts PVE's maxcpu, which for a VM is
 // sockets × cores. On a 2-socket guest, raising cores 2 → 4 adds 4 vCPU; the
 // old code compared the requested cores (4) to maxcpu (4) and charged nothing.
+// The write carries the digest of the config the charge was computed from, so
+// PVE refuses it if the sockets changed in between.
 func TestConfigGrowChargesSockets(t *testing.T) {
 	var writes int32
-	cfg := map[string]any{"sockets": float64(2), "cores": float64(2)}
+	var sentDigest any
+	cfg := map[string]any{"sockets": float64(2), "cores": float64(2), "digest": "5f0d3c1e9a"}
 	mock := &proxmoxtest.MockClient{
 		OnClusterResources: func(context.Context) ([]proxmox.RawResource, error) {
 			return []proxmox.RawResource{
@@ -433,8 +436,9 @@ func TestConfigGrowChargesSockets(t *testing.T) {
 			}, nil
 		},
 		OnGuestConfig: func(context.Context, proxmox.GuestRef) (map[string]any, error) { return cfg, nil },
-		OnSetGuestConfig: func(context.Context, proxmox.GuestRef, map[string]any) (proxmox.UPID, error) {
+		OnSetGuestConfig: func(_ context.Context, _ proxmox.GuestRef, changes map[string]any) (proxmox.UPID, error) {
 			atomic.AddInt32(&writes, 1)
+			sentDigest = changes["digest"]
 			return "UPID:pve01:0:0:0:qmconfig:101:u@pam:", nil
 		},
 	}
@@ -458,6 +462,9 @@ func TestConfigGrowChargesSockets(t *testing.T) {
 	// 2 × 3 = 6 vCPU: exactly at the cap.
 	if rec := hh.req(t, c, http.MethodPatch, path, `{"cores":3}`); rec.Code != http.StatusAccepted {
 		t.Fatalf("cores 2→3 on 2 sockets = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	if sentDigest != "5f0d3c1e9a" {
+		t.Fatalf("config write carried digest %v, want the one read for the charge", sentDigest)
 	}
 	own, err := hh.fake.GetOwnershipByVMID(context.Background(), 101)
 	if err != nil || own.ReservedVCPU == nil || *own.ReservedVCPU != 6 {

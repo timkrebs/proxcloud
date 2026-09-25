@@ -239,6 +239,13 @@ func (d *Deps) UpdateGuestConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			cfg = c
+			// Write only onto the config the charge was computed from: PVE
+			// refuses the change if the config (sockets, say, via a snapshot
+			// rollback) moved since this read, instead of applying the new
+			// cores to more sockets than were charged.
+			if digest, ok := c["digest"].(string); ok && digest != "" {
+				changes["digest"] = digest
+			}
 		}
 		v, err := guestVCPUTarget(ref.Type, cfg, *req.Cores)
 		if err != nil {
