@@ -130,18 +130,19 @@ type Config struct {
 	// external TLS and overwrites X-Forwarded-Proto (a client value cannot leak
 	// through), so the backend sees a plain-HTTP hop yet must set Secure when the
 	// external connection is HTTPS (prod Mode A: Caddy :80 behind a Cloudflare
-	// Tunnel). Defaults on in production, off in dev/direct. Same trust the
-	// RealIP middleware already places in the proxy's X-Forwarded-For.
+	// Tunnel). Defaults on in production, off in dev/direct. Honored only from
+	// a TrustedProxies peer, like the client IP.
 	TrustProxyHeaders bool
 
-	// TrustedProxies are the CIDRs whose X-Forwarded-* headers the backend
-	// trusts (real client IP for rate-limit/audit keys; scheme for the cookie
-	// Secure decision). A request from ANY other peer has those headers stripped
-	// at the edge, so a client reaching the origin directly cannot spoof them.
-	// Set TRUSTED_PROXY_CIDRS to the Caddy / docker-edge-network CIDR in
-	// production; the default (loopback) fails safe — a mis-set list makes the
-	// per-IP limiter over-count (all traffic as the proxy), never under-count,
-	// and the per-account lockout is IP-independent regardless.
+	// TrustedProxies are the CIDRs whose forwarded headers the backend trusts:
+	// X-Real-IP for the client IP (rate-limit/audit keys; X-Forwarded-For is
+	// never read) and X-Forwarded-Proto for the cookie Secure decision. A
+	// request from ANY other peer has them stripped at the edge, so a client
+	// reaching the origin directly cannot spoof them. Set TRUSTED_PROXY_CIDRS to
+	// Caddy's own address (prod: 10.254.254.10/32, ADR-0034); the default
+	// (loopback) fails safe — a mis-set list makes the per-IP limiter
+	// over-count (all traffic as the proxy), never under-count, and the
+	// per-account lockout is IP-independent regardless.
 	TrustedProxies []*net.IPNet
 
 	// AllowedHosts, when non-empty, is the allowlist of Host headers the backend
